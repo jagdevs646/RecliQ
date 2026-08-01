@@ -27,11 +27,20 @@ function Invoke-AzJson([string[]]$Arguments) {
     return ($result | ConvertFrom-Json)
 }
 
-az account set --subscription $SubscriptionId
-if ($LASTEXITCODE -ne 0) { throw "Unable to select Azure subscription $SubscriptionId" }
+function Invoke-Az([string[]]$Arguments) {
+    & az @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "Azure CLI command failed: az $($Arguments -join ' ')" }
+}
 
-az extension add --name containerapp --upgrade --only-show-errors
-az group create --name $ResourceGroup --location $Location --only-show-errors | Out-Null
+Invoke-Az @("account", "set", "--subscription", $SubscriptionId)
+
+Invoke-Az @("extension", "add", "--name", "containerapp", "--upgrade", "--only-show-errors")
+Invoke-Az @("provider", "register", "--namespace", "Microsoft.ContainerRegistry", "--wait", "--only-show-errors")
+Invoke-Az @("provider", "register", "--namespace", "Microsoft.DBforPostgreSQL", "--wait", "--only-show-errors")
+Invoke-Az @("provider", "register", "--namespace", "Microsoft.App", "--wait", "--only-show-errors")
+Invoke-Az @("provider", "register", "--namespace", "Microsoft.OperationalInsights", "--wait", "--only-show-errors")
+Invoke-Az @("provider", "register", "--namespace", "Microsoft.Storage", "--wait", "--only-show-errors")
+Invoke-Az @("group", "create", "--name", $ResourceGroup, "--location", $Location, "--only-show-errors")
 
 $suffix = (Get-Date).ToUniversalTime().ToString("MMddHHmm")
 $acrName = "$NamePrefix$($suffix.ToLower())acr".Replace("-", "")
@@ -43,51 +52,53 @@ $frontendName = "$NamePrefix-frontend".ToLower()
 $databaseAdmin = "recliqadmin"
 $databasePassword = Get-PlainTextSecret "Create the Azure PostgreSQL admin password"
 
-az acr create --resource-group $ResourceGroup --name $acrName --sku Basic --admin-enabled true --location $Location --only-show-errors | Out-Null
-az acr build --registry $acrName --image "$NamePrefix-backend:latest" --file docker/backend.azure.Dockerfile $repoRoot --only-show-errors
+Invoke-Az @("acr", "create", "--resource-group", $ResourceGroup, "--name", $acrName, "--sku", "Basic", "--admin-enabled", "true", "--location", $Location, "--only-show-errors")
+Invoke-Az @("acr", "build", "--registry", $acrName, "--image", "$NamePrefix-backend:latest", "--file", "docker/backend.azure.Dockerfile", $repoRoot, "--only-show-errors")
 
-az postgres flexible-server create `
-    --resource-group $ResourceGroup `
-    --name $postgresName `
-    --location $Location `
-    --admin-user $databaseAdmin `
-    --admin-password $databasePassword `
-    --sku-name Standard_B1ms `
-    --tier Burstable `
-    --storage-size 32 `
-    --version 16 `
-    --public-access 0.0.0.0 `
-    --only-show-errors | Out-Null
+Invoke-Az @(
+    "postgres", "flexible-server", "create",
+    "--resource-group", $ResourceGroup,
+    "--name", $postgresName,
+    "--location", $Location,
+    "--admin-user", $databaseAdmin,
+    "--admin-password", $databasePassword,
+    "--sku-name", "Standard_B1ms",
+    "--tier", "Burstable",
+    "--storage-size", "32",
+    "--version", "16",
+    "--public-access", "0.0.0.0",
+    "--only-show-errors"
+)
 
-az postgres flexible-server db create `
-    --resource-group $ResourceGroup `
-    --server-name $postgresName `
-    --database-name recliq `
-    --only-show-errors | Out-Null
+Invoke-Az @(
+    "postgres", "flexible-server", "db", "create",
+    "--resource-group", $ResourceGroup,
+    "--server-name", $postgresName,
+    "--name", "recliq",
+    "--only-show-errors"
+)
 
-az storage account create `
-    --resource-group $ResourceGroup `
-    --name $storageName `
-    --location $Location `
-    --sku Standard_LRS `
-    --kind StorageV2 `
-    --https-only true `
-    --only-show-errors | Out-Null
+Invoke-Az @(
+    "storage", "account", "create",
+    "--resource-group", $ResourceGroup,
+    "--name", $storageName,
+    "--location", $Location,
+    "--sku", "Standard_LRS",
+    "--kind", "StorageV2",
+    "--https-only", "true",
+    "--only-show-errors"
+)
 
 $storageConnection = (& az storage account show-connection-string --resource-group $ResourceGroup --name $storageName --only-show-errors --query connectionString --output tsv)
 if ($LASTEXITCODE -ne 0) { throw "Unable to obtain the Azure Storage connection string" }
-az storage container create --name recliq --connection-string $storageConnection --only-show-errors | Out-Null
+Invoke-Az @("storage", "container", "create", "--name", "recliq", "--connection-string", $storageConnection, "--only-show-errors")
 
 $acr = Invoke-AzJson @("acr", "show", "--resource-group", $ResourceGroup, "--name", $acrName)
 $acrCredentials = Invoke-AzJson @("acr", "credential", "show", "--resource-group", $ResourceGroup, "--name", $acrName)
 $acrPassword = $acrCredentials.passwords[0].value
 $databaseUrl = "postgresql+psycopg://${databaseAdmin}:$([uri]::EscapeDataString($databasePassword))@$postgresName.postgres.database.azure.com:5432/recliq?sslmode=require"
 
-az containerapp env create `
-    --name $containerEnv `
-    --resource-group $ResourceGroup `
-    --location $Location `
-    --only-show-errors | Out-Null
+Invoke-Az @("containerapp", "env", "create", "--name", $containerEnv, "--resource-group", $ResourceGroup, "--location", $Location, "--only-show-errors")
 
 az containerapp create `
     --name $backendName `
@@ -104,6 +115,7 @@ az containerapp create `
     --secrets "database-url=$databaseUrl" "acr-password=$acrPassword" "storage-connection=$storageConnection" `
     --env-vars "DATABASE_URL=secretref:database-url" "STORAGE_BACKEND=azure" "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection" "AZURE_STORAGE_CONTAINER=recliq" "SESSION_COOKIE_SECURE=true" `
     --only-show-errors | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Unable to create the RecliQ backend Container App" }
 
 $backend = Invoke-AzJson @("containerapp", "show", "--name", $backendName, "--resource-group", $ResourceGroup)
 $backendUrl = "https://$($backend.properties.configuration.ingress.fqdn)"
@@ -115,6 +127,7 @@ az acr build `
     --build-arg "VITE_API_BASE_URL=$backendUrl/api" `
     $repoRoot `
     --only-show-errors
+if ($LASTEXITCODE -ne 0) { throw "Unable to build the RecliQ frontend image" }
 
 az containerapp create `
     --name $frontendName `
@@ -129,6 +142,7 @@ az containerapp create `
     --min-replicas 1 `
     --max-replicas 2 `
     --only-show-errors | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Unable to create the RecliQ frontend Container App" }
 
 $frontend = Invoke-AzJson @("containerapp", "show", "--name", $frontendName, "--resource-group", $ResourceGroup)
 $frontendUrl = "https://$($frontend.properties.configuration.ingress.fqdn)"
@@ -138,6 +152,7 @@ az containerapp update `
     --resource-group $ResourceGroup `
     --set-env-vars "FRONTEND_ORIGIN=$frontendUrl" `
     --only-show-errors | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Unable to configure backend CORS for $frontendUrl" }
 
 Write-Host ""
 Write-Host "RecliQ deployment complete" -ForegroundColor Green
