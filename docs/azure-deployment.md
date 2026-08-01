@@ -1,5 +1,17 @@
 # Azure Deployment
 
+## Container Apps Quick Deployment
+
+From the repository root after installing Azure CLI:
+
+```powershell
+az login
+az account list --output table
+./scripts/deploy-azure.ps1 -SubscriptionId <your-subscription-id>
+```
+
+The script creates an Azure Container Registry, PostgreSQL Flexible Server, Container Apps environment, backend API, and frontend website. It prints the public website URL when finished. The database password is entered interactively and is not stored in the repository.
+
 Recommended Azure services:
 
 - Azure Container Apps or Azure App Service for the backend container.

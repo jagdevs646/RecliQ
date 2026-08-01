@@ -52,4 +52,4 @@ See [docs/api.md](docs/api.md).
 
 ## Azure Deployment
 
-See [docs/azure-deployment.md](docs/azure-deployment.md).
+See [docs/azure-deployment.md](docs/azure-deployment.md). For a new Azure Container Apps deployment, sign in with `az login`, then run `./scripts/deploy-azure.ps1 -SubscriptionId <your-subscription-id>` from the repository root. The script prompts for the PostgreSQL password and never writes it to source control.
