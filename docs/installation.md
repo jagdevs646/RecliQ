@@ -14,8 +14,8 @@
 3. Set `DATABASE_URL` and storage settings.
 4. Run `alembic upgrade head`.
 5. Start `uvicorn app.main:app --reload`.
-6. Install frontend dependencies with `npm install`.
-7. Start `npm run dev`.
+6. Install frontend dependencies with `corepack enable` followed by `pnpm install --frozen-lockfile`.
+7. Start `pnpm run dev`.
 
 The MVP opens directly to Dashboard and does not require login or registration.
 

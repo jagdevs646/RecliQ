@@ -1,0 +1,13 @@
+.git
+.venv
+backend/.venv
+backend/__pycache__
+frontend/node_modules
+frontend/dist
+frontend/.vite
+storage
+*.db
+*.pyc
+__pycache__
+.pytest_cache
+.idea

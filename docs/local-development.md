@@ -25,8 +25,9 @@ FRONTEND_ORIGIN=http://127.0.0.1:5173
 
 ```bash
 cd frontend
-npm install
-npm run dev
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
 Set `VITE_API_BASE_URL=http://localhost:8000/api` if your backend uses a different origin.
