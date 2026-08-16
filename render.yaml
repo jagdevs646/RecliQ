@@ -1,0 +1,57 @@
+databases:
+  - name: recliq-db
+    databaseName: recliq
+    user: recliq
+    plan: free
+
+services:
+  - type: web
+    name: recliq-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    plan: free
+    healthCheckPath: /health
+
+    # Persistent disk keeps generated reports across deploys & restarts.
+    # Cost: $0.25/GB/month.  Remove this block if you prefer ephemeral storage.
+    disk:
+      name: recliq-storage
+      mountPath: /data/storage
+      sizeGB: 1
+
+    envVars:
+      # Render injects the PostgreSQL connection string (postgresql://...).
+      # start.sh converts it to the psycopg3 scheme (postgresql+psycopg://).
+      - key: RENDER_DB_URL
+        fromDatabase:
+          name: recliq-db
+          property: connectionString
+
+      - key: LOCAL_STORAGE_PATH
+        value: /data/storage
+
+      - key: STORAGE_BACKEND
+        value: local
+
+      - key: ENVIRONMENT
+        value: production
+
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+
+      - key: API_PREFIX
+        value: /api
+
+      # Auto-generated secret key for secure session cookies.
+      - key: SECRET_KEY
+        generateValue: true
+
+      # Set these in the Render dashboard AFTER your Vercel URL is known:
+      #   FRONTEND_ORIGIN    = https://your-app.vercel.app
+      #   EXTRA_CORS_ORIGINS = https://your-app.vercel.app
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: EXTRA_CORS_ORIGINS
+        sync: false

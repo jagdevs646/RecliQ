@@ -1,4 +1,9 @@
+# Ignore local secret env files but allow committed production/example files
 .env
+.env.local
+.env.*.local
+!.env.example
+!.env.production
 .venv/
 __pycache__/
 *.pyc
