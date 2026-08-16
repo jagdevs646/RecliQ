@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     api_prefix: str = "/api"
     frontend_origin: str = "http://localhost:5173"
+    # Comma-separated list of extra allowed origins (e.g. Vercel preview URLs).
+    extra_cors_origins: str = ""
     session_cookie_secure: bool = False
 
     database_url: str = "sqlite:///./reconx_dev.db"
