@@ -87,17 +87,23 @@ def aggregate_by_key(df: pd.DataFrame, key_col: str) -> pd.DataFrame:
     if key_col not in df.columns:
         raise KeyError(key_col)
 
+    df = df.copy(deep=False)
     agg = {}
     for col in df.columns:
         if col == key_col:
             continue
         sample = df[col].dropna()
         if not sample.empty and sample.map(lambda value: to_number(value) is not None).all():
-            agg[col] = lambda series: round(sum(to_number(value) or 0 for value in series), 2)
+            df[col] = df[col].apply(lambda x: to_number(x) or 0.0)
+            agg[col] = "sum"
         else:
             agg[col] = "first"
 
     grouped = df.groupby(key_col, sort=False, dropna=False).agg(agg).reset_index()
+    # Round numeric columns after sum
+    for col, func in agg.items():
+        if func == "sum":
+            grouped[col] = grouped[col].round(2)
     return grouped[df.columns]
 
 

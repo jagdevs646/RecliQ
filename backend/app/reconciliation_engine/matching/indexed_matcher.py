@@ -19,6 +19,7 @@ from app.reconciliation_engine.cache import (
     parse_date_value,
     sorted_token_key,
     to_number,
+    tokens,
 )
 
 IDENTIFIER_NAME_HINTS = (
@@ -291,13 +292,14 @@ class IndexedCandidateMatcher:
         self.matcher_type = matcher_type
         self.threshold = match_threshold(matcher_type)
 
-        self.rows: List[pd.Series] = []
+        self.rows: List[dict] = []
         self.indices: List[object] = []
 
         self.exact_map: Dict[str, List[int]] = {}
         self.compact_map: Dict[str, List[int]] = {}
         self.token_key_map: Dict[str, List[int]] = {}
         self.synonym_key_map: Dict[str, List[int]] = {}
+        self.token_blocks: Dict[str, List[int]] = {}
 
         self._build_index()
 
@@ -305,14 +307,15 @@ class IndexedCandidateMatcher:
         if self.candidate_column not in self.candidates_df.columns:
             return
 
-        # Fast extraction using itertuples or raw values
-        col_values = self.candidates_df[self.candidate_column].tolist()
+        # Fast extraction using dict records
+        records = self.candidates_df.to_dict('records')
         df_indices = self.candidates_df.index.tolist()
 
-        for pos, (df_idx, raw_val) in enumerate(zip(df_indices, col_values)):
-            row_series = self.candidates_df.iloc[pos]
-            self.rows.append(row_series)
+        for pos, (df_idx, row_dict) in enumerate(zip(df_indices, records)):
+            self.rows.append(row_dict)
             self.indices.append(df_idx)
+
+            raw_val = row_dict.get(self.candidate_column)
 
             if is_blank(raw_val):
                 continue
@@ -337,12 +340,16 @@ class IndexedCandidateMatcher:
             if syn_key:
                 self.synonym_key_map.setdefault(syn_key, []).append(pos)
 
+            # 5. Token blocks for fallback scanning
+            for t in tokens(raw_val, use_synonyms=True):
+                self.token_blocks.setdefault(t, []).append(pos)
+
     def find_best_match(
         self,
         target_value: object,
         target_column: str = "",
         used_indices: Set[object] | None = None,
-    ) -> Tuple[object | None, pd.Series | None, MatchResult | None]:
+    ) -> Tuple[object | None, dict | None, MatchResult | None]:
         used_indices = used_indices or set()
 
         if is_blank(target_value) or not self.rows:
@@ -395,13 +402,20 @@ class IndexedCandidateMatcher:
 
         # Fallback to fuzzy scanning ONLY if matcher_type requires text fuzzy match and exact lookups failed
         if self.matcher_type in {"text", "company_name", "person_name"}:
-            # Limit scan to unused candidates
-            for pos in range(len(self.rows)):
+            # Limit scan to unused candidates that share at least one token
+            fallback_candidates = set()
+            for t in tokens(target_value, use_synonyms=True):
+                if t in self.token_blocks:
+                    for p in self.token_blocks[t]:
+                        if p not in seen_pos:
+                            fallback_candidates.add(p)
+
+            for pos in fallback_candidates:
                 df_idx = self.indices[pos]
-                if df_idx in used_indices or pos in seen_pos:
+                if df_idx in used_indices:
                     continue
 
-                row_val = self.rows[pos][self.candidate_column]
+                row_val = self.rows[pos].get(self.candidate_column)
                 result = compare_values(target_value, row_val, target_column, self.candidate_column, self.matcher_type)
                 if result.confidence >= self.threshold and (best_result is None or result.confidence > best_result.confidence):
                     best_pos = pos
@@ -422,7 +436,7 @@ def best_match_for_value(
     target_column: str = "",
     matcher_type: str | None = None,
     used_indices: set | None = None,
-) -> tuple[int | None, pd.Series | None, MatchResult | None]:
+) -> tuple[int | None, dict | None, MatchResult | None]:
     used_indices = used_indices or set()
     candidate_values = list(candidates[candidate_column]) if candidate_column in candidates.columns else []
     matcher_type = matcher_type or detect_matcher_type([target_value, *candidate_values], target_column, candidate_column)

@@ -7,8 +7,8 @@ import pandas as pd
 from app.reconciliation_engine.cache import is_blank, to_number
 
 
-def collect_rule_value(row: pd.Series, fields: list[str]) -> tuple[object, str | None]:
-    values = [row[field] for field in fields if field in row.index]
+def collect_rule_value(row: dict, fields: list[str]) -> tuple[object, str | None]:
+    values = [row[field] for field in fields if field in row]
     numbers = [to_number(value) for value in values]
 
     if values and all(number is not None or is_blank(value) for value, number in zip(values, numbers)):
