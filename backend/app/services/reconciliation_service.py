@@ -91,9 +91,10 @@ def get_file_columns(db: Session, file_id: str, session_id: str, orientation: st
 
 
 def process_reconciliation_job_async(job_id: str) -> None:
-    future = run_in_background(process_reconciliation_job, job_id)
-    # Wait for completion in background task wrapper
-    future.result()
+    # FastAPI already runs sync background tasks in a thread off the event loop.
+    # Calling directly avoids double-threading (submit + future.result()) which
+    # caused hangs with multi-worker Uvicorn deployments.
+    process_reconciliation_job(job_id)
 
 
 def process_reconciliation_job(job_id: str) -> None:
@@ -193,6 +194,14 @@ def process_reconciliation_job(job_id: str) -> None:
         append_history(db, job, "completed", "Reconciliation completed", json.dumps(summary))
         db.commit()
     except Exception as exc:
+        # Rollback any partial transaction so the session is usable again.
+        # Without this, a failed db.commit() leaves the session in
+        # PendingRollbackError state and the db.get() below raises, killing
+        # the thread silently and leaving the job stuck in 'processing'.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         job = db.get(ReconciliationJob, job_id)
         if job:
             job.status = "failed"
@@ -200,7 +209,10 @@ def process_reconciliation_job(job_id: str) -> None:
             job.error_message = str(exc)
             job.completed_at = datetime.now(timezone.utc)
             append_history(db, job, "failed", str(exc))
-            db.commit()
+            try:
+                db.commit()
+            except Exception:
+                pass
     finally:
         db.close()
         try:
