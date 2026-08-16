@@ -64,21 +64,24 @@ def write_generic_report(
     file_1_not_found_df = pd.DataFrame(file_1_not_found)
     file_2_not_found_df = pd.DataFrame(file_2_not_found)
 
-    sheet_f2 = _sheet_name(f"Not found in {file_2_name}")
-    sheet_f1 = _sheet_name(f"Not found in {file_1_name}")
+    sheet_recon = "Reconciliation Report"
+    sheet_f2 = _sheet_name(f"{file_1_name} Missing in {file_2_name}")
+    sheet_f1 = _sheet_name(f"{file_2_name} Missing in {file_1_name}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     engine = excel_writer_engine()
-    kwargs = {'engine_kwargs': {'options': {'constant_memory': True}}} if engine == 'xlsxwriter' else {}
-    with pd.ExcelWriter(output_path, engine=engine, **kwargs) as writer:
-        reconciliation_df.to_excel(writer, sheet_name="Reconciliation Report", index=False)
-        auto_fit_columns(writer.sheets["Reconciliation Report"], reconciliation_df)
-
-        file_1_not_found_df.to_excel(writer, sheet_name=sheet_f2, index=False)
-        auto_fit_columns(writer.sheets[sheet_f2], file_1_not_found_df)
-
-        file_2_not_found_df.to_excel(writer, sheet_name=sheet_f1, index=False)
-        auto_fit_columns(writer.sheets[sheet_f1], file_2_not_found_df)
+    with pd.ExcelWriter(output_path, engine=engine) as writer:
+        wb = writer.book
+        sheets = [
+            (sheet_recon, reconciliation_df, "#FFC7CE"),
+            (sheet_f2, file_1_not_found_df, "#FFEB9C"),
+            (sheet_f1, file_2_not_found_df, "#C6EFCE"),
+        ]
+        for sheet_name, df, color in sheets:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            worksheet = writer.sheets[sheet_name]
+            style_header_row(wb, worksheet, df, color)
+            auto_fit_columns(worksheet, df)
 
 
 def _sheet_name(label: str) -> str:
@@ -113,8 +116,7 @@ def write_gst_output(
 
     path.parent.mkdir(parents=True, exist_ok=True)
     engine = excel_writer_engine()
-    kwargs = {'engine_kwargs': {'options': {'constant_memory': True}}} if engine == 'xlsxwriter' else {}
-    with pd.ExcelWriter(path, engine=engine, **kwargs) as writer:
+    with pd.ExcelWriter(path, engine=engine) as writer:
         wb = writer.book
         sheets = [
             ("Mismatched Invoices", mismatch_df, "#FFC7CE"),

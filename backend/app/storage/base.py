@@ -26,3 +26,6 @@ class StorageBackend(Protocol):
 
     def resolve_path(self, storage_path: str) -> Path:
         ...
+
+    def delete_file(self, storage_path: str) -> bool:
+        ...

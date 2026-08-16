@@ -53,3 +53,17 @@ class LocalStorage:
         if not path.exists():
             raise FileNotFoundError(storage_path)
         return path
+
+    def delete_file(self, storage_path: str) -> bool:
+        try:
+            path = self.base_path / storage_path
+            if path.exists():
+                path.unlink(missing_ok=True)
+                # Cleanup parent dir if empty
+                parent = path.parent
+                if parent != self.base_path and parent.exists() and not any(parent.iterdir()):
+                    parent.rmdir()
+                return True
+        except Exception:
+            pass
+        return False

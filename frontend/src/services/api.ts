@@ -140,6 +140,18 @@ export class ApiClient {
     return this.request<Job>(`/jobs/${jobId}`);
   }
 
+  async cancelJob(jobId: string): Promise<Job> {
+    return this.request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" });
+  }
+
+  async deleteJob(jobId: string): Promise<void> {
+    await this.request<void>(`/jobs/${jobId}`, { method: "DELETE" });
+  }
+
+  async clearHistory(): Promise<{ deleted_count: number }> {
+    return this.request<{ deleted_count: number }>("/jobs", { method: "DELETE" });
+  }
+
   async getReportSummary(jobId: string): Promise<ReconciliationSummary> {
     return this.request<ReconciliationSummary>(`/reports/job/${jobId}/summary`);
   }

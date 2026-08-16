@@ -95,11 +95,13 @@ def reconcile(
     }
 
     df1_records = df1.to_dict('records')
-    for row1 in df1_records:
+    for row_idx, row1 in enumerate(df1_records):
         gstr = row1.get("GSTR")
         matcher = gstr_matchers_2.get(gstr)
         if matcher is None:
-            only_in_file1.append(row1)
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
+            only_in_file1.append(clean_r1)
             continue
 
         best_idx, row2, invoice_result = matcher.find_best_match(
@@ -108,15 +110,19 @@ def reconcile(
             matched_file2_indices,
         )
         if row2 is None or invoice_result is None:
-            only_in_file1.append(row1)
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
+            only_in_file1.append(clean_r1)
             continue
 
         matched_file2_indices.add(best_idx)
         base = {
+            "ROW (File 1)": row1.get("_ROW_NO", row_idx + 2),
+            "ROW (File 2)": row2.get("_ROW_NO", best_idx + 2),
             "GSTR": gstr,
             "INVOICE NO. (File1)": row1.get("INVOICE NO."),
             "INVOICE NO. (File2)": row2.get("INVOICE NO."),
-            "INVOICE MATCH CONFIDENCE": invoice_result.confidence,
+            "INVOICE MATCH CONFIDENCE": f"{invoice_result.confidence}%",
             "INVOICE MATCH STATUS": invoice_result.status,
             "NAME (File1)": row1.get("NAME OF TRADER/FIRM/COMPANY", ""),
             "NAME (File2)": row2.get("NAME OF TRADER/FIRM/COMPANY", ""),
@@ -134,13 +140,15 @@ def reconcile(
         )
         if not name_result.matched or name_result.confidence < text_threshold:
             field_diffs["NAME STATUS"] = name_result.status
-            field_diffs["NAME CONFIDENCE"] = name_result.confidence
+            field_diffs["NAME CONFIDENCE"] = f"{name_result.confidence}%"
         elif name_result.confidence < 100:
             review_notes["NAME STATUS"] = name_result.status
-            review_notes["NAME CONFIDENCE"] = name_result.confidence
+            review_notes["NAME CONFIDENCE"] = f"{name_result.confidence}%"
 
         date_result = compare_values(row1.get("INVOICE DATE"), row2.get("INVOICE DATE"), "INVOICE DATE", "INVOICE DATE", "date")
         if not date_result.matched:
+            field_diffs["DATE (File1)"] = row1.get("INVOICE DATE")
+            field_diffs["DATE (File2)"] = row2.get("INVOICE DATE")
             field_diffs["DATE STATUS"] = date_result.status
             field_diffs["DATE DETAIL"] = date_result.detail
 
@@ -149,6 +157,8 @@ def reconcile(
             if not amount_result.matched:
                 value1 = float(row1.get(col, 0) or 0)
                 value2 = float(row2.get(col, 0) or 0)
+                field_diffs[f"{col} (File1)"] = value1
+                field_diffs[f"{col} (File2)"] = value2
                 field_diffs[f"{col} DIFF"] = round(value1 - value2, 2)
 
         if field_diffs:
@@ -161,7 +171,13 @@ def reconcile(
             confidence_review.append(record)
 
     df2_records = df2.to_dict('records')
-    only_in_file2 = [df2_records[i] for i, idx in enumerate(df2.index) if idx not in matched_file2_indices]
+    only_in_file2 = []
+    for i, idx in enumerate(df2.index):
+        if idx not in matched_file2_indices:
+            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO"}
+            clean_r2["ROW (File 2)"] = df2_records[i].get("_ROW_NO", idx + 2)
+            only_in_file2.append(clean_r2)
+
     return GSTReconciliationOutcome(
         mismatched=mismatched,
         only_in_file_1=only_in_file1,
