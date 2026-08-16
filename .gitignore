@@ -7,7 +7,9 @@
 .venv/
 __pycache__/
 *.pyc
-storage/
+# Ignore uploaded-file storage dirs but NOT the app/storage Python module
+/storage/
+/backend/storage/
 dist/
 node_modules/
 reconx_dev.db
