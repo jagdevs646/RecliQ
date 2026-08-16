@@ -8,7 +8,6 @@ services:
   - type: web
     name: recliq-backend
     runtime: python
-    pythonVersion: "3.12.10"
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
@@ -19,6 +18,10 @@ services:
     # Free tier uses ephemeral /tmp storage — files are lost on restart.
 
     envVars:
+      # Pin Python 3.12 so Render doesn't use 3.14 (no pandas wheel available).
+      - key: PYTHON_VERSION
+        value: "3.12.10"
+
       # Render injects the PostgreSQL connection string (postgresql://...).
       # start.sh converts it to the psycopg3 scheme (postgresql+psycopg://).
       - key: RENDER_DB_URL
