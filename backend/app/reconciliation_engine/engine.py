@@ -58,8 +58,8 @@ def validate_gst_columns(df: pd.DataFrame) -> list[str]:
 
 
 def compare_rule_values(
-    file_1_row: pd.Series,
-    file_2_row: pd.Series,
+    file_1_row: dict,
+    file_2_row: dict,
     file_1_fields: list[str],
     file_2_fields: list[str],
 ) -> dict:
@@ -162,10 +162,9 @@ def run_generic_reconciliation(
 
     tracker.matching_records()
 
-    total_file_1 = len(file_1_df)
-    for i in range(total_file_1):
-        file_1_row = file_1_df.iloc[i]
-        file_1_id = file_1_row[file_1_id_col]
+    file_1_records = file_1_df.to_dict('records')
+    for file_1_row in file_1_records:
+        file_1_id = file_1_row.get(file_1_id_col)
 
         best_idx, file_2_row, key_result = indexed_matcher.find_best_match(
             file_1_id,
@@ -174,7 +173,7 @@ def run_generic_reconciliation(
         )
 
         if file_2_row is None or key_result is None:
-            file_1_not_found.append(file_1_row.to_dict())
+            file_1_not_found.append(file_1_row)
             continue
 
         matched_file_2_indices.add(best_idx)
@@ -205,7 +204,8 @@ def run_generic_reconciliation(
 
     file_2_indices_set = set(file_2_df.index)
     unmatched_indices = file_2_indices_set - matched_file_2_indices
-    file_2_not_found = [file_2_df.loc[idx].to_dict() for idx in file_2_df.index if idx in unmatched_indices]
+    file_2_records = file_2_df.to_dict('records')
+    file_2_not_found = [file_2_records[i] for i, idx in enumerate(file_2_df.index) if idx in unmatched_indices]
 
     tracker.generating_report()
     write_generic_report(
@@ -276,31 +276,30 @@ def run_gst_reconciliation(
 
     tracker.matching_records()
 
-    total_df1 = len(df1)
-    for i in range(total_df1):
-        row1 = df1.iloc[i]
-        gstr = row1["GSTR"]
+    df1_records = df1.to_dict('records')
+    for row1 in df1_records:
+        gstr = row1.get("GSTR")
 
         matcher = gstr_matchers_2.get(gstr)
         if matcher is None:
-            only_in_file1.append(row1.to_dict())
+            only_in_file1.append(row1)
             continue
 
         best_idx, row2, invoice_result = matcher.find_best_match(
-            row1["INVOICE NO."],
+            row1.get("INVOICE NO."),
             "INVOICE NO.",
             matched_file2_indices,
         )
 
         if row2 is None or invoice_result is None:
-            only_in_file1.append(row1.to_dict())
+            only_in_file1.append(row1)
             continue
 
         matched_file2_indices.add(best_idx)
         base = {
             "GSTR": gstr,
-            "INVOICE NO. (File1)": row1["INVOICE NO."],
-            "INVOICE NO. (File2)": row2["INVOICE NO."],
+            "INVOICE NO. (File1)": row1.get("INVOICE NO."),
+            "INVOICE NO. (File2)": row2.get("INVOICE NO."),
             "INVOICE MATCH CONFIDENCE": invoice_result.confidence,
             "INVOICE MATCH STATUS": invoice_result.status,
             "NAME (File1)": row1.get("NAME OF TRADER/FIRM/COMPANY", ""),
@@ -349,7 +348,8 @@ def run_gst_reconciliation(
 
     df2_indices_set = set(df2.index)
     unmatched_df2_indices = df2_indices_set - matched_file2_indices
-    only_in_file2 = [df2.loc[idx].to_dict() for idx in df2.index if idx in unmatched_df2_indices]
+    df2_records = df2.to_dict('records')
+    only_in_file2 = [df2_records[i] for i, idx in enumerate(df2.index) if idx in unmatched_df2_indices]
 
     tracker.generating_report()
     write_gst_output(

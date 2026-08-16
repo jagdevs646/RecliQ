@@ -24,7 +24,7 @@ def auto_fit_columns(worksheet, df: pd.DataFrame) -> None:
         return
 
     for i, col in enumerate(df.columns):
-        col_series = df[col].fillna("").astype(str)
+        col_series = df[col].head(500).fillna("").astype(str)
         max_len = max(int(col_series.str.len().max()), len(str(col))) + 2
         width = min(max_len, 60)
         if hasattr(worksheet, "set_column"):
@@ -68,7 +68,9 @@ def write_generic_report(
     sheet_f1 = _sheet_name(f"Not found in {file_1_name}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(output_path, engine=excel_writer_engine()) as writer:
+    engine = excel_writer_engine()
+    kwargs = {'engine_kwargs': {'options': {'constant_memory': True}}} if engine == 'xlsxwriter' else {}
+    with pd.ExcelWriter(output_path, engine=engine, **kwargs) as writer:
         reconciliation_df.to_excel(writer, sheet_name="Reconciliation Report", index=False)
         auto_fit_columns(writer.sheets["Reconciliation Report"], reconciliation_df)
 
@@ -110,7 +112,9 @@ def write_gst_output(
     sheet3_name = _sheet_name(f"{file2_name} Missing in {file1_name}")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(path, engine=excel_writer_engine()) as writer:
+    engine = excel_writer_engine()
+    kwargs = {'engine_kwargs': {'options': {'constant_memory': True}}} if engine == 'xlsxwriter' else {}
+    with pd.ExcelWriter(path, engine=engine, **kwargs) as writer:
         wb = writer.book
         sheets = [
             ("Mismatched Invoices", mismatch_df, "#FFC7CE"),

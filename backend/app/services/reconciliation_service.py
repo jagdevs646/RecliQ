@@ -100,6 +100,8 @@ def process_reconciliation_job(job_id: str) -> None:
     db = SessionLocal()
     settings = get_settings()
     storage = get_storage()
+    file_1_path: Path | None = None
+    file_2_path: Path | None = None
     try:
         job = db.get(ReconciliationJob, job_id)
         if not job:
@@ -201,3 +203,10 @@ def process_reconciliation_job(job_id: str) -> None:
             db.commit()
     finally:
         db.close()
+        try:
+            if file_1_path and file_1_path.exists():
+                file_1_path.unlink(missing_ok=True)
+            if file_2_path and file_2_path.exists():
+                file_2_path.unlink(missing_ok=True)
+        except Exception:
+            pass

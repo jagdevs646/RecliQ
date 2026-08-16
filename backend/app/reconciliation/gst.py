@@ -94,27 +94,28 @@ def reconcile(
         for gstr, group in gstr_groups_2.items()
     }
 
-    for _, row1 in df1.iterrows():
-        gstr = row1["GSTR"]
+    df1_records = df1.to_dict('records')
+    for row1 in df1_records:
+        gstr = row1.get("GSTR")
         matcher = gstr_matchers_2.get(gstr)
         if matcher is None:
-            only_in_file1.append(row1.to_dict())
+            only_in_file1.append(row1)
             continue
 
         best_idx, row2, invoice_result = matcher.find_best_match(
-            row1["INVOICE NO."],
+            row1.get("INVOICE NO."),
             "INVOICE NO.",
             matched_file2_indices,
         )
         if row2 is None or invoice_result is None:
-            only_in_file1.append(row1.to_dict())
+            only_in_file1.append(row1)
             continue
 
         matched_file2_indices.add(best_idx)
         base = {
             "GSTR": gstr,
-            "INVOICE NO. (File1)": row1["INVOICE NO."],
-            "INVOICE NO. (File2)": row2["INVOICE NO."],
+            "INVOICE NO. (File1)": row1.get("INVOICE NO."),
+            "INVOICE NO. (File2)": row2.get("INVOICE NO."),
             "INVOICE MATCH CONFIDENCE": invoice_result.confidence,
             "INVOICE MATCH STATUS": invoice_result.status,
             "NAME (File1)": row1.get("NAME OF TRADER/FIRM/COMPANY", ""),
@@ -159,7 +160,8 @@ def reconcile(
             record.update(review_notes)
             confidence_review.append(record)
 
-    only_in_file2 = [row.to_dict() for idx, row in df2.iterrows() if idx not in matched_file2_indices]
+    df2_records = df2.to_dict('records')
+    only_in_file2 = [df2_records[i] for i, idx in enumerate(df2.index) if idx not in matched_file2_indices]
     return GSTReconciliationOutcome(
         mismatched=mismatched,
         only_in_file_1=only_in_file1,
