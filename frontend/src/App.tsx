@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { SpeedInsights } from "@vercel/speed-insights/react";
 import { Shell } from "./components/Shell";
 import { api } from "./services/api";
 import type { Job, Page } from "./types";
@@ -27,19 +28,22 @@ export default function App() {
   }
 
   return (
-    <Shell activePage={page} onNavigate={setPage}>
-      {page === "dashboard" && <DashboardPage onNavigateUpload={() => setPage("upload")} onOpenJob={openJob} />}
-      {page === "upload" && (
-        <UploadPage
-          onJobCreated={(job) => {
-            setActiveJob(job);
-            setPage("status");
-          }}
-        />
-      )}
-      {page === "status" && <StatusPage job={activeJob} onJobUpdate={setActiveJob} onViewResults={() => setPage("results")} />}
-      {page === "results" && <ResultsPage job={activeJob} onNewReconciliation={() => setPage("upload")} />}
-      {page === "history" && <HistoryPage onOpenJob={openJob} />}
-    </Shell>
+    <>
+      <Shell activePage={page} onNavigate={setPage}>
+        {page === "dashboard" && <DashboardPage onNavigateUpload={() => setPage("upload")} onOpenJob={openJob} />}
+        {page === "upload" && (
+          <UploadPage
+            onJobCreated={(job) => {
+              setActiveJob(job);
+              setPage("status");
+            }}
+          />
+        )}
+        {page === "status" && <StatusPage job={activeJob} onJobUpdate={setActiveJob} onViewResults={() => setPage("results")} />}
+        {page === "results" && <ResultsPage job={activeJob} onNewReconciliation={() => setPage("upload")} />}
+        {page === "history" && <HistoryPage onOpenJob={openJob} />}
+      </Shell>
+      <SpeedInsights />
+    </>
   );
 }
