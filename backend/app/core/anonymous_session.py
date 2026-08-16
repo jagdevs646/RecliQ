@@ -47,13 +47,17 @@ class AnonymousSessionMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers[SESSION_HEADER_NAME] = session_id
         if created:
+            secure = get_settings().session_cookie_secure
+            # SameSite=None is required for cross-origin requests (Vercel → Render).
+            # It is only valid when Secure=True, which is enforced in production.
+            samesite = "none" if secure else "lax"
             response.set_cookie(
                 SESSION_COOKIE_NAME,
                 session_id,
                 max_age=SESSION_COOKIE_MAX_AGE,
                 httponly=True,
-                samesite="lax",
-                secure=get_settings().session_cookie_secure,
+                samesite=samesite,
+                secure=secure,
                 path="/",
             )
         return response
