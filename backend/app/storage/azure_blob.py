@@ -59,3 +59,13 @@ class AzureBlobStorage:
         data = self.container.download_blob(storage_path).readall()
         temp_path.write_bytes(data)
         return temp_path
+
+    def delete_file(self, storage_path: str) -> bool:
+        try:
+            blob_client = self.container.get_blob_client(storage_path)
+            if blob_client.exists():
+                blob_client.delete_blob()
+                return True
+        except Exception:
+            pass
+        return False

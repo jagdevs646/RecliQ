@@ -89,14 +89,19 @@ def compare_rule_values(
     if result.matcher_type == "numeric":
         value_1 = to_number(file_1_value) or 0.0
         value_2 = to_number(file_2_value) or 0.0
-        return {f"{label} DIFF": round(value_1 - value_2, 2)}
+        return {
+            f"{label} (FILE 1)": file_1_value,
+            f"{label} (FILE 2)": file_2_value,
+            f"{label} DIFF": round(value_1 - value_2, 2),
+            f"{label} STATUS": result.status if result.matched else "Mismatch",
+        }
 
-    status = result.status if result.matched else "No Match"
+    status = result.status if result.matched else "Mismatch"
     return {
+        f"{label} (FILE 1)": file_1_value,
+        f"{label} (FILE 2)": file_2_value,
+        f"{label} CONFIDENCE": f"{result.confidence}%",
         f"{label} STATUS": status,
-        f"{label} CONFIDENCE": result.confidence,
-        f"{label} FILE 1": file_1_value,
-        f"{label} FILE 2": file_2_value,
     }
 
 
@@ -113,12 +118,18 @@ def run_generic_reconciliation(
     progress_callback: Optional[Callable[[int, str], None]] = None,
     file_1_name: str = "File 1",
     file_2_name: str = "File 2",
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
 
-    file_1_df = prepare_dataframe(pd.read_excel(file_1_path), orientation=orientation)
-    file_2_df = prepare_dataframe(pd.read_excel(file_2_path), orientation=orientation)
+    raw_f1 = pd.read_excel(file_1_path)
+    raw_f2 = pd.read_excel(file_2_path)
+    raw_f1["_ROW_NO"] = raw_f1.index + 2
+    raw_f2["_ROW_NO"] = raw_f2.index + 2
+
+    file_1_df = prepare_dataframe(raw_f1, orientation=orientation)
+    file_2_df = prepare_dataframe(raw_f2, orientation=orientation)
 
     file_1_id_col = normalize_header(key_file_1)
     file_2_id_col = normalize_header(key_file_2)
@@ -146,6 +157,9 @@ def run_generic_reconciliation(
     file_1_df = aggregate_by_key(file_1_df, file_1_id_col)
     file_2_df = aggregate_by_key(file_2_df, file_2_id_col)
 
+    if is_cancelled and is_cancelled():
+        raise InterruptedError("Reconciliation cancelled by user")
+
     tracker.building_indexes()
 
     key_type = detect_matcher_type(
@@ -163,7 +177,10 @@ def run_generic_reconciliation(
     tracker.matching_records()
 
     file_1_records = file_1_df.to_dict('records')
-    for file_1_row in file_1_records:
+    for row_idx, file_1_row in enumerate(file_1_records):
+        if is_cancelled and row_idx % 25 == 0 and is_cancelled():
+            raise InterruptedError("Reconciliation cancelled by user")
+
         file_1_id = file_1_row.get(file_1_id_col)
 
         best_idx, file_2_row, key_result = indexed_matcher.find_best_match(
@@ -173,22 +190,28 @@ def run_generic_reconciliation(
         )
 
         if file_2_row is None or key_result is None:
-            file_1_not_found.append(file_1_row)
+            clean_f1_row = {k: v for k, v in file_1_row.items() if k != "_ROW_NO"}
+            clean_f1_row["ROW (FILE 1)"] = file_1_row.get("_ROW_NO", row_idx + 2)
+            file_1_not_found.append(clean_f1_row)
             continue
 
         matched_file_2_indices.add(best_idx)
         reconciliation_result = {
+            "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
+            "ROW (FILE 2)": file_2_row.get("_ROW_NO", best_idx + 2),
             file_1_id_col: file_1_id,
-            f"MATCHED {file_2_id_col}": file_2_row[file_2_id_col],
+            f"MATCHED {file_2_id_col}": file_2_row.get(file_2_id_col),
             "MATCH TYPE": key_result.matcher_type,
-            "MATCH CONFIDENCE": key_result.confidence,
+            "MATCH CONFIDENCE": f"{key_result.confidence}%",
             "MATCH STATUS": key_result.status,
         }
 
         for col in file_1_extra:
-            reconciliation_result[col] = file_1_row[col]
+            if col != "_ROW_NO":
+                reconciliation_result[col] = file_1_row.get(col)
         for col in file_2_extra:
-            reconciliation_result[f"{col} (FILE 2)"] = file_2_row[col]
+            if col != "_ROW_NO":
+                reconciliation_result[f"{col} (FILE 2)"] = file_2_row.get(col)
 
         has_reportable_issue = key_result.confidence < 100
         for file_1_fields, file_2_fields in normalized_rules:
@@ -202,10 +225,18 @@ def run_generic_reconciliation(
 
     tracker.comparing_columns()
 
+    if is_cancelled and is_cancelled():
+        raise InterruptedError("Reconciliation cancelled by user")
+
     file_2_indices_set = set(file_2_df.index)
     unmatched_indices = file_2_indices_set - matched_file_2_indices
     file_2_records = file_2_df.to_dict('records')
-    file_2_not_found = [file_2_records[i] for i, idx in enumerate(file_2_df.index) if idx in unmatched_indices]
+    file_2_not_found = []
+    for i, idx in enumerate(file_2_df.index):
+        if idx in unmatched_indices:
+            clean_f2_row = {k: v for k, v in file_2_records[i].items() if k != "_ROW_NO"}
+            clean_f2_row["ROW (FILE 2)"] = file_2_records[i].get("_ROW_NO", idx + 2)
+            file_2_not_found.append(clean_f2_row)
 
     tracker.generating_report()
     write_generic_report(
@@ -224,7 +255,7 @@ def run_generic_reconciliation(
         "only_in_file_1": len(file_1_not_found),
         "only_in_file_2": len(file_2_not_found),
         "confidence_review": sum(
-            1 for row in reconciliation_results if int(row.get("MATCH CONFIDENCE", 100) or 0) < 100
+            1 for row in reconciliation_results if int(str(row.get("MATCH CONFIDENCE", "100")).replace("%", "") or 0) < 100
         ),
         "source_records": len(file_1_df),
         "destination_records": len(file_2_df),
@@ -242,12 +273,18 @@ def run_gst_reconciliation(
     progress_callback: Optional[Callable[[int, str], None]] = None,
     file_1_name: str = "File1",
     file_2_name: str = "File2",
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
 
-    df1 = normalise_gst_df(prepare_dataframe(pd.read_excel(file_1_path), orientation=orientation), GST_AMOUNT_COLUMNS)
-    df2 = normalise_gst_df(prepare_dataframe(pd.read_excel(file_2_path), orientation=orientation), GST_AMOUNT_COLUMNS)
+    raw1 = pd.read_excel(file_1_path)
+    raw2 = pd.read_excel(file_2_path)
+    raw1["_ROW_NO"] = raw1.index + 2
+    raw2["_ROW_NO"] = raw2.index + 2
+
+    df1 = normalise_gst_df(prepare_dataframe(raw1, orientation=orientation), GST_AMOUNT_COLUMNS)
+    df2 = normalise_gst_df(prepare_dataframe(raw2, orientation=orientation), GST_AMOUNT_COLUMNS)
 
     missing_file1 = validate_gst_columns(df1)
     missing_file2 = validate_gst_columns(df2)
@@ -260,6 +297,9 @@ def run_gst_reconciliation(
 
     df1 = merge_duplicate_invoices(df1, GST_MERGE_KEY_COLUMNS, GST_AMOUNT_COLUMNS)
     df2 = merge_duplicate_invoices(df2, GST_MERGE_KEY_COLUMNS, GST_AMOUNT_COLUMNS)
+
+    if is_cancelled and is_cancelled():
+        raise InterruptedError("Reconciliation cancelled by user")
 
     tracker.building_indexes()
 
@@ -277,12 +317,17 @@ def run_gst_reconciliation(
     tracker.matching_records()
 
     df1_records = df1.to_dict('records')
-    for row1 in df1_records:
+    for row_idx, row1 in enumerate(df1_records):
+        if is_cancelled and row_idx % 25 == 0 and is_cancelled():
+            raise InterruptedError("Reconciliation cancelled by user")
+
         gstr = row1.get("GSTR")
 
         matcher = gstr_matchers_2.get(gstr)
         if matcher is None:
-            only_in_file1.append(row1)
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
+            only_in_file1.append(clean_r1)
             continue
 
         best_idx, row2, invoice_result = matcher.find_best_match(
@@ -292,15 +337,19 @@ def run_gst_reconciliation(
         )
 
         if row2 is None or invoice_result is None:
-            only_in_file1.append(row1)
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
+            only_in_file1.append(clean_r1)
             continue
 
         matched_file2_indices.add(best_idx)
         base = {
+            "ROW (File 1)": row1.get("_ROW_NO", row_idx + 2),
+            "ROW (File 2)": row2.get("_ROW_NO", best_idx + 2),
             "GSTR": gstr,
             "INVOICE NO. (File1)": row1.get("INVOICE NO."),
             "INVOICE NO. (File2)": row2.get("INVOICE NO."),
-            "INVOICE MATCH CONFIDENCE": invoice_result.confidence,
+            "INVOICE MATCH CONFIDENCE": f"{invoice_result.confidence}%",
             "INVOICE MATCH STATUS": invoice_result.status,
             "NAME (File1)": row1.get("NAME OF TRADER/FIRM/COMPANY", ""),
             "NAME (File2)": row2.get("NAME OF TRADER/FIRM/COMPANY", ""),
@@ -318,13 +367,15 @@ def run_gst_reconciliation(
         )
         if not name_result.matched or name_result.confidence < text_threshold:
             field_diffs["NAME STATUS"] = name_result.status
-            field_diffs["NAME CONFIDENCE"] = name_result.confidence
+            field_diffs["NAME CONFIDENCE"] = f"{name_result.confidence}%"
         elif name_result.confidence < 100:
             review_notes["NAME STATUS"] = name_result.status
-            review_notes["NAME CONFIDENCE"] = name_result.confidence
+            review_notes["NAME CONFIDENCE"] = f"{name_result.confidence}%"
 
         date_result = compare_values(row1.get("INVOICE DATE"), row2.get("INVOICE DATE"), "INVOICE DATE", "INVOICE DATE", "date")
         if not date_result.matched:
+            field_diffs["DATE (File1)"] = row1.get("INVOICE DATE")
+            field_diffs["DATE (File2)"] = row2.get("INVOICE DATE")
             field_diffs["DATE STATUS"] = date_result.status
             field_diffs["DATE DETAIL"] = date_result.detail
 
@@ -333,6 +384,8 @@ def run_gst_reconciliation(
             if not amount_result.matched:
                 value1 = float(row1.get(col, 0) or 0)
                 value2 = float(row2.get(col, 0) or 0)
+                field_diffs[f"{col} (File1)"] = value1
+                field_diffs[f"{col} (File2)"] = value2
                 field_diffs[f"{col} DIFF"] = round(value1 - value2, 2)
 
         if field_diffs:
@@ -346,10 +399,18 @@ def run_gst_reconciliation(
 
     tracker.comparing_columns()
 
+    if is_cancelled and is_cancelled():
+        raise InterruptedError("Reconciliation cancelled by user")
+
     df2_indices_set = set(df2.index)
     unmatched_df2_indices = df2_indices_set - matched_file2_indices
     df2_records = df2.to_dict('records')
-    only_in_file2 = [df2_records[i] for i, idx in enumerate(df2.index) if idx in unmatched_df2_indices]
+    only_in_file2 = []
+    for i, idx in enumerate(df2.index):
+        if idx in unmatched_df2_indices:
+            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO"}
+            clean_r2["ROW (File 2)"] = df2_records[i].get("_ROW_NO", idx + 2)
+            only_in_file2.append(clean_r2)
 
     tracker.generating_report()
     write_gst_output(

@@ -103,9 +103,13 @@ def process_reconciliation_job(job_id: str) -> None:
     storage = get_storage()
     file_1_path: Path | None = None
     file_2_path: Path | None = None
+    output_path: Path | None = None
     try:
         job = db.get(ReconciliationJob, job_id)
         if not job:
+            return
+
+        if job.status == "cancelled":
             return
 
         job.status = "processing"
@@ -114,12 +118,22 @@ def process_reconciliation_job(job_id: str) -> None:
         append_history(db, job, "processing", "Reconciliation started")
         db.commit()
 
+        def is_cancelled() -> bool:
+            try:
+                check_db = SessionLocal()
+                j = check_db.get(ReconciliationJob, job_id)
+                cancelled = j is not None and j.status == "cancelled"
+                check_db.close()
+                return cancelled
+            except Exception:
+                return False
+
         def on_progress(percent: int, step_msg: str) -> None:
             nonlocal db, job_id
             try:
                 sub_db = SessionLocal()
                 j = sub_db.get(ReconciliationJob, job_id)
-                if j:
+                if j and j.status != "cancelled":
                     j.progress = percent
                     append_history(sub_db, j, "processing", step_msg)
                     sub_db.commit()
@@ -148,6 +162,9 @@ def process_reconciliation_job(job_id: str) -> None:
         output_path = work_dir / f"{job.id}-{output_name}"
         payload = json.loads(job.settings_json or "{}")
 
+        if is_cancelled():
+            raise InterruptedError("Reconciliation cancelled by user")
+
         if job.job_type == "gst":
             summary = run_gst_reconciliation(
                 file_1_path,
@@ -158,6 +175,7 @@ def process_reconciliation_job(job_id: str) -> None:
                 progress_callback=on_progress,
                 file_1_name=file_1.original_filename,
                 file_2_name=file_2.original_filename,
+                is_cancelled=is_cancelled,
             )
         else:
             summary = run_generic_reconciliation(
@@ -173,7 +191,11 @@ def process_reconciliation_job(job_id: str) -> None:
                 progress_callback=on_progress,
                 file_1_name=file_1.original_filename,
                 file_2_name=file_2.original_filename,
+                is_cancelled=is_cancelled,
             )
+
+        if is_cancelled():
+            raise InterruptedError("Reconciliation cancelled by user")
 
         stored_report = storage.save_report(output_path, job.session_id, output_name)
         report = Report(
@@ -193,17 +215,36 @@ def process_reconciliation_job(job_id: str) -> None:
         job.completed_at = datetime.now(timezone.utc)
         append_history(db, job, "completed", "Reconciliation completed", json.dumps(summary))
         db.commit()
-    except Exception as exc:
-        # Rollback any partial transaction so the session is usable again.
-        # Without this, a failed db.commit() leaves the session in
-        # PendingRollbackError state and the db.get() below raises, killing
-        # the thread silently and leaving the job stuck in 'processing'.
+
+        # Enforce maximum 20 stored records per session
+        from app.services.job_service import prune_old_jobs
+        try:
+            prune_old_jobs(db, job.session_id, storage, max_records=20)
+        except Exception:
+            pass
+    except InterruptedError:
+        # User requested cancellation during processing
         try:
             db.rollback()
         except Exception:
             pass
         job = db.get(ReconciliationJob, job_id)
-        if job:
+        if job and job.status != "cancelled":
+            job.status = "cancelled"
+            job.completed_at = datetime.now(timezone.utc)
+            job.error_message = "Reconciliation cancelled by user"
+            append_history(db, job, "cancelled", "Reconciliation cancelled by user")
+            try:
+                db.commit()
+            except Exception:
+                pass
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        job = db.get(ReconciliationJob, job_id)
+        if job and job.status != "cancelled":
             job.status = "failed"
             job.progress = 100
             job.error_message = str(exc)
@@ -220,5 +261,7 @@ def process_reconciliation_job(job_id: str) -> None:
                 file_1_path.unlink(missing_ok=True)
             if file_2_path and file_2_path.exists():
                 file_2_path.unlink(missing_ok=True)
+            if output_path and output_path.exists():
+                output_path.unlink(missing_ok=True)
         except Exception:
             pass
