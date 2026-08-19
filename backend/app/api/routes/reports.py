@@ -14,6 +14,10 @@ from app.database.session import get_db
 from app.models.job import ReconciliationJob
 from app.models.report import Report
 from app.storage import get_storage
+from pydantic import BaseModel
+import tempfile
+import json
+from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -49,6 +53,17 @@ def _json_value(value: Any) -> Any:
         return None
     return value
 
+class ReportCustomConfig(BaseModel):
+    include_summary: bool = True
+    include_exceptions: bool = True
+    include_matched: bool = True
+    include_missing_file_1: bool = True
+    include_missing_file_2: bool = True
+    include_field_differences: bool = True
+    include_controls: bool = True
+    date_format: str = "YYYY-MM-DD"
+    number_format: str = "#,##0.00"
+
 
 @router.get("/{report_id}/download")
 def download_report(
@@ -72,6 +87,52 @@ def download_job_report(
     _, report = _job_report(db, job_id, session_id)
     path = get_storage().resolve_path(report.storage_path)
     return FileResponse(path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@router.post("/job/{job_id}/download_custom")
+def download_custom_report(
+    job_id: str,
+    config: ReportCustomConfig,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> FileResponse:
+    _, report = _job_report(db, job_id, session_id)
+    storage = get_storage()
+    path = storage.resolve_path(report.storage_path)
+    raw_path = path.with_name(f"{path.stem}_data.json")
+    
+    if not raw_path.exists():
+        # Fallback to existing Excel file if raw data is lost
+        return FileResponse(path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        
+    with open(raw_path, "r") as f:
+        universal_data = json.load(f)
+        
+    # Generate new temp file
+    from fastapi.background import BackgroundTasks
+    import tempfile
+    
+    fd, temp_path_str = tempfile.mkstemp(suffix=".xlsx", prefix="recliq_custom_")
+    import os
+    os.close(fd)
+    temp_path = Path(temp_path_str)
+    
+    try:
+        generate_enterprise_report(universal_data, config.model_dump(), temp_path)
+    except Exception as e:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise HTTPException(status_code=500, detail=str(e))
+        
+    # We will let FileResponse handle it and optionally delete after? Wait, FileResponse doesn't delete automatically.
+    # FastAPI background task can delete it.
+    from starlette.background import BackgroundTask
+    return FileResponse(
+        temp_path, 
+        filename=f"Custom_{report.filename}", 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        background=BackgroundTask(lambda: temp_path.unlink(missing_ok=True) if temp_path.exists() else None)
+    )
 
 
 @router.get("/job/{job_id}/summary")

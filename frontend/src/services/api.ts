@@ -179,6 +179,38 @@ export class ApiClient {
     URL.revokeObjectURL(url);
   }
 
+  async downloadCustomReport(jobId: string, config: import("../types").ReportCustomConfig): Promise<void> {
+    const response = await fetch(`${API_BASE}/reports/job/${jobId}/download_custom`, {
+      method: "POST",
+      body: JSON.stringify(config),
+      credentials: "include",
+      headers: new Headers({
+        ...Object.fromEntries(sessionHeaders().entries()),
+        "Content-Type": "application/json"
+      })
+    });
+    rememberSession(response);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    // Fastapi sends Content-Disposition with filename, we can try to extract or default
+    const contentDisposition = response.headers.get("Content-Disposition");
+    let filename = "RecliQ_Custom_Report.xlsx";
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="?([^"]+)"?/);
+      if (match) {
+        filename = match[1];
+      }
+    }
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   async downloadSampleTemplate(type: "generic" | "gst"): Promise<void> {
     const response = await fetch(`${API_BASE}/reconciliation/sample-template?type=${type}`, {
       credentials: "include",

@@ -113,7 +113,6 @@ export function UploadPage({ onJobCreated }: Props) {
       .then((config) => { setGstConfig(config); setGstConfigError(""); })
       .catch((error: Error) => setGstConfigError(error.message || "Could not load the GST configuration."));
   }, []);
-  useEffect(() => { if (hasBothFiles && step === 1) setStep(2); }, [hasBothFiles, step]);
 
   async function start() {
     if (!file1 || !file2) {

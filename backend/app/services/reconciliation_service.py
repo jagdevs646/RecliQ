@@ -198,13 +198,21 @@ def process_reconciliation_job(job_id: str) -> None:
             raise InterruptedError("Reconciliation cancelled by user")
 
         stored_report = storage.save_report(output_path, job.session_id, output_name)
+        
+        # Also copy the raw JSON data so we can rebuild custom reports later
+        raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+        if raw_path.exists():
+            import shutil
+            raw_storage_path = storage.resolve_path(stored_report.storage_path).with_name(f"{Path(stored_report.storage_path).stem}_data.json")
+            shutil.copy(raw_path, raw_storage_path)
+            
         report = Report(
             session_id=job.session_id,
             filename=output_name,
             storage_backend=stored_report.storage_backend,
             storage_path=stored_report.storage_path,
             size_bytes=stored_report.size_bytes,
-            summary_json=json.dumps(summary),
+            summary_json=json.dumps(summary.get("statistics", {}) if "statistics" in summary else summary),
         )
         db.add(report)
         db.flush()
@@ -263,5 +271,8 @@ def process_reconciliation_job(job_id: str) -> None:
                 file_2_path.unlink(missing_ok=True)
             if output_path and output_path.exists():
                 output_path.unlink(missing_ok=True)
+                raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+                if raw_path.exists():
+                    raw_path.unlink(missing_ok=True)
         except Exception:
             pass
