@@ -34,6 +34,8 @@ from app.reconciliation_engine.utilities import (
     validate_columns,
     validate_combined_numeric_rules,
 )
+from app.reconciliation_engine.universal_mapper import build_universal_data_model
+from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 REQUIRED_GST_COLUMNS = [
     "GSTR",
@@ -172,6 +174,7 @@ def run_generic_reconciliation(
 
     reconciliation_results: list[dict] = []
     file_1_not_found: list[dict] = []
+    matched_records: list[dict] = []
     matched_file_2_indices: set = set()
 
     tracker.matching_records()
@@ -222,6 +225,8 @@ def run_generic_reconciliation(
 
         if has_reportable_issue:
             reconciliation_results.append(reconciliation_result)
+        else:
+            matched_records.append(reconciliation_result)
 
     tracker.comparing_columns()
 
@@ -239,14 +244,27 @@ def run_generic_reconciliation(
             file_2_not_found.append(clean_f2_row)
 
     tracker.generating_report()
-    write_generic_report(
-        output_path,
-        reconciliation_results,
-        file_1_not_found,
-        file_2_not_found,
+    
+    universal_data = build_universal_data_model(
+        job_type="generic",
         file_1_name=file_1_name,
         file_2_name=file_2_name,
+        matching_keys=[key_file_1],
+        reconciliation_results=reconciliation_results,
+        file_1_not_found=file_1_not_found,
+        file_2_not_found=file_2_not_found,
+        matched_records=matched_records,
+        total_file_1=len(file_1_df),
+        total_file_2=len(file_2_df),
     )
+    
+    # Store the raw universal data as well, so it can be retrieved for custom report generation.
+    import json
+    raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+    with open(raw_path, "w") as f:
+        json.dump(universal_data, f)
+        
+    generate_enterprise_report(universal_data, {}, output_path)
 
     tracker.finalized()
 
@@ -312,6 +330,7 @@ def run_gst_reconciliation(
     mismatched: list[dict] = []
     only_in_file1: list[dict] = []
     confidence_review: list[dict] = []
+    matched_records: list[dict] = []
     matched_file2_indices: set = set()
 
     tracker.matching_records()
@@ -396,6 +415,9 @@ def run_gst_reconciliation(
             record = dict(base)
             record.update(review_notes)
             confidence_review.append(record)
+        else:
+            record = dict(base)
+            matched_records.append(record)
 
     tracker.comparing_columns()
 
@@ -413,15 +435,29 @@ def run_gst_reconciliation(
             only_in_file2.append(clean_r2)
 
     tracker.generating_report()
-    write_gst_output(
-        mismatched,
-        only_in_file1,
-        only_in_file2,
-        confidence_review,
-        output_path,
-        file1_name=file_1_name,
-        file2_name=file_2_name,
+    
+    # We combine mismatched + confidence_review for the universal model
+    combined_mismatched = mismatched + confidence_review
+    
+    universal_data = build_universal_data_model(
+        job_type="gst",
+        file_1_name=file_1_name,
+        file_2_name=file_2_name,
+        matching_keys=["GSTR", "INVOICE NO."],
+        reconciliation_results=combined_mismatched,
+        file_1_not_found=only_in_file1,
+        file_2_not_found=only_in_file2,
+        matched_records=matched_records,
+        total_file_1=len(df1),
+        total_file_2=len(df2),
     )
+    
+    import json
+    raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+    with open(raw_path, "w") as f:
+        json.dump(universal_data, f)
+        
+    generate_enterprise_report(universal_data, {}, output_path)
 
     tracker.finalized()
 

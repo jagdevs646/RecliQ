@@ -66,3 +66,15 @@ export interface ReportPreview {
   offset: number;
   limit: number;
 }
+
+export interface ReportCustomConfig {
+  include_summary: boolean;
+  include_exceptions: boolean;
+  include_matched: boolean;
+  include_missing_file_1: boolean;
+  include_missing_file_2: boolean;
+  include_field_differences: boolean;
+  include_controls: boolean;
+  date_format: string;
+  number_format: string;
+}

@@ -1,7 +1,8 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Eye, FileWarning, Search, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Eye, FileWarning, Search, ShieldCheck, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../services/api";
-import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview } from "../types";
+import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportCustomConfig } from "../types";
+import { ReportCustomizer } from "../components/ReportCustomizer";
 
 interface Props { job: Job | null; onNewReconciliation: () => void; }
 
@@ -15,6 +16,8 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
   const [query, setQuery] = useState("");
   const [message, setMessage] = useState("");
   const [loadingPreview, setLoadingPreview] = useState(false);
+  const [viewStage, setViewStage] = useState<"results" | "customize" | "download">("results");
+  const [customConfig, setCustomConfig] = useState<ReportCustomConfig | null>(null);
 
   const file1Name = job?.input_file_1_name || "File 1";
   const file2Name = job?.input_file_2_name || "File 2";
@@ -54,10 +57,71 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
 
   if (!job || job.status !== "completed") return <section className="page"><div className="empty-state"><h2>No completed report selected</h2><p>Complete a reconciliation to see its results dashboard.</p><button type="button" className="primary" onClick={onNewReconciliation}>Start reconciliation</button></div></section>;
 
+  if (viewStage === "customize") {
+    return (
+      <ReportCustomizer
+        source1Name={file1Name}
+        source2Name={file2Name}
+        onGenerate={(config) => {
+          setCustomConfig(config);
+          setViewStage("download");
+        }}
+        onCancel={() => setViewStage("results")}
+      />
+    );
+  }
+
+  if (viewStage === "download") {
+    return (
+      <section className="page results-page">
+        <div className="page-title">
+          <div>
+            <span className="eyebrow">Report Ready</span>
+            <h1>Download Your Report</h1>
+            <p>Your customized report has been generated successfully.</p>
+          </div>
+          <div style={{ display: 'flex', gap: '0.5rem' }}>
+            <button type="button" className="secondary" onClick={() => setViewStage("customize")}>
+              <ArrowLeft size={18} /> Back to Customize
+            </button>
+          </div>
+        </div>
+        
+        <div className="ready-card" style={{ background: '#fff', border: '1px solid #dbe6e5', borderRadius: '8px' }}>
+          <div>
+            <CheckCircle2 size={40} color="#087d72" />
+          </div>
+          <div>
+            <h2>Report Generated</h2>
+            <p>The detailed Excel workbook contains your customized configuration.</p>
+            {message && <p className="error-text" style={{ marginTop: '10px' }}>{message}</p>}
+          </div>
+          <button type="button" className="primary run-button" onClick={() => {
+            if (job && customConfig) {
+              api.downloadCustomReport(job.id, customConfig).catch((err) => setMessage(err instanceof Error ? err.message : "Download failed"));
+            }
+          }}>
+            <Download size={20} /> Download Report
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   return <section className="page results-page">
-    <div className="page-title"><div><span className="eyebrow">Reconciliation complete</span><h1>Results dashboard</h1><p>Review exceptions, inspect the records behind them, and download the detailed workbook.</p></div><button type="button" className="primary" onClick={download}><Download size={18} />Download Excel report</button></div>
+    <div className="page-title"><div><span className="eyebrow">Reconciliation complete</span><h1>Results dashboard</h1><p>Review exceptions, inspect the records behind them, and download the detailed workbook.</p></div>
+      <div style={{ display: 'flex', gap: '0.5rem' }}>
+        <button type="button" className="secondary" onClick={() => setViewStage("customize")}><Settings2 size={18} />Customize Report</button>
+        <button type="button" className="primary" onClick={download}><Download size={18} />Default Report</button>
+      </div>
+    </div>
     <div className="summary-grid"><Metric label="Records compared" value={total} icon={<ShieldCheck size={20} />} tone="blue" /><Metric label="Fully matched" value={matched} icon={<CheckCircle2 size={20} />} tone="green" /><Metric label="Discrepancies found" value={summary.report_rows} icon={<AlertTriangle size={20} />} tone="coral" /><Metric label="Reconciliation accuracy" value={total ? `${accuracy.toFixed(2)}%` : "—"} icon={<ShieldCheck size={20} />} tone="violet" /></div>
-    <div className="results-insights"><div className="chart-card"><div><h2>Result distribution</h2><p>Matched records and exceptions in this run.</p></div><div className="donut-wrap"><div className="donut" style={chartStyle}><span>{total}</span><small>records</small></div><ul className="chart-legend"><li><i className="legend-green" />Matched <strong>{matched}</strong></li><li><i className="legend-coral" />Discrepancies <strong>{summary.report_rows}</strong></li><li><i className="legend-amber" />{file1Name} only <strong>{summary.only_in_file_1}</strong></li><li><i className="legend-slate" />{file2Name} only <strong>{summary.only_in_file_2}</strong></li></ul></div></div><div className="result-note"><ShieldCheck size={23} /><div><h2>Report ready</h2><p>The detailed Excel workbook contains the complete reconciliation, including every exception and selected context field.</p><button type="button" className="text-command" onClick={download}><Download size={16} />Download detailed report</button></div></div></div>
+    <div className="results-insights"><div className="chart-card"><div><h2>Result distribution</h2><p>Matched records and exceptions in this run.</p></div><div className="donut-wrap"><div className="donut" style={chartStyle}><span>{total}</span><small>records</small></div><ul className="chart-legend"><li><i className="legend-green" />Matched <strong>{matched}</strong></li><li><i className="legend-coral" />Discrepancies <strong>{summary.report_rows}</strong></li><li><i className="legend-amber" />{file1Name} only <strong>{summary.only_in_file_1}</strong></li><li><i className="legend-slate" />{file2Name} only <strong>{summary.only_in_file_2}</strong></li></ul></div></div><div className="result-note"><ShieldCheck size={23} /><div><h2>Report ready</h2><p>The detailed Excel workbook contains the complete reconciliation, including every exception and selected context field.</p>
+      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+        <button type="button" className="text-command" onClick={() => setViewStage("customize")}><Settings2 size={16} />Customize</button>
+        <button type="button" className="text-command" onClick={download}><Download size={16} />Download default</button>
+      </div>
+    </div></div></div>
     <section><div className="section-heading"><div><h2>Exception categories</h2><p>Open any category to inspect a paginated preview of up to 25 report rows at a time.</p></div></div><div className="result-card-grid">{cards.map(({ category: cardCategory, title, label, count, icon: Icon, tone }) => <article className={`result-card tone-${tone}`} key={cardCategory}><Icon size={20} /><span>{title}</span><strong>{count.toLocaleString()}</strong><p>{label}</p><button type="button" className="text-command" onClick={() => openPreview(cardCategory)}><Eye size={16} />View details</button></article>)}</div></section>
     {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{preview.sheet_name}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div><div className="table-scroll"><table><thead><tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length)}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column}>{row[column] ?? "—"}</td>)}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
     {message && <p className="error-text">{message}</p>}
