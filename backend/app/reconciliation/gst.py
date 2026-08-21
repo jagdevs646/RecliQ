@@ -213,6 +213,10 @@ def run_gst_reconciliation(
     output_path: Path,
     orientation: str = "vertical",
     text_threshold: int = TEXT_REVIEW_THRESHOLD,
+    progress_callback=None,
+    file_1_name: str = "File1",
+    file_2_name: str = "File2",
+    is_cancelled=None,
 ) -> dict:
     return run_gst_reconciliation_impl(
         file_1_path,
@@ -220,4 +224,8 @@ def run_gst_reconciliation(
         output_path,
         orientation=orientation,
         text_threshold=text_threshold,
+        progress_callback=progress_callback,
+        file_1_name=file_1_name,
+        file_2_name=file_2_name,
+        is_cancelled=is_cancelled,
     )

@@ -60,8 +60,13 @@ def build_universal_data_model(
                     exc_type_counts[exc_type] = exc_type_counts.get(exc_type, 0) + 1
                     
                     diff_pct = None
-                    if diff is not None and f2_val and isinstance(f2_val, (int, float)) and f2_val != 0:
-                        diff_pct = (float(diff) / float(f2_val)) * 100
+                    if diff is not None and f2_val is not None:
+                        try:
+                            f2_num = float(f2_val)
+                            if f2_num != 0:
+                                diff_pct = float(diff) / f2_num
+                        except (ValueError, TypeError):
+                            diff_pct = None
                         
                     exceptions.append({
                         "Exception ID": exc_id,

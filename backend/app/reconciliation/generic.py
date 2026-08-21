@@ -83,6 +83,10 @@ def run_generic_reconciliation(
     orientation: str = "vertical",
     include_columns_file_1: list[str] | None = None,
     include_columns_file_2: list[str] | None = None,
+    progress_callback=None,
+    file_1_name: str = "File 1",
+    file_2_name: str = "File 2",
+    is_cancelled=None,
 ) -> dict:
     return run_generic_reconciliation_impl(
         file_1_path,
@@ -94,4 +98,8 @@ def run_generic_reconciliation(
         orientation=orientation,
         include_columns_file_1=include_columns_file_1,
         include_columns_file_2=include_columns_file_2,
+        progress_callback=progress_callback,
+        file_1_name=file_1_name,
+        file_2_name=file_2_name,
+        is_cancelled=is_cancelled,
     )

@@ -18,3 +18,5 @@ recliq_dev.db
 .idea/
 *.docx
 ~$*
+scratch/
+backend/test_report_output.xlsx
