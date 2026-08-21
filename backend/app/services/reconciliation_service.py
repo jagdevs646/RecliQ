@@ -206,13 +206,15 @@ def process_reconciliation_job(job_id: str) -> None:
             raw_storage_path = storage.resolve_path(stored_report.storage_path).with_name(f"{Path(stored_report.storage_path).stem}_data.json")
             shutil.copy(raw_path, raw_storage_path)
             
+        from app.utils.json_encoder import safe_json_dumps
+
         report = Report(
             session_id=job.session_id,
             filename=output_name,
             storage_backend=stored_report.storage_backend,
             storage_path=stored_report.storage_path,
             size_bytes=stored_report.size_bytes,
-            summary_json=json.dumps(summary.get("statistics", {}) if "statistics" in summary else summary),
+            summary_json=safe_json_dumps(summary.get("statistics", {}) if "statistics" in summary else summary),
         )
         db.add(report)
         db.flush()
@@ -221,7 +223,7 @@ def process_reconciliation_job(job_id: str) -> None:
         job.status = "completed"
         job.progress = 100
         job.completed_at = datetime.now(timezone.utc)
-        append_history(db, job, "completed", "Reconciliation completed", json.dumps(summary))
+        append_history(db, job, "completed", "Reconciliation completed", safe_json_dumps(summary))
         db.commit()
 
         # Enforce maximum 20 stored records per session
