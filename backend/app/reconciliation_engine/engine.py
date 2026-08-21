@@ -259,10 +259,10 @@ def run_generic_reconciliation(
     )
     
     # Store the raw universal data as well, so it can be retrieved for custom report generation.
-    import json
+    from app.utils.json_encoder import safe_json_dump
     raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-    with open(raw_path, "w") as f:
-        json.dump(universal_data, f)
+    with open(raw_path, "w", encoding="utf-8") as f:
+        safe_json_dump(universal_data, f)
         
     generate_enterprise_report(universal_data, {}, output_path)
 
@@ -452,10 +452,10 @@ def run_gst_reconciliation(
         total_file_2=len(df2),
     )
     
-    import json
+    from app.utils.json_encoder import safe_json_dump
     raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-    with open(raw_path, "w") as f:
-        json.dump(universal_data, f)
+    with open(raw_path, "w", encoding="utf-8") as f:
+        safe_json_dump(universal_data, f)
         
     generate_enterprise_report(universal_data, {}, output_path)
 
