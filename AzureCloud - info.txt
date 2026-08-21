@@ -1,0 +1,14 @@
+AzureCloud
+
+Subs Id: 0970f2ba-ec62-4d29-bd65-ba5bae0ca705
+Tenant Id: 6bab7765-c387-4d0d-9be7-7f5679251594
+
+User = recliq08021102acr
+Password = FMsDlNRzUyjNvx0i6FDm5Dh8swBcOELn471qF80llxkoYQyXje7WJQQJ99CHACGhslBEqg7NAAACAZCRpoKN
+
+.env content 
+DATABASE_URL=sqlite:///./reconx_dev.db
+SECRET_KEY=local-test-secret-change-later
+STORAGE_BACKEND=local
+LOCAL_STORAGE_PATH=./storage
+FRONTEND_ORIGIN=http://127.0.0.1:5173

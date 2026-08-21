@@ -40,10 +40,41 @@ def _preview_sheet_name(path: Path, category: str) -> str:
     finally:
         workbook.close()
 
+    if not names:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workbook is empty")
+
+    if category == "discrepancies":
+        for name in names:
+            if "02" in name or "Exception" in name or "Discrepanc" in name:
+                return name
+        return names[0]
+    elif category == "only_file_1":
+        for name in names:
+            if "05" in name:
+                return name
+        for name in names:
+            if "Missing" in name:
+                return name
+        return names[min(2, len(names) - 1)]
+    elif category == "only_file_2":
+        for name in names:
+            if "04" in name:
+                return name
+        for name in names:
+            if "Missing" in name:
+                return name
+        return names[min(1, len(names) - 1)]
+    elif category == "review":
+        for name in names:
+            if "06" in name or "Field Difference" in name or "Review" in name:
+                return name
+        return names[min(3, len(names) - 1)]
+
     index_by_category = {"discrepancies": 0, "only_file_1": 1, "only_file_2": 2, "review": 3}
-    if category not in index_by_category or index_by_category[category] >= len(names):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported preview category")
-    return names[index_by_category[category]]
+    if category in index_by_category and index_by_category[category] < len(names):
+        return names[index_by_category[category]]
+    return names[0]
+
 
 
 def _json_value(value: Any) -> Any:
@@ -157,11 +188,22 @@ def job_report_preview(
     path = get_storage().resolve_path(report.storage_path)
     sheet_name = _preview_sheet_name(path, category)
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    header_row_idx = 0
     try:
-        total_rows = max(0, workbook[sheet_name].max_row - 1)
+        ws = workbook[sheet_name]
+        for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+            non_null_count = sum(1 for v in row if v is not None and str(v).strip() != "")
+            if non_null_count >= 3:
+                header_row_idx = r_idx
+                break
+            if r_idx > 10:
+                break
+        total_rows = max(0, ws.max_row - (header_row_idx + 1))
     finally:
         workbook.close()
-    frame = pd.read_excel(path, sheet_name=sheet_name, skiprows=range(1, offset + 1), nrows=limit)
+
+    skip_range = range(header_row_idx + 1, header_row_idx + 1 + offset) if offset > 0 else None
+    frame = pd.read_excel(path, sheet_name=sheet_name, header=header_row_idx, skiprows=skip_range, nrows=limit)
     records = [
         {str(column): _json_value(value) for column, value in row.items()}
         for row in frame.to_dict(orient="records")
