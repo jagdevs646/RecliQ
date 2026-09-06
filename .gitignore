@@ -5,6 +5,8 @@
 !.env.example
 !.env.production
 .venv/
+venv/
+backend/venv/
 __pycache__/
 *.pyc
 # Ignore uploaded-file storage dirs but NOT the app/storage Python module

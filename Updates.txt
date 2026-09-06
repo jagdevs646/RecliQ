@@ -1,0 +1,7 @@
+1. Give user the option to select the particular sheet on which he wants to perform the reconciliation - Earlier after uploading the excel the system will just take the 1st sheet to perform the reconcliaiton. Now After uploading the excels the system should check whether the excel has multiple sheets if both uploaded excels has single sheet then go for the next step but if it has multiple sheets it should ask user to select particular sheet which should be taken for reconciliation process further.
+
+2. Earlier the system just accepts excel or csv files for the reconcliations - Now i want him to accept more types of files like pdf, Md, word, or any file which actually contains the data or table which is going to be used for reconciliation.
+
+3. When performing reconciliation for a data which has unique matching key as - ABC/123, ABC-123, ABC|123 etc. format and other file on which search is going to happen has a format of ABC123  or ABC 123 etc. which is different from first file but logically same and it should search for it and gets matched with that key but that's a loop hole which we need to solve. 
+
+4. Build a reconciliation logic of doing reconciliation using Unique matching Key as Dates.

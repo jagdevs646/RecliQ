@@ -6,6 +6,22 @@ export interface User {
   full_name: string;
 }
 
+export interface SheetMetadata {
+  id: string;
+  name: string;
+}
+
+export interface FileMetadataResponse {
+  file_id: string;
+  filename: string;
+  sheets: SheetMetadata[];
+}
+
+export interface FileSource {
+  file_id: string;
+  sheet_id?: string | null;
+}
+
 export interface UploadedFile {
   id: string;
   original_filename: string;
@@ -18,6 +34,19 @@ export interface UploadedFile {
 export interface RuleMapping {
   file_1_fields: string[];
   file_2_fields: string[];
+}
+
+export interface AnalysisResponse {
+  recommended_keys_1: string[];
+  recommended_keys_2: string[];
+  key_confidence: number;
+  is_composite_key: boolean;
+  recommended_mappings: {
+    source: string;
+    target: string | null;
+    score: number;
+    confidence: "High" | "Medium" | "Low" | "None";
+  }[];
 }
 
 export interface GstConfiguration {

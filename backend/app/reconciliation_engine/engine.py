@@ -24,6 +24,8 @@ from app.reconciliation_engine.preprocessing import (
     prepare_dataframe,
     read_excel_columns,
 )
+from app.reconciliation_engine.normalization import normalize_dataframe
+from app.reconciliation_engine.matching.advanced_matcher import find_duplicates, group_for_many_to_one
 from app.reconciliation_engine.progress_tracker import ProgressTracker
 from app.reconciliation_engine.report_generator import (
     write_generic_report,
@@ -108,11 +110,11 @@ def compare_rule_values(
 
 
 def run_generic_reconciliation(
-    file_1_path: Path,
-    file_2_path: Path,
+    file_1_df: pd.DataFrame,
+    file_2_df: pd.DataFrame,
     output_path: Path,
-    key_file_1: str,
-    key_file_2: str,
+    key_file_1: list[str],
+    key_file_2: list[str],
     rules: list[dict],
     orientation: str = "vertical",
     include_columns_file_1: list[str] | None = None,
@@ -125,16 +127,15 @@ def run_generic_reconciliation(
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
 
-    raw_f1 = pd.read_excel(file_1_path)
-    raw_f2 = pd.read_excel(file_2_path)
-    raw_f1["_ROW_NO"] = raw_f1.index + 2
-    raw_f2["_ROW_NO"] = raw_f2.index + 2
+    # Preprocess incoming DFs to ensure row numbers and basic normalization
+    if "_ROW_NO" not in file_1_df.columns:
+        file_1_df["_ROW_NO"] = file_1_df.index + 2
+    if "_ROW_NO" not in file_2_df.columns:
+        file_2_df["_ROW_NO"] = file_2_df.index + 2
+        
+    file_1_id_col = [normalize_header(k) for k in key_file_1]
+    file_2_id_col = [normalize_header(k) for k in key_file_2]
 
-    file_1_df = prepare_dataframe(raw_f1, orientation=orientation)
-    file_2_df = prepare_dataframe(raw_f2, orientation=orientation)
-
-    file_1_id_col = normalize_header(key_file_1)
-    file_2_id_col = normalize_header(key_file_2)
     normalized_rules = [
         (
             normalize_fields(rule.get("file_1_fields", [])),
@@ -149,15 +150,41 @@ def run_generic_reconciliation(
     if not normalized_rules:
         raise ValueError("At least one reconciliation rule is required.")
 
-    validate_columns(file_1_df, [file_1_id_col, *file_1_extra], "File 1")
-    validate_columns(file_2_df, [file_2_id_col, *file_2_extra], "File 2")
+    validate_columns(file_1_df, [*file_1_id_col, *file_1_extra], "File 1")
+    validate_columns(file_2_df, [*file_2_id_col, *file_2_extra], "File 2")
     for left, right in normalized_rules:
         validate_columns(file_1_df, left, "File 1 rule")
         validate_columns(file_2_df, right, "File 2 rule")
     validate_combined_numeric_rules(file_1_df, file_2_df, normalized_rules)
+    
+    # 1. Normalize data
+    date_cols = [rule[0][0] for rule in normalized_rules if 'date' in rule[0][0].lower()]
+    text_cols = [rule[0][0] for rule in normalized_rules if 'name' in rule[0][0].lower() or 'vendor' in rule[0][0].lower()]
+    num_cols = [rule[0][0] for rule in normalized_rules if 'amount' in rule[0][0].lower() or 'value' in rule[0][0].lower() or 'tax' in rule[0][0].lower()]
+    
+    f1_norm_config = {"date_columns": date_cols, "text_columns": text_cols, "number_columns": num_cols, "id_columns": file_1_id_col}
+    f2_norm_config = {"date_columns": [r[1][0] for r in normalized_rules if r[0][0] in date_cols], 
+                      "text_columns": [r[1][0] for r in normalized_rules if r[0][0] in text_cols], 
+                      "number_columns": [r[1][0] for r in normalized_rules if r[0][0] in num_cols],
+                      "id_columns": file_2_id_col}
+                      
+    file_1_df = normalize_dataframe(file_1_df, f1_norm_config)
+    file_2_df = normalize_dataframe(file_2_df, f2_norm_config)
 
-    file_1_df = aggregate_by_key(file_1_df, file_1_id_col)
-    file_2_df = aggregate_by_key(file_2_df, file_2_id_col)
+    # Use normalized keys for matching
+    file_1_match_keys = [f"NORM_{k}" if f"NORM_{k}" in file_1_df.columns else k for k in file_1_id_col]
+    file_2_match_keys = [f"NORM_{k}" if f"NORM_{k}" in file_2_df.columns else k for k in file_2_id_col]
+
+    # Handle duplicates & Grouping (One-to-many / Many-to-one)
+    file_1_df, f1_dupes = find_duplicates(file_1_df, file_1_match_keys)
+    file_2_df, f2_dupes = find_duplicates(file_2_df, file_2_match_keys)
+    
+    file_1_df = group_for_many_to_one(file_1_df, file_1_match_keys, num_cols)
+    file_2_df = group_for_many_to_one(file_2_df, file_2_match_keys, f2_norm_config["number_columns"])
+    
+    # Let's map back to primary key for matcher for simplicity (using just the first key if composite)
+    primary_key_1 = file_1_match_keys[0]
+    primary_key_2 = file_2_match_keys[0]
 
     if is_cancelled and is_cancelled():
         raise InterruptedError("Reconciliation cancelled by user")
@@ -165,12 +192,12 @@ def run_generic_reconciliation(
     tracker.building_indexes()
 
     key_type = detect_matcher_type(
-        list(file_1_df[file_1_id_col]) + list(file_2_df[file_2_id_col]),
-        file_1_id_col,
-        file_2_id_col,
+        list(file_1_df[primary_key_1]) + list(file_2_df[primary_key_2]),
+        primary_key_1,
+        primary_key_2,
     )
 
-    indexed_matcher = IndexedCandidateMatcher(file_2_df, file_2_id_col, key_type)
+    indexed_matcher = IndexedCandidateMatcher(file_2_df, primary_key_2, key_type)
 
     reconciliation_results: list[dict] = []
     file_1_not_found: list[dict] = []
@@ -184,11 +211,11 @@ def run_generic_reconciliation(
         if is_cancelled and row_idx % 25 == 0 and is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
 
-        file_1_id = file_1_row.get(file_1_id_col)
+        file_1_id = file_1_row.get(primary_key_1)
 
         best_idx, file_2_row, key_result = indexed_matcher.find_best_match(
             file_1_id,
-            file_1_id_col,
+            primary_key_1,
             matched_file_2_indices,
         )
 
@@ -199,14 +226,23 @@ def run_generic_reconciliation(
             continue
 
         matched_file_2_indices.add(best_idx)
+        
+        # Check if this was a many-to-one or one-to-many match
+        group_status = "One-to-One Match"
+        if file_1_row.get("__GROUP_COUNT__", 1) > 1 and file_2_row.get("__GROUP_COUNT__", 1) == 1:
+            group_status = "Many-to-One Match"
+        elif file_1_row.get("__GROUP_COUNT__", 1) == 1 and file_2_row.get("__GROUP_COUNT__", 1) > 1:
+            group_status = "One-to-Many Match"
+            
         reconciliation_result = {
             "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
             "ROW (FILE 2)": file_2_row.get("_ROW_NO", best_idx + 2),
-            file_1_id_col: file_1_id,
-            f"MATCHED {file_2_id_col}": file_2_row.get(file_2_id_col),
+            primary_key_1: file_1_id,
+            f"MATCHED {primary_key_2}": file_2_row.get(primary_key_2),
             "MATCH TYPE": key_result.matcher_type,
             "MATCH CONFIDENCE": f"{key_result.confidence}%",
             "MATCH STATUS": key_result.status,
+            "GROUP CLASSIFICATION": group_status
         }
 
         for col in file_1_extra:
@@ -242,6 +278,17 @@ def run_generic_reconciliation(
             clean_f2_row = {k: v for k, v in file_2_records[i].items() if k != "_ROW_NO"}
             clean_f2_row["ROW (FILE 2)"] = file_2_records[i].get("_ROW_NO", idx + 2)
             file_2_not_found.append(clean_f2_row)
+            
+    # Add duplicates to results as separate classification
+    for _, row in f1_dupes.iterrows():
+        clean_row = {k: v for k, v in row.items() if k != "_ROW_NO"}
+        clean_row["CLASSIFICATION"] = "Duplicate"
+        file_1_not_found.append(clean_row)
+        
+    for _, row in f2_dupes.iterrows():
+        clean_row = {k: v for k, v in row.items() if k != "_ROW_NO"}
+        clean_row["CLASSIFICATION"] = "Duplicate"
+        file_2_not_found.append(clean_row)
 
     tracker.generating_report()
     
@@ -249,7 +296,7 @@ def run_generic_reconciliation(
         job_type="generic",
         file_1_name=file_1_name,
         file_2_name=file_2_name,
-        matching_keys=[key_file_1],
+        matching_keys=file_1_id_col,
         reconciliation_results=reconciliation_results,
         file_1_not_found=file_1_not_found,
         file_2_not_found=file_2_not_found,
@@ -283,8 +330,8 @@ def run_generic_reconciliation(
 
 
 def run_gst_reconciliation(
-    file_1_path: Path,
-    file_2_path: Path,
+    file_1_df,
+    file_2_df,
     output_path: Path,
     orientation: str = "vertical",
     text_threshold: int = GST_TEXT_REVIEW_THRESHOLD,
@@ -296,10 +343,20 @@ def run_gst_reconciliation(
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
 
-    raw1 = pd.read_excel(file_1_path)
-    raw2 = pd.read_excel(file_2_path)
-    raw1["_ROW_NO"] = raw1.index + 2
-    raw2["_ROW_NO"] = raw2.index + 2
+    if isinstance(file_1_df, (Path, str)):
+        raw1 = pd.read_excel(file_1_df)
+    else:
+        raw1 = file_1_df.copy(deep=False) if hasattr(file_1_df, 'copy') else file_1_df
+
+    if isinstance(file_2_df, (Path, str)):
+        raw2 = pd.read_excel(file_2_df)
+    else:
+        raw2 = file_2_df.copy(deep=False) if hasattr(file_2_df, 'copy') else file_2_df
+
+    if "_ROW_NO" not in raw1.columns:
+        raw1["_ROW_NO"] = raw1.index + 2
+    if "_ROW_NO" not in raw2.columns:
+        raw2["_ROW_NO"] = raw2.index + 2
 
     df1 = normalise_gst_df(prepare_dataframe(raw1, orientation=orientation), GST_AMOUNT_COLUMNS)
     df2 = normalise_gst_df(prepare_dataframe(raw2, orientation=orientation), GST_AMOUNT_COLUMNS)

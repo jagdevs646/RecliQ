@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_session_id
 from app.database.session import get_db
 from app.models.file import UploadedFile
-from app.schemas.file import FileColumnsResponse, UploadedFileOut
-from app.services.reconciliation_service import get_file_columns
+from app.schemas.file import FileColumnsResponse, UploadedFileOut, FileMetadataResponse, SheetMetadata
+from app.services.reconciliation_service import get_file_columns, get_file_metadata
 from app.storage import get_storage
 from app.utils.excel import is_supported_workbook
 
@@ -20,7 +20,7 @@ def upload_file(
     session_id: str = Depends(get_session_id),
 ) -> UploadedFile:
     if not is_supported_workbook(file.filename):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only Excel workbooks are supported")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file format")
     stored = get_storage().save_upload(file, session_id)
     record = UploadedFile(
         session_id=session_id,
@@ -37,12 +37,28 @@ def upload_file(
     return record
 
 
+@router.get("/{file_id}/metadata", response_model=FileMetadataResponse)
+def get_metadata(
+    file_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> FileMetadataResponse:
+    metadata_list = get_file_metadata(db, file_id, session_id)
+    record = db.query(UploadedFile).filter(UploadedFile.id == file_id, UploadedFile.session_id == session_id).first()
+    if not record:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+        
+    sheets = [SheetMetadata(id=item["id"], name=item["name"]) for item in metadata_list]
+    return FileMetadataResponse(file_id=file_id, filename=record.original_filename, sheets=sheets)
+
+
 @router.get("/{file_id}/columns", response_model=FileColumnsResponse)
 def columns(
     file_id: str,
+    sheet_id: str | None = None,
     orientation: str = Query(default="vertical"),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
 ) -> FileColumnsResponse:
-    columns_list = get_file_columns(db, file_id, session_id, orientation=orientation)
-    return FileColumnsResponse(file_id=file_id, orientation=orientation, columns=columns_list)
+    columns_list = get_file_columns(db, file_id, session_id, sheet_id=sheet_id, orientation=orientation)
+    return FileColumnsResponse(file_id=file_id, sheet_id=sheet_id, orientation=orientation, columns=columns_list)

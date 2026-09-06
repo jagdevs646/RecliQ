@@ -16,6 +16,17 @@ class UploadedFileOut(BaseModel):
 
 class FileColumnsResponse(BaseModel):
     file_id: str
+    sheet_id: str | None = None
     orientation: str
     columns: list[str]
 
+
+class SheetMetadata(BaseModel):
+    id: str
+    name: str
+
+
+class FileMetadataResponse(BaseModel):
+    file_id: str
+    filename: str
+    sheets: list[SheetMetadata]

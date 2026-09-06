@@ -208,8 +208,8 @@ def write_output(
 
 
 def run_gst_reconciliation(
-    file_1_path: Path,
-    file_2_path: Path,
+    file_1_df,
+    file_2_df,
     output_path: Path,
     orientation: str = "vertical",
     text_threshold: int = TEXT_REVIEW_THRESHOLD,
@@ -219,8 +219,8 @@ def run_gst_reconciliation(
     is_cancelled=None,
 ) -> dict:
     return run_gst_reconciliation_impl(
-        file_1_path,
-        file_2_path,
+        file_1_df,
+        file_2_df,
         output_path,
         orientation=orientation,
         text_threshold=text_threshold,
