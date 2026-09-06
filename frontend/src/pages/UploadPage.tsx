@@ -1,11 +1,13 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Play, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Play, RefreshCw, Sparkles, Loader2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { FileDropzone } from "../components/FileDropzone";
 import { MappingBuilder } from "../components/MappingBuilder";
 import { ReportColumnPicker } from "../components/ReportColumnPicker";
 import { WorkflowSteps } from "../components/WorkflowSteps";
+import { SheetSelector } from "../components/SheetSelector";
+import { SmartMappingReview } from "../components/SmartMappingReview";
 import { api } from "../services/api";
-import type { GstConfiguration, Job, RuleMapping, UploadedFile } from "../types";
+import type { GstConfiguration, Job, RuleMapping, UploadedFile, SheetMetadata, AnalysisResponse } from "../types";
 
 interface Props {
   onJobCreated: (job: Job) => void;
@@ -25,11 +27,18 @@ export function UploadPage({ onJobCreated }: Props) {
   const [step, setStep] = useState(1);
   const [file1, setFile1] = useState<UploadedFile | null>(null);
   const [file2, setFile2] = useState<UploadedFile | null>(null);
+  const [file1Sheets, setFile1Sheets] = useState<SheetMetadata[]>([]);
+  const [file2Sheets, setFile2Sheets] = useState<SheetMetadata[]>([]);
+  const [selectedSheets1, setSelectedSheets1] = useState<string[]>([]);
+  const [selectedSheets2, setSelectedSheets2] = useState<string[]>([]);
+  
   const [file1Columns, setFile1Columns] = useState<string[]>([]);
   const [file2Columns, setFile2Columns] = useState<string[]>([]);
   const [key1, setKey1] = useState("");
   const [key2, setKey2] = useState("");
   const [rules, setRules] = useState<RuleMapping[]>([]);
+  
+  const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [include1, setInclude1] = useState<string[]>([]);
   const [include2, setInclude2] = useState<string[]>([]);
   const [gstConfig, setGstConfig] = useState<GstConfiguration | null>(null);
@@ -51,7 +60,7 @@ export function UploadPage({ onJobCreated }: Props) {
   const file2Name = file2?.original_filename || "File 2";
 
   const canContinue = step === 1
-    ? hasBothFiles
+    ? hasBothFiles && selectedSheets1.length > 0 && selectedSheets2.length > 0
     : jobType === "gst"
       ? gstReady
       : step === 2
@@ -66,15 +75,30 @@ export function UploadPage({ onJobCreated }: Props) {
     setMessage("");
     try {
       const stored = await api.uploadFile(file, (progress) => setUploadProgress((current) => ({ ...current, [which]: progress })));
-      const columns = await api.getColumns(stored.id, orientation);
+      const metadata = await api.getFileMetadata(stored.id);
+      
+      const sheetIds = metadata.sheets.length > 0 ? [metadata.sheets[0].id] : [];
+      
       if (which === 1) {
         setFile1(stored);
-        setFile1Columns(columns);
-        setKey1(columns[0] ?? "");
+        setFile1Sheets(metadata.sheets);
+        setSelectedSheets1(sheetIds);
       } else {
         setFile2(stored);
-        setFile2Columns(columns);
-        setKey2(columns[0] ?? "");
+        setFile2Sheets(metadata.sheets);
+        setSelectedSheets2(sheetIds);
+      }
+      
+      // Auto-refresh columns after upload
+      if (sheetIds.length > 0) {
+        const columns = await api.getColumns(stored.id, orientation, sheetIds[0]);
+        if (which === 1) {
+          setFile1Columns(columns);
+          setKey1(columns[0] ?? "");
+        } else {
+          setFile2Columns(columns);
+          setKey2(columns[0] ?? "");
+        }
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Upload failed");
@@ -87,27 +111,57 @@ export function UploadPage({ onJobCreated }: Props) {
     if (!file1 && !file2) return;
     setBusy(true);
     try {
-      if (file1) {
-        const columns = await api.getColumns(file1.id, orientation);
+      if (file1 && selectedSheets1.length > 0) {
+        const columns = await api.getColumns(file1.id, orientation, selectedSheets1[0]);
         setFile1Columns(columns);
         setKey1((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
-      if (file2) {
-        const columns = await api.getColumns(file2.id, orientation);
+      if (file2 && selectedSheets2.length > 0) {
+        const columns = await api.getColumns(file2.id, orientation, selectedSheets2[0]);
         setFile2Columns(columns);
         setKey2((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
-      setRules([]);
+      
+      if (jobType === "generic" && file1 && file2 && selectedSheets1.length > 0 && selectedSheets2.length > 0) {
+        const source_files_1 = selectedSheets1.map(id => ({ file_id: file1.id, sheet_id: id }));
+        const source_files_2 = selectedSheets2.map(id => ({ file_id: file2.id, sheet_id: id }));
+        const analysisData = await api.analyzeFiles({ source_files_1, source_files_2, orientation });
+        setAnalysis(analysisData);
+        
+        if (analysisData.recommended_keys_1.length > 0) {
+          setKey1(analysisData.recommended_keys_1[0]);
+        }
+        if (analysisData.recommended_keys_2.length > 0) {
+          setKey2(analysisData.recommended_keys_2[0]);
+        }
+        
+        const suggestedRules = analysisData.recommended_mappings
+          .filter(m => m.target && (m.confidence === "High" || m.confidence === "Medium"))
+          .map(m => ({
+            file_1_fields: [m.source],
+            file_2_fields: [m.target as string]
+          }));
+        
+        setRules(suggestedRules);
+      } else {
+        setRules([]);
+      }
+      
       setInclude1([]);
       setInclude2([]);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not read workbook columns");
+      setMessage(error instanceof Error ? error.message : "Could not analyze the files");
     } finally {
       setBusy(false);
     }
   }
 
-  useEffect(() => { refreshColumns().catch(() => undefined); }, [orientation]);
+  // Trigger analysis when orientation or selected sheets change, if we have both files
+  useEffect(() => { 
+    if (file1 && file2) {
+      refreshColumns().catch(() => undefined);
+    }
+  }, [orientation, selectedSheets1, selectedSheets2, file1, file2]);
   useEffect(() => {
     api.getGstConfiguration()
       .then((config) => { setGstConfig(config); setGstConfigError(""); })
@@ -126,9 +180,21 @@ export function UploadPage({ onJobCreated }: Props) {
     setBusy(true);
     setMessage("");
     try {
+      const source_files_1 = selectedSheets1.map(id => ({ file_id: file1.id, sheet_id: id }));
+      const source_files_2 = selectedSheets2.map(id => ({ file_id: file2.id, sheet_id: id }));
+      
       const job = jobType === "gst"
-        ? await api.startGst({ file_1_id: file1.id, file_2_id: file2.id, orientation, text_threshold: gstTextThreshold })
-        : await api.startGeneric({ file_1_id: file1.id, file_2_id: file2.id, key_file_1: key1, key_file_2: key2, rules, orientation, include_columns_file_1: include1, include_columns_file_2: include2 });
+        ? await api.startGst({ source_files_1, source_files_2, orientation, text_threshold: gstTextThreshold })
+        : await api.startGeneric({ 
+            source_files_1, 
+            source_files_2, 
+            key_file_1: key1, 
+            key_file_2: key2, 
+            rules, 
+            orientation, 
+            include_columns_file_1: include1, 
+            include_columns_file_2: include2 
+          });
       onJobCreated(job);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not start reconciliation");
@@ -152,10 +218,23 @@ export function UploadPage({ onJobCreated }: Props) {
       {step === 1 && <div className="step-content">
         <div className="section-heading"><div><h2>Upload your workbooks</h2><p>Choose the source and destination Excel files you want to compare.</p></div></div>
         <div className="setup-controls"><label>Reconciliation type<div className="segmented-control"><button type="button" className={jobType === "generic" ? "is-active" : ""} onClick={() => setJobType("generic")}>General</button><button type="button" className={jobType === "gst" ? "is-active" : ""} onClick={() => setJobType("gst")}>GST invoices</button></div></label><label>Data orientation<div className="segmented-control"><button type="button" className={orientation === "vertical" ? "is-active" : ""} onClick={() => setOrientation("vertical")}>Column headers</button><button type="button" className={orientation === "horizontal" ? "is-active" : ""} onClick={() => setOrientation("horizontal")}>Row headers</button></div></label><button type="button" className="secondary refresh-command" onClick={downloadSample}><Download size={16} />Download {jobType === "gst" ? "GST" : "General"} sample template</button><button type="button" className="secondary refresh-command" onClick={refreshColumns} disabled={!hasBothFiles || busy}><RefreshCw size={16} />Refresh fields</button></div>
-        <div className="upload-grid"><FileDropzone label={file1Name} fileName={file1?.original_filename} fileSize={file1?.size_bytes} columnCount={file1Columns.length} uploading={uploading === 1} progress={uploadProgress[1]} onFile={(file) => upload(1, file)} /><FileDropzone label={file2Name} fileName={file2?.original_filename} fileSize={file2?.size_bytes} columnCount={file2Columns.length} uploading={uploading === 2} progress={uploadProgress[2]} onFile={(file) => upload(2, file)} /></div>
+        <div className="upload-grid">
+          <div>
+            <FileDropzone label={file1Name} fileName={file1?.original_filename} fileSize={file1?.size_bytes} columnCount={file1Columns.length} uploading={uploading === 1} progress={uploadProgress[1]} onFile={(file) => upload(1, file)} />
+            <SheetSelector sheets={file1Sheets} selectedSheets={selectedSheets1} onChange={setSelectedSheets1} fileName={file1Name} />
+          </div>
+          <div>
+            <FileDropzone label={file2Name} fileName={file2?.original_filename} fileSize={file2?.size_bytes} columnCount={file2Columns.length} uploading={uploading === 2} progress={uploadProgress[2]} onFile={(file) => upload(2, file)} />
+            <SheetSelector sheets={file2Sheets} selectedSheets={selectedSheets2} onChange={setSelectedSheets2} fileName={file2Name} />
+          </div>
+        </div>
       </div>}
       {step === 2 && <div className="step-content">
-        {jobType === "generic" ? <><div className="section-heading"><div><h2>Choose the unique matching key</h2><p>Select the identifier that tells RecliQ which records belong together.</p></div><span className="key-hint">{estimatedFields}</span></div><div className="key-selector-grid"><label><span>{file1Name}</span><select value={key1} onChange={(event) => setKey1(event.target.value)}>{file1Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file1Columns.length} columns detected</small></label><ArrowRight size={24} /><label><span>{file2Name}</span><select value={key2} onChange={(event) => setKey2(event.target.value)}>{file2Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file2Columns.length} columns detected</small></label></div><div className="info-callout"><Sparkles size={18} /><span>RecliQ automatically chooses the best numeric, date, identifier, or text comparison method for each mapped field.</span></div></> : <GstMatchingKeyStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} error={gstConfigError} file1Name={file1Name} file2Name={file2Name} />}
+        {jobType === "generic" ? <>
+          <div className="section-heading"><div><h2>Choose the unique matching key</h2><p>Select the identifier that tells RecliQ which records belong together.</p></div><span className="key-hint">{estimatedFields}</span></div>
+          {busy ? <div className="loading-state"><Loader2 className="animate-spin" /> Analyzing dataset...</div> : analysis && <SmartMappingReview analysis={analysis} file1Name={file1Name} file2Name={file2Name} />}
+          <div className="key-selector-grid"><label><span>{file1Name}</span><select value={key1} onChange={(event) => setKey1(event.target.value)}>{file1Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file1Columns.length} columns detected</small></label><ArrowRight size={24} /><label><span>{file2Name}</span><select value={key2} onChange={(event) => setKey2(event.target.value)}>{file2Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file2Columns.length} columns detected</small></label></div><div className="info-callout"><Sparkles size={18} /><span>RecliQ automatically chooses the best numeric, date, identifier, or text comparison method for each mapped field.</span></div>
+        </> : <GstMatchingKeyStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} error={gstConfigError} file1Name={file1Name} file2Name={file2Name} />}
       </div>}
       {step === 3 && <div className="step-content">{jobType === "generic" ? <MappingBuilder file1Columns={file1Columns} file2Columns={file2Columns} rules={rules} onRulesChange={setRules} primaryFile1={key1} primaryFile2={key2} file1Name={file1Name} file2Name={file2Name} /> : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
       {step === 4 && <div className="step-content">{jobType === "generic" ? <ReportColumnPicker file1Columns={file1Columns.filter((column) => column !== key1)} file2Columns={file2Columns.filter((column) => column !== key2)} selectedFile1={include1} selectedFile2={include2} onChangeFile1={setInclude1} onChangeFile2={setInclude2} file1Name={file1Name} file2Name={file2Name} /> : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}

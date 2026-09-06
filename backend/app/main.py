@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import files, health, jobs, reconciliation, reports, session
+from app.api.routes import files, health, jobs, reconciliation, reports, session, analysis
 from app.core.anonymous_session import AnonymousSessionMiddleware
 from app.core.config import get_settings
 from app.database.base import Base
@@ -42,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(session.router, prefix=settings.api_prefix)
     app.include_router(files.router, prefix=settings.api_prefix)
     app.include_router(reconciliation.router, prefix=settings.api_prefix)
+    app.include_router(analysis.router, prefix=settings.api_prefix)
     app.include_router(jobs.router, prefix=settings.api_prefix)
     app.include_router(reports.router, prefix=settings.api_prefix)
     return app

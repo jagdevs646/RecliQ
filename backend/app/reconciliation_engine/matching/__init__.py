@@ -23,6 +23,9 @@ from app.reconciliation_engine.matching.indexed_matcher import (
     non_empty_values,
 )
 
+from app.reconciliation_engine.matching.key_analyzer import analyze_keys
+from app.reconciliation_engine.matching.advanced_matcher import find_duplicates, group_for_many_to_one
+
 __all__ = [
     "IDENTIFIER_NAME_HINTS",
     "NUMERIC_NAME_HINTS",
@@ -46,4 +49,7 @@ __all__ = [
     "_looks_like_name",
     "_fuzzy_score",
     "_difflib_score",
+    "analyze_keys",
+    "find_duplicates",
+    "group_for_many_to_one"
 ]

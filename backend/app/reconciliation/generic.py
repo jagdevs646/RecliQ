@@ -74,8 +74,8 @@ def write_generic_report(output_path, reconciliation_results, file_1_not_found, 
 
 
 def run_generic_reconciliation(
-    file_1_path: Path,
-    file_2_path: Path,
+    file_1_df,
+    file_2_df,
     output_path: Path,
     key_file_1: str,
     key_file_2: str,
@@ -88,13 +88,26 @@ def run_generic_reconciliation(
     file_2_name: str = "File 2",
     is_cancelled=None,
 ) -> dict:
+    import pandas as pd
+    from app.reconciliation_engine.preprocessing import prepare_dataframe
+    
+    if isinstance(file_1_df, (Path, str)):
+        file_1_df = prepare_dataframe(pd.read_excel(file_1_df), orientation=orientation)
+    if isinstance(file_2_df, (Path, str)):
+        file_2_df = prepare_dataframe(pd.read_excel(file_2_df), orientation=orientation)
+    
+    if type(key_file_1) == str:
+        key_file_1 = [key_file_1]
+    if type(key_file_2) == str:
+        key_file_2 = [key_file_2]
+        
     return run_generic_reconciliation_impl(
-        file_1_path,
-        file_2_path,
-        output_path,
-        key_file_1,
-        key_file_2,
-        rules,
+        file_1_df=file_1_df,
+        file_2_df=file_2_df,
+        output_path=output_path,
+        key_file_1=key_file_1,
+        key_file_2=key_file_2,
+        rules=rules,
         orientation=orientation,
         include_columns_file_1=include_columns_file_1,
         include_columns_file_2=include_columns_file_2,

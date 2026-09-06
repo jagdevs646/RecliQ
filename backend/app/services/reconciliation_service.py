@@ -84,10 +84,35 @@ def enqueue_gst_job(
     return job
 
 
-def get_file_columns(db: Session, file_id: str, session_id: str, orientation: str = "vertical") -> list[str]:
+from app.reconciliation_engine.ingestion import extract_file_metadata, read_table_data
+from app.reconciliation_engine.preprocessing import prepare_dataframe
+from app.reconciliation_engine.cache import normalize_header
+
+
+def get_file_metadata(db: Session, file_id: str, session_id: str) -> list[dict]:
     record = _file_record(db, file_id, session_id)
     path = get_storage().resolve_path(record.storage_path)
-    return read_excel_columns(path, orientation=orientation)
+    return extract_file_metadata(path, record.original_filename)
+
+
+def get_file_columns(db: Session, file_id: str, session_id: str, sheet_id: str | None = None, orientation: str = "vertical") -> list[str]:
+    record = _file_record(db, file_id, session_id)
+    path = get_storage().resolve_path(record.storage_path)
+    
+    if not sheet_id:
+        # Default to first sheet
+        metadata = extract_file_metadata(path, record.original_filename)
+        sheet_id = metadata[0]["id"] if metadata else "default"
+        
+    df = read_table_data(path, record.original_filename, sheet_id)
+    if df.empty:
+        return []
+        
+    if str(orientation).lower().startswith("horizontal"):
+        from app.reconciliation_engine.preprocessing import transform_horizontal_dataframe
+        df = transform_horizontal_dataframe(df)
+        
+    return [normalize_header(col) for col in df.columns]
 
 
 def process_reconciliation_job_async(job_id: str) -> None:
@@ -165,11 +190,24 @@ def process_reconciliation_job(job_id: str) -> None:
         if is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
 
+        from app.api.routes.analysis import _load_and_consolidate
+        from app.schemas.reconciliation import FileSource
+
+        # Use source_files if present, otherwise fallback to legacy file_id
+        source_files_1 = payload.get("source_files_1", [{"file_id": payload.get("file_1_id", job.input_file_1_id)}])
+        source_files_2 = payload.get("source_files_2", [{"file_id": payload.get("file_2_id", job.input_file_2_id)}])
+        
+        sources_1 = [FileSource(**fs) for fs in source_files_1]
+        sources_2 = [FileSource(**fs) for fs in source_files_2]
+        
+        df1 = _load_and_consolidate(db, job.session_id, sources_1)
+        df2 = _load_and_consolidate(db, job.session_id, sources_2)
+
         if job.job_type == "gst":
             summary = run_gst_reconciliation(
-                file_1_path,
-                file_2_path,
-                output_path,
+                file_1_df=df1,
+                file_2_df=df2,
+                output_path=output_path,
                 orientation=payload.get("orientation", job.orientation),
                 text_threshold=int(payload.get("text_threshold", 85)),
                 progress_callback=on_progress,
@@ -178,19 +216,26 @@ def process_reconciliation_job(job_id: str) -> None:
                 is_cancelled=is_cancelled,
             )
         else:
+            key_f1 = payload["key_file_1"]
+            key_f2 = payload["key_file_2"]
+            if isinstance(key_f1, str):
+                key_f1 = [key_f1]
+            if isinstance(key_f2, str):
+                key_f2 = [key_f2]
+
             summary = run_generic_reconciliation(
-                file_1_path,
-                file_2_path,
-                output_path,
-                key_file_1=payload["key_file_1"],
-                key_file_2=payload["key_file_2"],
+                file_1_df=df1,
+                file_2_df=df2,
+                output_path=output_path,
+                key_file_1=key_f1,
+                key_file_2=key_f2,
                 rules=payload.get("rules", []),
                 orientation=payload.get("orientation", job.orientation),
                 include_columns_file_1=payload.get("include_columns_file_1", []),
                 include_columns_file_2=payload.get("include_columns_file_2", []),
                 progress_callback=on_progress,
-                file_1_name=file_1.original_filename,
-                file_2_name=file_2.original_filename,
+                file_1_name=file_1.original_filename if file_1 else "File 1",
+                file_2_name=file_2.original_filename if file_2 else "File 2",
                 is_cancelled=is_cancelled,
             )
 

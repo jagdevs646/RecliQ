@@ -300,6 +300,7 @@ class IndexedCandidateMatcher:
         self.token_key_map: Dict[str, List[int]] = {}
         self.synonym_key_map: Dict[str, List[int]] = {}
         self.token_blocks: Dict[str, List[int]] = {}
+        self.date_map: Dict[str, List[int]] = {}
 
         self._build_index()
 
@@ -344,6 +345,12 @@ class IndexedCandidateMatcher:
             for t in tokens(raw_val, use_synonyms=True):
                 self.token_blocks.setdefault(t, []).append(pos)
 
+            # 6. Date map
+            if self.matcher_type == "date":
+                date_val = parse_date_value(raw_val)
+                if date_val:
+                    self.date_map.setdefault(date_val.isoformat(), []).append(pos)
+
     def find_best_match(
         self,
         target_value: object,
@@ -370,7 +377,15 @@ class IndexedCandidateMatcher:
                         seen_pos.add(p)
                         candidate_positions.append(p)
 
+        date_target = None
+        if self.matcher_type == "date":
+            parsed = parse_date_value(target_value)
+            if parsed:
+                date_target = parsed.isoformat()
+
         # Probe maps in priority order
+        if date_target:
+            add_candidates(self.date_map.get(date_target))
         if compact_target:
             add_candidates(self.compact_map.get(compact_target))
         if norm_target:

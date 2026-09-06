@@ -1,4 +1,4 @@
-import type { GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, RuleMapping, UploadedFile } from "../types";
+import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, RuleMapping, UploadedFile } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -89,16 +89,31 @@ export class ApiClient {
     });
   }
 
-  async getColumns(fileId: string, orientation: string): Promise<string[]> {
-    const result = await this.request<{ columns: string[] }>(`/files/${fileId}/columns?orientation=${encodeURIComponent(orientation)}`);
+  async getFileMetadata(fileId: string): Promise<FileMetadataResponse> {
+    return this.request<FileMetadataResponse>(`/files/${fileId}/metadata`);
+  }
+
+  async getColumns(fileId: string, orientation: string, sheetId?: string | null): Promise<string[]> {
+    const params = new URLSearchParams({ orientation });
+    if (sheetId) params.append("sheet_id", sheetId);
+    const result = await this.request<{ columns: string[] }>(`/files/${fileId}/columns?${params.toString()}`);
     return result.columns;
   }
 
+  async analyzeFiles(payload: { source_files_1: FileSource[]; source_files_2: FileSource[]; orientation: string }): Promise<AnalysisResponse> {
+    return this.request<AnalysisResponse>("/analysis/", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  }
+
   async startGeneric(payload: {
-    file_1_id: string;
-    file_2_id: string;
-    key_file_1: string;
-    key_file_2: string;
+    file_1_id?: string;
+    file_2_id?: string;
+    source_files_1: FileSource[];
+    source_files_2: FileSource[];
+    key_file_1: string | string[];
+    key_file_2: string | string[];
     rules: RuleMapping[];
     orientation: string;
     include_columns_file_1: string[];
@@ -110,7 +125,7 @@ export class ApiClient {
     });
   }
 
-  async startGst(payload: { file_1_id: string; file_2_id: string; orientation: string; text_threshold: number }): Promise<Job> {
+  async startGst(payload: { source_files_1: FileSource[]; source_files_2: FileSource[]; orientation: string; text_threshold: number }): Promise<Job> {
     return this.request<Job>("/reconciliation/gst", {
       method: "POST",
       body: JSON.stringify(payload)
