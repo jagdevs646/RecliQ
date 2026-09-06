@@ -110,8 +110,8 @@ export class ApiClient {
   async startGeneric(payload: {
     file_1_id?: string;
     file_2_id?: string;
-    source_files_1: FileSource[];
-    source_files_2: FileSource[];
+    source_files_1?: FileSource[];
+    source_files_2?: FileSource[];
     key_file_1: string | string[];
     key_file_2: string | string[];
     rules: RuleMapping[];
@@ -125,7 +125,14 @@ export class ApiClient {
     });
   }
 
-  async startGst(payload: { source_files_1: FileSource[]; source_files_2: FileSource[]; orientation: string; text_threshold: number }): Promise<Job> {
+  async startGst(payload: {
+    file_1_id?: string;
+    file_2_id?: string;
+    source_files_1?: FileSource[];
+    source_files_2?: FileSource[];
+    orientation: string;
+    text_threshold: number;
+  }): Promise<Job> {
     return this.request<Job>("/reconciliation/gst", {
       method: "POST",
       body: JSON.stringify(payload)

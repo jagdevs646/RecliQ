@@ -36,16 +36,33 @@ def enqueue_generic_job(
     background_tasks: BackgroundTasks,
     session_id: str,
 ) -> ReconciliationJob:
-    _file_record(db, payload.file_1_id, session_id)
-    _file_record(db, payload.file_2_id, session_id)
+    file_1_id = payload.file_1_id or (payload.source_files_1[0].file_id if payload.source_files_1 else None)
+    file_2_id = payload.file_2_id or (payload.source_files_2[0].file_id if payload.source_files_2 else None)
+
+    if not file_1_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 1 is required")
+    if not file_2_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 2 is required")
+
+    files_to_check = {file_1_id, file_2_id}
+    for fs in payload.source_files_1:
+        if fs.file_id:
+            files_to_check.add(fs.file_id)
+    for fs in payload.source_files_2:
+        if fs.file_id:
+            files_to_check.add(fs.file_id)
+
+    for fid in files_to_check:
+        _file_record(db, fid, session_id)
+
     job = ReconciliationJob(
         session_id=session_id,
         job_type="generic",
         status="queued",
         progress=0,
         orientation=payload.orientation,
-        input_file_1_id=payload.file_1_id,
-        input_file_2_id=payload.file_2_id,
+        input_file_1_id=file_1_id,
+        input_file_2_id=file_2_id,
         settings_json=payload.model_dump_json(),
     )
     db.add(job)
@@ -63,16 +80,33 @@ def enqueue_gst_job(
     background_tasks: BackgroundTasks,
     session_id: str,
 ) -> ReconciliationJob:
-    _file_record(db, payload.file_1_id, session_id)
-    _file_record(db, payload.file_2_id, session_id)
+    file_1_id = payload.file_1_id or (payload.source_files_1[0].file_id if payload.source_files_1 else None)
+    file_2_id = payload.file_2_id or (payload.source_files_2[0].file_id if payload.source_files_2 else None)
+
+    if not file_1_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 1 is required")
+    if not file_2_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 2 is required")
+
+    files_to_check = {file_1_id, file_2_id}
+    for fs in payload.source_files_1:
+        if fs.file_id:
+            files_to_check.add(fs.file_id)
+    for fs in payload.source_files_2:
+        if fs.file_id:
+            files_to_check.add(fs.file_id)
+
+    for fid in files_to_check:
+        _file_record(db, fid, session_id)
+
     job = ReconciliationJob(
         session_id=session_id,
         job_type="gst",
         status="queued",
         progress=0,
         orientation=payload.orientation,
-        input_file_1_id=payload.file_1_id,
-        input_file_2_id=payload.file_2_id,
+        input_file_1_id=file_1_id,
+        input_file_2_id=file_2_id,
         settings_json=payload.model_dump_json(),
     )
     db.add(job)
@@ -194,11 +228,16 @@ def process_reconciliation_job(job_id: str) -> None:
         from app.schemas.reconciliation import FileSource
 
         # Use source_files if present, otherwise fallback to legacy file_id
-        source_files_1 = payload.get("source_files_1", [{"file_id": payload.get("file_1_id", job.input_file_1_id)}])
-        source_files_2 = payload.get("source_files_2", [{"file_id": payload.get("file_2_id", job.input_file_2_id)}])
+        source_files_1 = payload.get("source_files_1") or [{"file_id": payload.get("file_1_id") or job.input_file_1_id}]
+        source_files_2 = payload.get("source_files_2") or [{"file_id": payload.get("file_2_id") or job.input_file_2_id}]
         
-        sources_1 = [FileSource(**fs) for fs in source_files_1]
-        sources_2 = [FileSource(**fs) for fs in source_files_2]
+        sources_1 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_1 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
+        sources_2 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_2 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
+
+        if not sources_1 and job.input_file_1_id:
+            sources_1 = [FileSource(file_id=job.input_file_1_id)]
+        if not sources_2 and job.input_file_2_id:
+            sources_2 = [FileSource(file_id=job.input_file_2_id)]
         
         df1 = _load_and_consolidate(db, job.session_id, sources_1)
         df2 = _load_and_consolidate(db, job.session_id, sources_2)
