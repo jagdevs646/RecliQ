@@ -60,7 +60,7 @@ export function UploadPage({ onJobCreated }: Props) {
   const file2Name = file2?.original_filename || "File 2";
 
   const canContinue = step === 1
-    ? hasBothFiles && selectedSheets1.length > 0 && selectedSheets2.length > 0
+    ? hasBothFiles && (file1Sheets.length === 0 || selectedSheets1.length > 0) && (file2Sheets.length === 0 || selectedSheets2.length > 0)
     : jobType === "gst"
       ? gstReady
       : step === 2
@@ -111,20 +111,24 @@ export function UploadPage({ onJobCreated }: Props) {
     if (!file1 && !file2) return;
     setBusy(true);
     try {
-      if (file1 && selectedSheets1.length > 0) {
-        const columns = await api.getColumns(file1.id, orientation, selectedSheets1[0]);
+      if (file1) {
+        const sheet = selectedSheets1[0] || (file1Sheets[0]?.id);
+        const columns = await api.getColumns(file1.id, orientation, sheet);
         setFile1Columns(columns);
         setKey1((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
-      if (file2 && selectedSheets2.length > 0) {
-        const columns = await api.getColumns(file2.id, orientation, selectedSheets2[0]);
+      if (file2) {
+        const sheet = selectedSheets2[0] || (file2Sheets[0]?.id);
+        const columns = await api.getColumns(file2.id, orientation, sheet);
         setFile2Columns(columns);
         setKey2((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
       
-      if (jobType === "generic" && file1 && file2 && selectedSheets1.length > 0 && selectedSheets2.length > 0) {
-        const source_files_1 = selectedSheets1.map(id => ({ file_id: file1.id, sheet_id: id }));
-        const source_files_2 = selectedSheets2.map(id => ({ file_id: file2.id, sheet_id: id }));
+      if (jobType === "generic" && file1 && file2) {
+        const s1 = selectedSheets1.length > 0 ? selectedSheets1 : (file1Sheets.length > 0 ? [file1Sheets[0].id] : []);
+        const s2 = selectedSheets2.length > 0 ? selectedSheets2 : (file2Sheets.length > 0 ? [file2Sheets[0].id] : []);
+        const source_files_1 = s1.length > 0 ? s1.map(id => ({ file_id: file1.id, sheet_id: id })) : [{ file_id: file1.id }];
+        const source_files_2 = s2.length > 0 ? s2.map(id => ({ file_id: file2.id, sheet_id: id })) : [{ file_id: file2.id }];
         const analysisData = await api.analyzeFiles({ source_files_1, source_files_2, orientation });
         setAnalysis(analysisData);
         
@@ -180,12 +184,23 @@ export function UploadPage({ onJobCreated }: Props) {
     setBusy(true);
     setMessage("");
     try {
-      const source_files_1 = selectedSheets1.map(id => ({ file_id: file1.id, sheet_id: id }));
-      const source_files_2 = selectedSheets2.map(id => ({ file_id: file2.id, sheet_id: id }));
+      const s1 = selectedSheets1.length > 0 ? selectedSheets1 : (file1Sheets.length > 0 ? [file1Sheets[0].id] : []);
+      const s2 = selectedSheets2.length > 0 ? selectedSheets2 : (file2Sheets.length > 0 ? [file2Sheets[0].id] : []);
+      const source_files_1 = s1.length > 0 ? s1.map(id => ({ file_id: file1.id, sheet_id: id })) : [{ file_id: file1.id }];
+      const source_files_2 = s2.length > 0 ? s2.map(id => ({ file_id: file2.id, sheet_id: id })) : [{ file_id: file2.id }];
       
       const job = jobType === "gst"
-        ? await api.startGst({ source_files_1, source_files_2, orientation, text_threshold: gstTextThreshold })
+        ? await api.startGst({ 
+            file_1_id: file1.id,
+            file_2_id: file2.id,
+            source_files_1, 
+            source_files_2, 
+            orientation, 
+            text_threshold: gstTextThreshold 
+          })
         : await api.startGeneric({ 
+            file_1_id: file1.id,
+            file_2_id: file2.id,
             source_files_1, 
             source_files_2, 
             key_file_1: key1, 

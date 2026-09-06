@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RuleMapping(BaseModel):
@@ -12,8 +12,8 @@ class FileSource(BaseModel):
 
 
 class GenericReconciliationRequest(BaseModel):
-    file_1_id: str | None = None  # Legacy support
-    file_2_id: str | None = None  # Legacy support
+    file_1_id: str | None = None  # Legacy and direct support
+    file_2_id: str | None = None  # Legacy and direct support
     source_files_1: list[FileSource] = Field(default_factory=list)
     source_files_2: list[FileSource] = Field(default_factory=list)
     key_file_1: str | list[str]
@@ -23,6 +23,18 @@ class GenericReconciliationRequest(BaseModel):
     include_columns_file_1: list[str] = Field(default_factory=list)
     include_columns_file_2: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def populate_file_sources(self) -> "GenericReconciliationRequest":
+        if not self.file_1_id and self.source_files_1:
+            self.file_1_id = self.source_files_1[0].file_id
+        if not self.file_2_id and self.source_files_2:
+            self.file_2_id = self.source_files_2[0].file_id
+        if self.file_1_id and not self.source_files_1:
+            self.source_files_1 = [FileSource(file_id=self.file_1_id)]
+        if self.file_2_id and not self.source_files_2:
+            self.source_files_2 = [FileSource(file_id=self.file_2_id)]
+        return self
+
 
 class GSTReconciliationRequest(BaseModel):
     file_1_id: str | None = None
@@ -31,6 +43,18 @@ class GSTReconciliationRequest(BaseModel):
     source_files_2: list[FileSource] = Field(default_factory=list)
     orientation: str = "vertical"
     text_threshold: int = Field(default=85, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def populate_file_sources(self) -> "GSTReconciliationRequest":
+        if not self.file_1_id and self.source_files_1:
+            self.file_1_id = self.source_files_1[0].file_id
+        if not self.file_2_id and self.source_files_2:
+            self.file_2_id = self.source_files_2[0].file_id
+        if self.file_1_id and not self.source_files_1:
+            self.source_files_1 = [FileSource(file_id=self.file_1_id)]
+        if self.file_2_id and not self.source_files_2:
+            self.source_files_2 = [FileSource(file_id=self.file_2_id)]
+        return self
 
 
 class AnalysisRequest(BaseModel):

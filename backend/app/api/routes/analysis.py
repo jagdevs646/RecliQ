@@ -23,16 +23,19 @@ def _load_and_consolidate(db: Session, session_id: str, file_sources: list) -> '
     dfs_with_metadata = []
     
     for fs in file_sources:
+        fid = getattr(fs, "file_id", None) or (fs.get("file_id") if isinstance(fs, dict) else None)
+        if not fid:
+            continue
         record = db.query(UploadedFile).filter(
-            UploadedFile.id == fs.file_id, 
+            UploadedFile.id == fid, 
             UploadedFile.session_id == session_id
         ).first()
         
         if not record:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {fs.file_id}")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {fid}")
             
         path = storage.resolve_path(record.storage_path)
-        sheet_id = fs.sheet_id or "default"
+        sheet_id = getattr(fs, "sheet_id", None) or (fs.get("sheet_id") if isinstance(fs, dict) else None) or "default"
         
         df = read_table_data(path, record.original_filename, sheet_id)
         if not df.empty:
