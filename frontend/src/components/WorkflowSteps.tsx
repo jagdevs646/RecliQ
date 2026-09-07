@@ -1,6 +1,6 @@
 import { Check } from "lucide-react";
 
-const steps = ["Upload files", "Matching key", "Map columns", "Report setup", "Run reconciliation"];
+const steps = ["Upload files", "Pair sheets", "Matching key", "Map columns", "Report setup", "Run reconciliation"];
 
 interface Props {
   current: number;

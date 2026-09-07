@@ -112,12 +112,21 @@ export class ApiClient {
     file_2_id?: string;
     source_files_1?: FileSource[];
     source_files_2?: FileSource[];
-    key_file_1: string | string[];
-    key_file_2: string | string[];
-    rules: RuleMapping[];
+    key_file_1?: string | string[];
+    key_file_2?: string | string[];
+    rules?: RuleMapping[];
     orientation: string;
-    include_columns_file_1: string[];
-    include_columns_file_2: string[];
+    include_columns_file_1?: string[];
+    include_columns_file_2?: string[];
+    pairs?: Array<{
+      source_file_1: FileSource;
+      source_file_2: FileSource;
+      key_file_1: string | string[];
+      key_file_2: string | string[];
+      rules: RuleMapping[];
+      include_columns_file_1: string[];
+      include_columns_file_2: string[];
+    }>;
   }): Promise<Job> {
     return this.request<Job>("/reconciliation/generic", {
       method: "POST",

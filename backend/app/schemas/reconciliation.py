@@ -106,6 +106,16 @@ class AnalysisRequest(BaseModel):
     orientation: str = "vertical"
 
 
+class PairAnalysisResult(BaseModel):
+    sheet_id_1: str | None = None
+    sheet_id_2: str | None = None
+    recommended_keys_1: list[str]
+    recommended_keys_2: list[str]
+    key_confidence: int
+    is_composite_key: bool
+    recommended_mappings: list[dict]
+
+
 class AnalysisResponse(BaseModel):
     recommended_keys_1: list[str]
     recommended_keys_2: list[str]

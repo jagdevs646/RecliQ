@@ -305,3 +305,20 @@ dd { overflow-wrap: anywhere; margin: 0; color: #25373d; font-size: 13px; font-w
 .danger-button:hover:not(:disabled) { background: #b91c1c; }
 .danger-button:disabled { opacity: 0.6; cursor: not-allowed; }
 .info-text { padding: 10px 14px; font-size: 13px; font-weight: 600; color: #0369a1; background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 6px; }
+
+/* Sheet Pairing Step */
+.sheet-pairing-step { display: grid; gap: 20px; }
+.pairing-grid { display: grid; gap: 10px; }
+.pairing-sheet-row { display: grid; grid-template-columns: minmax(160px, 1fr) 28px minmax(200px, 1.4fr); align-items: center; gap: 12px; min-height: 52px; padding: 10px 14px; border: 1px solid #dde6e5; border-radius: 8px; background: #fff; transition: border-color .15s ease, background .15s ease; }
+.pairing-sheet-row.is-paired { border-color: #a8d8d0; background: #f2fbf9; }
+.pairing-sheet-label { display: flex; align-items: center; gap: 7px; color: #2e4349; font-size: 13px; font-weight: 700; }
+.pairing-sheet-label svg { color: #087d72; flex-shrink: 0; }
+.pairing-sheet-label small { display: block; color: #7b8e93; font-size: 11px; font-weight: 600; }
+.pairing-arrow { color: #9aacb0; flex-shrink: 0; }
+.pairing-sheet-select { display: flex; align-items: center; gap: 8px; }
+.pairing-sheet-select select { flex: 1; min-height: 36px; }
+.pairing-sheet-select .text-button { white-space: nowrap; font-size: 12px; }
+.pairing-summary { padding-top: 4px; }
+.pairing-count-badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border: 1px solid #c3deda; border-radius: 999px; background: #ebf7f5; color: #087d72; font-size: 12px; font-weight: 750; }
+.pairing-auto-notice { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border: 1px solid #c3deda; border-radius: 8px; background: #ebf7f5; color: #1e5c55; font-size: 13px; font-weight: 600; }
+
