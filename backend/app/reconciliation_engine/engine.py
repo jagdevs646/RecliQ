@@ -206,6 +206,9 @@ def run_generic_reconciliation(
 
     tracker.matching_records()
 
+    allowed_f1_cols = set(file_1_match_keys + file_1_id_col + [r[0][i] for r in normalized_rules for i in range(len(r[0]))] + file_1_extra)
+    allowed_f2_cols = set(file_2_match_keys + file_2_id_col + [r[1][i] for r in normalized_rules for i in range(len(r[1]))] + file_2_extra)
+
     file_1_records = file_1_df.to_dict('records')
     for row_idx, file_1_row in enumerate(file_1_records):
         if is_cancelled and row_idx % 25 == 0 and is_cancelled():
@@ -220,7 +223,7 @@ def run_generic_reconciliation(
         )
 
         if file_2_row is None or key_result is None:
-            clean_f1_row = {k: v for k, v in file_1_row.items() if k != "_ROW_NO"}
+            clean_f1_row = {k: v for k, v in file_1_row.items() if k in allowed_f1_cols}
             clean_f1_row["ROW (FILE 1)"] = file_1_row.get("_ROW_NO", row_idx + 2)
             file_1_not_found.append(clean_f1_row)
             continue
@@ -275,18 +278,18 @@ def run_generic_reconciliation(
     file_2_not_found = []
     for i, idx in enumerate(file_2_df.index):
         if idx in unmatched_indices:
-            clean_f2_row = {k: v for k, v in file_2_records[i].items() if k != "_ROW_NO"}
+            clean_f2_row = {k: v for k, v in file_2_records[i].items() if k in allowed_f2_cols}
             clean_f2_row["ROW (FILE 2)"] = file_2_records[i].get("_ROW_NO", idx + 2)
             file_2_not_found.append(clean_f2_row)
             
     # Add duplicates to results as separate classification
     for _, row in f1_dupes.iterrows():
-        clean_row = {k: v for k, v in row.items() if k != "_ROW_NO"}
+        clean_row = {k: v for k, v in row.items() if k in allowed_f1_cols}
         clean_row["CLASSIFICATION"] = "Duplicate"
         file_1_not_found.append(clean_row)
         
     for _, row in f2_dupes.iterrows():
-        clean_row = {k: v for k, v in row.items() if k != "_ROW_NO"}
+        clean_row = {k: v for k, v in row.items() if k in allowed_f2_cols}
         clean_row["CLASSIFICATION"] = "Duplicate"
         file_2_not_found.append(clean_row)
 
@@ -305,17 +308,9 @@ def run_generic_reconciliation(
         total_file_2=len(file_2_df),
     )
     
-    # Store the raw universal data as well, so it can be retrieved for custom report generation.
-    from app.utils.json_encoder import safe_json_dump
-    raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-    with open(raw_path, "w", encoding="utf-8") as f:
-        safe_json_dump(universal_data, f)
-        
-    generate_enterprise_report(universal_data, {}, output_path)
-
     tracker.finalized()
 
-    return {
+    summary_stats = {
         "report_rows": len(reconciliation_results),
         "only_in_file_1": len(file_1_not_found),
         "only_in_file_2": len(file_2_not_found),
@@ -326,6 +321,11 @@ def run_generic_reconciliation(
         "destination_records": len(file_2_df),
         "matched_records": len(matched_file_2_indices),
         "fully_matched_records": len(matched_file_2_indices) - len(reconciliation_results),
+    }
+
+    return {
+        "summary": summary_stats,
+        "universal_data": universal_data
     }
 
 
@@ -509,16 +509,9 @@ def run_gst_reconciliation(
         total_file_2=len(df2),
     )
     
-    from app.utils.json_encoder import safe_json_dump
-    raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-    with open(raw_path, "w", encoding="utf-8") as f:
-        safe_json_dump(universal_data, f)
-        
-    generate_enterprise_report(universal_data, {}, output_path)
-
     tracker.finalized()
 
-    return {
+    summary_stats = {
         "report_rows": len(mismatched),
         "only_in_file_1": len(only_in_file1),
         "only_in_file_2": len(only_in_file2),
@@ -527,4 +520,9 @@ def run_gst_reconciliation(
         "destination_records": len(df2),
         "matched_records": len(matched_file2_indices),
         "fully_matched_records": len(matched_file2_indices) - len(mismatched) - len(confidence_review),
+    }
+
+    return {
+        "summary": summary_stats,
+        "universal_data": universal_data
     }
