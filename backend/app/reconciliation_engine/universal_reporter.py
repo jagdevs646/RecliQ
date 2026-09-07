@@ -585,6 +585,7 @@ class UniversalReporter:
 
         # Row 4: Header
         headers = [
+            "Sheet Pair",
             "Exception ID",
             f"Match Key ({key_label})",
             "Field",
@@ -626,6 +627,7 @@ class UniversalReporter:
                     diff_pct_val = None
 
             row_data = [
+                (exc.get("Sheet Pair", "Global"), "left", None),
                 (exc.get("Exception ID", f"EX-{str(row_idx-4).zfill(6)}"), "left", None),
                 (str(exc.get("Match Key", "")), "left", None),
                 (str(exc.get("Field", "")), "left", None),
@@ -637,7 +639,7 @@ class UniversalReporter:
                 (exc.get("Severity", "Medium"), "left", None),
                 (exc.get("Status", "Open"), "left", None),
                 (exc.get("Action Notes", ""), "left", None),
-                (f"=IF(COUNTIF($B$5:B{row_idx},B{row_idx})=1,1,0)", "right", None),
+                (f"=IF(COUNTIF($C$5:C{row_idx},C{row_idx})=1,1,0)", "right", None),
             ]
 
             for col_idx, (val, align_h, num_fmt) in enumerate(row_data, start=1):
@@ -652,9 +654,9 @@ class UniversalReporter:
         last_row = max(4, len(exceptions_list) + 4)
         ws.freeze_panes = "A5"
         if len(exceptions_list) > 0:
-            ws.auto_filter.ref = f"A4:K{last_row}"
+            ws.auto_filter.ref = f"A4:M{last_row}"
 
-        col_widths = [16.5, 21.5, 16.0, 20.5, 20.0, 14.5, 16.5, 19.0, 12.5, 11.5, 16.5, 14.5]
+        col_widths = [18.0, 16.5, 21.5, 16.0, 20.5, 20.0, 14.5, 16.5, 19.0, 12.5, 11.5, 16.5, 14.5]
         for col_idx, w in enumerate(col_widths, start=1):
             ws.column_dimensions[get_column_letter(col_idx)].width = w
 

@@ -227,56 +227,128 @@ def process_reconciliation_job(job_id: str) -> None:
         from app.api.routes.analysis import _load_and_consolidate
         from app.schemas.reconciliation import FileSource
 
-        # Use source_files if present, otherwise fallback to legacy file_id
-        source_files_1 = payload.get("source_files_1") or [{"file_id": payload.get("file_1_id") or job.input_file_1_id}]
-        source_files_2 = payload.get("source_files_2") or [{"file_id": payload.get("file_2_id") or job.input_file_2_id}]
-        
-        sources_1 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_1 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
-        sources_2 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_2 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
+        # Use pairs if present, otherwise fallback to legacy file_id
+        pairs = payload.get("pairs", [])
+        if not pairs:
+            source_files_1 = payload.get("source_files_1") or [{"file_id": payload.get("file_1_id") or job.input_file_1_id}]
+            source_files_2 = payload.get("source_files_2") or [{"file_id": payload.get("file_2_id") or job.input_file_2_id}]
+            sources_1 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_1 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
+            sources_2 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_2 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
+            if not sources_1 and job.input_file_1_id:
+                sources_1 = [FileSource(file_id=job.input_file_1_id)]
+            if not sources_2 and job.input_file_2_id:
+                sources_2 = [FileSource(file_id=job.input_file_2_id)]
+                
+            # Construct a dummy pair for backwards compatibility
+            pairs = [{
+                "source_file_1": sources_1[0].model_dump() if hasattr(sources_1[0], "model_dump") else (sources_1[0] if isinstance(sources_1[0], dict) else {"file_id": sources_1[0].file_id, "sheet_id": sources_1[0].sheet_id}),
+                "source_file_2": sources_2[0].model_dump() if hasattr(sources_2[0], "model_dump") else (sources_2[0] if isinstance(sources_2[0], dict) else {"file_id": sources_2[0].file_id, "sheet_id": sources_2[0].sheet_id}),
+                "key_file_1": payload.get("key_file_1"),
+                "key_file_2": payload.get("key_file_2"),
+                "rules": payload.get("rules", []),
+                "include_columns_file_1": payload.get("include_columns_file_1", []),
+                "include_columns_file_2": payload.get("include_columns_file_2", [])
+            }]
 
-        if not sources_1 and job.input_file_1_id:
-            sources_1 = [FileSource(file_id=job.input_file_1_id)]
-        if not sources_2 and job.input_file_2_id:
-            sources_2 = [FileSource(file_id=job.input_file_2_id)]
-        
-        df1 = _load_and_consolidate(db, job.session_id, sources_1)
-        df2 = _load_and_consolidate(db, job.session_id, sources_2)
+        all_universal_data = []
+        overall_summary = {
+            "report_rows": 0, "only_in_file_1": 0, "only_in_file_2": 0, 
+            "confidence_review": 0, "source_records": 0, "destination_records": 0,
+            "matched_records": 0, "fully_matched_records": 0
+        }
 
-        if job.job_type == "gst":
-            summary = run_gst_reconciliation(
-                file_1_df=df1,
-                file_2_df=df2,
-                output_path=output_path,
-                orientation=payload.get("orientation", job.orientation),
-                text_threshold=int(payload.get("text_threshold", 85)),
-                progress_callback=on_progress,
-                file_1_name=file_1.original_filename,
-                file_2_name=file_2.original_filename,
-                is_cancelled=is_cancelled,
-            )
-        else:
-            key_f1 = payload["key_file_1"]
-            key_f2 = payload["key_file_2"]
-            if isinstance(key_f1, str):
-                key_f1 = [key_f1]
-            if isinstance(key_f2, str):
-                key_f2 = [key_f2]
+        # Iterating through sheet pairs
+        for idx, pair in enumerate(pairs):
+            s1 = FileSource(**pair["source_file_1"]) if isinstance(pair["source_file_1"], dict) else pair["source_file_1"]
+            s2 = FileSource(**pair["source_file_2"]) if isinstance(pair["source_file_2"], dict) else pair["source_file_2"]
+            
+            df1 = _load_and_consolidate(db, job.session_id, [s1])
+            df2 = _load_and_consolidate(db, job.session_id, [s2])
+            
+            sheet_name_1 = s1.sheet_id or "default"
+            sheet_name_2 = s2.sheet_id or "default"
+            pair_label = f"[{sheet_name_1} <-> {sheet_name_2}]"
 
-            summary = run_generic_reconciliation(
-                file_1_df=df1,
-                file_2_df=df2,
-                output_path=output_path,
-                key_file_1=key_f1,
-                key_file_2=key_f2,
-                rules=payload.get("rules", []),
-                orientation=payload.get("orientation", job.orientation),
-                include_columns_file_1=payload.get("include_columns_file_1", []),
-                include_columns_file_2=payload.get("include_columns_file_2", []),
-                progress_callback=on_progress,
-                file_1_name=file_1.original_filename if file_1 else "File 1",
-                file_2_name=file_2.original_filename if file_2 else "File 2",
-                is_cancelled=is_cancelled,
-            )
+            if job.job_type == "gst":
+                res = run_gst_reconciliation(
+                    file_1_df=df1,
+                    file_2_df=df2,
+                    output_path=output_path,
+                    orientation=payload.get("orientation", job.orientation),
+                    text_threshold=int(payload.get("text_threshold", 85)),
+                    progress_callback=on_progress,
+                    file_1_name=f"{file_1.original_filename} ({sheet_name_1})",
+                    file_2_name=f"{file_2.original_filename} ({sheet_name_2})",
+                    is_cancelled=is_cancelled,
+                )
+            else:
+                key_f1 = pair.get("key_file_1", payload.get("key_file_1"))
+                key_f2 = pair.get("key_file_2", payload.get("key_file_2"))
+                if isinstance(key_f1, str): key_f1 = [key_f1]
+                if isinstance(key_f2, str): key_f2 = [key_f2]
+
+                res = run_generic_reconciliation(
+                    file_1_df=df1,
+                    file_2_df=df2,
+                    output_path=output_path,
+                    key_file_1=key_f1,
+                    key_file_2=key_f2,
+                    rules=pair.get("rules", payload.get("rules", [])),
+                    orientation=payload.get("orientation", job.orientation),
+                    include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
+                    include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
+                    progress_callback=on_progress,
+                    file_1_name=f"{file_1.original_filename if file_1 else 'File 1'} ({sheet_name_1})",
+                    file_2_name=f"{file_2.original_filename if file_2 else 'File 2'} ({sheet_name_2})",
+                    is_cancelled=is_cancelled,
+                )
+            
+            for k, v in res["summary"].items():
+                overall_summary[k] = overall_summary.get(k, 0) + v
+                
+            ud = res["universal_data"]
+            # Tag all records with the sheet pair label for unified reporting
+            for category in ["exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "field_differences"]:
+                for record in ud.get(category, []):
+                    record["Sheet Pair"] = pair_label
+            
+            all_universal_data.append(ud)
+
+        if not all_universal_data:
+            raise ValueError("No data processed for any sheet pair.")
+
+        # Merge universal data
+        merged_ud = all_universal_data[0]
+        if len(all_universal_data) > 1:
+            for i in range(1, len(all_universal_data)):
+                ud = all_universal_data[i]
+                merged_ud["statistics"] = {k: merged_ud["statistics"].get(k, 0) + ud["statistics"].get(k, 0) for k in merged_ud["statistics"]}
+                if ud["overall_status"] != "PASSED":
+                    merged_ud["overall_status"] = ud["overall_status"]
+                for category in ["exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "field_differences"]:
+                    merged_ud[category].extend(ud.get(category, []))
+                
+                # Combine control checks
+                for cc1, cc2 in zip(merged_ud["control_checks"], ud["control_checks"]):
+                    if cc1["File 1"] != "-" and cc2["File 1"] != "-":
+                        cc1["File 1"] += cc2["File 1"]
+                    if cc1["File 2"] != "-" and cc2["File 2"] != "-":
+                        cc1["File 2"] += cc2["File 2"]
+                    if cc2["Result"] == "Exception":
+                        cc1["Result"] = "Exception"
+                        
+            # Recompute exception summaries across pairs
+            # Note: For simplicity, the detailed summary arrays might need re-aggregation, 
+            # but we can rely on the reporter for the final output formatting.
+
+        from app.utils.json_encoder import safe_json_dump
+        raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+        with open(raw_path, "w", encoding="utf-8") as f:
+            safe_json_dump(merged_ud, f)
+            
+        from app.reconciliation_engine.universal_reporter import generate_enterprise_report
+        generate_enterprise_report(merged_ud, {}, output_path)
+        summary = overall_summary
 
         if is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
