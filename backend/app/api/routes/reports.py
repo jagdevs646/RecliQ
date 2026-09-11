@@ -3,7 +3,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import openpyxl
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -15,8 +14,6 @@ from app.models.job import ReconciliationJob
 from app.models.report import Report
 from app.storage import get_storage
 from pydantic import BaseModel
-import tempfile
-import json
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 
@@ -33,47 +30,27 @@ def _job_report(db: Session, job_id: str, session_id: str) -> tuple[Reconciliati
     return job, report
 
 
-def _preview_sheet_name(path: Path, category: str) -> str:
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+_PREVIEW_SECTIONS = {
+    "discrepancies": "exceptions",
+    "only_file_1": "missing_in_file_2",
+    "only_file_2": "missing_in_file_1",
+    "review": "identity_resolution",
+}
+
+
+def _report_media_type(path: Path) -> str:
+    return "application/zip" if path.suffix.lower() == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _report_preview_data(path: Path) -> dict[str, Any]:
+    raw_path = path.with_name(f"{path.stem}_data.json")
+    if not raw_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report preview metadata is unavailable")
     try:
-        names = workbook.sheetnames
-    finally:
-        workbook.close()
-
-    if not names:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Workbook is empty")
-
-    if category == "discrepancies":
-        for name in names:
-            if "02" in name or "Exception" in name or "Discrepanc" in name:
-                return name
-        return names[0]
-    elif category == "only_file_1":
-        for name in names:
-            if "05" in name:
-                return name
-        for name in names:
-            if "Missing" in name:
-                return name
-        return names[min(2, len(names) - 1)]
-    elif category == "only_file_2":
-        for name in names:
-            if "04" in name:
-                return name
-        for name in names:
-            if "Missing" in name:
-                return name
-        return names[min(1, len(names) - 1)]
-    elif category == "review":
-        for name in names:
-            if "06" in name or "Field Difference" in name or "Review" in name:
-                return name
-        return names[min(3, len(names) - 1)]
-
-    index_by_category = {"discrepancies": 0, "only_file_1": 1, "only_file_2": 2, "review": 3}
-    if category in index_by_category and index_by_category[category] < len(names):
-        return names[index_by_category[category]]
-    return names[0]
+        with open(raw_path, encoding="utf-8") as raw_file:
+            return json.load(raw_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Report preview metadata is invalid") from exc
 
 
 
@@ -106,7 +83,7 @@ def download_report(
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     path = get_storage().resolve_path(report.storage_path)
-    return FileResponse(path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
 
 
 @router.get("/job/{job_id}/download")
@@ -117,7 +94,7 @@ def download_job_report(
 ) -> FileResponse:
     _, report = _job_report(db, job_id, session_id)
     path = get_storage().resolve_path(report.storage_path)
-    return FileResponse(path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
 
 
 @router.post("/job/{job_id}/download_custom")
@@ -131,16 +108,21 @@ def download_custom_report(
     storage = get_storage()
     path = storage.resolve_path(report.storage_path)
     raw_path = path.with_name(f"{path.stem}_data.json")
+
+    if path.suffix.lower() == ".zip":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Customized reporting is available for a single file pair. Download the ZIP to access each independent workbook.",
+        )
     
     if not raw_path.exists():
         # Fallback to existing Excel file if raw data is lost
-        return FileResponse(path, filename=report.filename, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
         
     with open(raw_path, "r") as f:
         universal_data = json.load(f)
         
     # Generate new temp file
-    from fastapi.background import BackgroundTasks
     import tempfile
     
     fd, temp_path_str = tempfile.mkstemp(suffix=".xlsx", prefix="recliq_custom_")
@@ -186,33 +168,21 @@ def job_report_preview(
 ) -> dict[str, Any]:
     _, report = _job_report(db, job_id, session_id)
     path = get_storage().resolve_path(report.storage_path)
-    sheet_name = _preview_sheet_name(path, category)
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    header_row_idx = 0
-    try:
-        ws = workbook[sheet_name]
-        for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
-            non_null_count = sum(1 for v in row if v is not None and str(v).strip() != "")
-            if non_null_count >= 3:
-                header_row_idx = r_idx
-                break
-            if r_idx > 10:
-                break
-        total_rows = max(0, ws.max_row - (header_row_idx + 1))
-    finally:
-        workbook.close()
-
-    skip_range = range(header_row_idx + 1, header_row_idx + 1 + offset) if offset > 0 else None
-    frame = pd.read_excel(path, sheet_name=sheet_name, header=header_row_idx, skiprows=skip_range, nrows=limit)
-    records = [
-        {str(column): _json_value(value) for column, value in row.items()}
-        for row in frame.to_dict(orient="records")
-    ]
+    section = _PREVIEW_SECTIONS.get(category)
+    if section is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown preview category")
+    data = _report_preview_data(path)
+    records = data.get(section, [])
+    if category == "review":
+        records = [record for record in records if record.get("IDENTITY CLASSIFICATION") != "EXACT_MATCH"]
+    columns = list(dict.fromkeys(str(column) for record in records for column in record))
+    total_rows = len(records)
+    page = records[offset:offset + limit]
     return {
         "category": category,
-        "sheet_name": sheet_name,
-        "columns": [str(column) for column in frame.columns],
-        "rows": records,
+        "sheet_name": section,
+        "columns": columns,
+        "rows": [{str(column): _json_value(value) for column, value in record.items()} for record in page],
         "total_rows": total_rows,
         "offset": offset,
         "limit": limit,

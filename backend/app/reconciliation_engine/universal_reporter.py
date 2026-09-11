@@ -117,6 +117,8 @@ class UniversalReporter:
             self._generate_missing(wb, 2, sheet_missing_2)
         if self.config.include_field_differences:
             self._generate_field_differences(wb)
+        if self.data.get("identity_resolution"):
+            self._generate_identity_resolution(wb)
         if self.config.include_controls:
             self._generate_controls(wb, sheet_missing_1, sheet_missing_2)
 
@@ -937,6 +939,54 @@ class UniversalReporter:
         col_widths = [18.0, 18.0, 18.0, 18.0, 14.0, 14.0, 14.0]
         for col_idx, w in enumerate(col_widths, start=1):
             ws.column_dimensions[get_column_letter(col_idx)].width = w
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # IDENTITY AUDIT: exact, secondary-condition, ambiguous, and missing keys
+    # ═══════════════════════════════════════════════════════════════════════
+    def _generate_identity_resolution(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet("07 Identity Resolution")
+        ws.sheet_properties.tabColor = self.colors["accent"]
+        ws.views.sheetView[0].showGridLines = False
+        records = self.data.get("identity_resolution", [])
+        columns = list(dict.fromkeys(str(column) for record in records for column in record))
+        if not columns:
+            return
+
+        last_col = get_column_letter(len(columns))
+        ws.merge_cells(f"A1:{last_col}1")
+        ws["A1"] = "Identity Resolution Audit Trail"
+        ws["A1"].font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
+        ws.merge_cells(f"A2:{last_col}2")
+        ws["A2"] = "How each primary key was resolved before mapped fields were compared."
+        ws["A2"].font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
+
+        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
+        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
+        border = self._thin_border()
+        for col_idx, column in enumerate(columns, start=1):
+            cell = ws.cell(row=4, column=col_idx, value=column)
+            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
+            cell.fill = navy_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = border
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(column) + 3, 14), 42)
+
+        for row_idx, record in enumerate(records, start=5):
+            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
+            for col_idx, column in enumerate(columns, start=1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=record.get(column))
+                cell.font = Font(name=self.font_family, size=9)
+                cell.fill = fill
+                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=column == "MATCH EXPLANATION")
+                cell.border = border
+
+        ws.freeze_panes = "A5"
+        last_row = len(records) + 4
+        table = Table(displayName="IdentityResolutionTbl", ref=f"A4:{last_col}{last_row}")
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleLight1", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False
+        )
+        ws.add_table(table)
 
     # ═══════════════════════════════════════════════════════════════════════
     # SHEET 7: 07 Control Checks

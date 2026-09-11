@@ -38,12 +38,13 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
   const total = summary.source_records ?? Math.max(0, matched + summary.report_rows + summary.only_in_file_1 + summary.only_in_file_2 + summary.confidence_review);
   const accuracy = total ? (matched / total) * 100 : 0;
   const chartTotal = Math.max(1, matched + summary.report_rows + summary.only_in_file_1 + summary.only_in_file_2);
+  const identityReviewCount = (summary.exception_matches ?? 0) + (summary.ambiguous_matches ?? 0) + (summary.not_found_matches ?? 0);
   const chartStyle = { background: `conic-gradient(#1d9a6c 0 ${(matched / chartTotal) * 100}%, #ef6f63 ${(matched / chartTotal) * 100}% ${((matched + summary.report_rows) / chartTotal) * 100}%, #f5b54c ${((matched + summary.report_rows) / chartTotal) * 100}% ${((matched + summary.report_rows + summary.only_in_file_1) / chartTotal) * 100}%, #64748b ${((matched + summary.report_rows + summary.only_in_file_1) / chartTotal) * 100}% 100%)` };
   const cards: Array<{ category: PreviewCategory; title: string; label: string; count: number; icon: typeof AlertTriangle; tone: string }> = [
     { category: "discrepancies", title: "Discrepancies", label: "Items with mismatched values", count: summary.report_rows, icon: AlertTriangle, tone: "coral" },
     { category: "only_file_1", title: `Present in ${file1Name} only`, label: `Found only in ${file1Name}`, count: summary.only_in_file_1, icon: FileWarning, tone: "amber" },
     { category: "only_file_2", title: `Present in ${file2Name} only`, label: `Found only in ${file2Name}`, count: summary.only_in_file_2, icon: FileWarning, tone: "slate" },
-    { category: "review", title: "Confidence review", label: "Possible text matches", count: summary.confidence_review, icon: Eye, tone: "violet" }
+    { category: "review", title: "Identity review", label: "Secondary, ambiguous, or unresolved primary-key matches", count: identityReviewCount || summary.confidence_review, icon: Eye, tone: "violet" }
   ];
   const displayedRows = useMemo(() => preview?.rows.filter((row) => Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(query.toLowerCase()))) ?? [], [preview, query]);
 

@@ -1,4 +1,5 @@
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from app.schemas.reconciliation import (
     normalize_legacy_request,
 )
 from app.services.reconciliation_service import _merge_rule_universal_data
+from app.api.routes.reports import _PREVIEW_SECTIONS, _report_preview_data
 
 
 def test_schema_model_validators():
@@ -217,6 +219,15 @@ def test_rule_result_merge_preserves_nested_identity_statistics():
     assert merged["statistics"]["identity"] == {"EXACT_MATCH": 1, "EXCEPTION_MATCH": 2}
     assert merged["control_checks"][0]["File 1"] == 3
     assert len(merged["execution_results"]) == 2
+
+
+def test_preview_metadata_uses_stored_sections_instead_of_workbook_sheet_names(tmp_path: Path):
+    report_path = tmp_path / "Reconciliation.xlsx"
+    raw_path = tmp_path / "Reconciliation_data.json"
+    raw_path.write_text(json.dumps({"identity_resolution": [{"IDENTITY CLASSIFICATION": "AMBIGUOUS_MATCH"}]}), encoding="utf-8")
+
+    assert _PREVIEW_SECTIONS["review"] == "identity_resolution"
+    assert _report_preview_data(report_path)["identity_resolution"][0]["IDENTITY CLASSIFICATION"] == "AMBIGUOUS_MATCH"
 
 
 def test_enqueue_with_source_files_only():

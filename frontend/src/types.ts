@@ -110,6 +110,10 @@ export interface ReconciliationSummary {
   destination_records?: number;
   matched_records?: number;
   fully_matched_records?: number;
+  exact_matches?: number;
+  exception_matches?: number;
+  ambiguous_matches?: number;
+  not_found_matches?: number;
 }
 
 export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review";

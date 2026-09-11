@@ -200,6 +200,48 @@ def test_generated_excel_structure_matches_sample(tmp_path: Path):
     assert len(ws7.conditional_formatting) > 0
 
 
+def test_identity_resolution_is_written_as_auditable_excel_section(tmp_path: Path):
+    output_path = tmp_path / "identity_report.xlsx"
+    data = build_universal_data_model(
+        job_type="generic",
+        file_1_name="Source.xlsx",
+        file_2_name="Destination.xlsx",
+        matching_keys=["Customer"],
+        reconciliation_results=[],
+        file_1_not_found=[],
+        file_2_not_found=[],
+        matched_records=[],
+        total_file_1=2,
+        total_file_2=2,
+        identity_resolution=[
+            {
+                "ROW (FILE 1)": 2,
+                "IDENTITY CLASSIFICATION": "EXCEPTION_MATCH",
+                "MATCH EXPLANATION": "Primary key comparison used company_name: Minor spelling variation (91% vs required 75%).",
+                "MATCH TYPE": "company_name",
+                "MATCH CONFIDENCE": "91%",
+                "MATCH THRESHOLD": "75%",
+            },
+            {
+                "ROW (FILE 1)": 3,
+                "IDENTITY CLASSIFICATION": "AMBIGUOUS_MATCH",
+                "MATCH EXPLANATION": "More than one unused destination record passed every secondary condition.",
+                "MATCH TYPE": "",
+                "MATCH CONFIDENCE": "0%",
+                "MATCH THRESHOLD": "",
+            },
+        ],
+    )
+
+    generate_enterprise_report(data, {}, output_path)
+    workbook = openpyxl.load_workbook(output_path, data_only=False)
+    worksheet = workbook["07 Identity Resolution"]
+    assert worksheet["A4"].value == "ROW (FILE 1)"
+    assert worksheet["B5"].value == "EXCEPTION_MATCH"
+    assert "Primary key comparison" in worksheet["C5"].value
+    assert "IdentityResolutionTbl" in [table.displayName for table in worksheet.tables.values()]
+
+
 def test_generic_reconciliation_end_to_end(tmp_path: Path):
     file1 = tmp_path / "ledger.xlsx"
     file2 = tmp_path / "bank.xlsx"

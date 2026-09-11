@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+import re
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +46,11 @@ _UNIVERSAL_RECORD_CATEGORIES = (
     "field_differences",
     "identity_resolution",
 )
+
+
+def _safe_report_stem(value: str, fallback: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._-")
+    return (stem or fallback)[:80]
 
 
 def _merge_statistic_values(left, right):
@@ -407,12 +414,42 @@ def process_reconciliation_job(job_id: str) -> None:
         merged_ud = _merge_rule_universal_data(rule_results)
 
         from app.utils.json_encoder import safe_json_dump
+        from app.reconciliation_engine.universal_reporter import generate_enterprise_report
+
+        # A file pair is a report boundary. One pair preserves the original
+        # direct XLSX download; more than one pair is delivered as a ZIP.
+        if job.job_type == "generic":
+            pair_groups: dict[str, list[dict]] = {}
+            for rule_result in rule_results:
+                pair_groups.setdefault(rule_result["file_pair_id"], []).append(rule_result)
+            if len(pair_groups) == 1:
+                generate_enterprise_report(merged_ud, {}, output_path)
+            else:
+                archive_path = output_path.with_name(f"{job.id}-Reconciliation_Reports.zip")
+                with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    used_names: set[str] = set()
+                    for number, (file_pair_id, pair_rules) in enumerate(pair_groups.items(), start=1):
+                        pair_data = _merge_rule_universal_data(pair_rules)
+                        label = pair_rules[0].get("report_label") or file_pair_id
+                        stem = _safe_report_stem(label, f"Reconciliation_{number}")
+                        filename = f"{stem}.xlsx"
+                        suffix = 2
+                        while filename.lower() in used_names:
+                            filename = f"{stem}_{suffix}.xlsx"
+                            suffix += 1
+                        used_names.add(filename.lower())
+                        pair_path = work_dir / f"{job.id}-{number}-{filename}"
+                        generate_enterprise_report(pair_data, {}, pair_path)
+                        archive.write(pair_path, filename)
+                        pair_path.unlink(missing_ok=True)
+                output_path = archive_path
+                output_name = "Reconciliation_Reports.zip"
+        else:
+            generate_enterprise_report(merged_ud, {}, output_path)
+
         raw_path = output_path.with_name(f"{output_path.stem}_data.json")
         with open(raw_path, "w", encoding="utf-8") as f:
             safe_json_dump(merged_ud, f)
-            
-        from app.reconciliation_engine.universal_reporter import generate_enterprise_report
-        generate_enterprise_report(merged_ud, {}, output_path)
         summary = overall_summary
 
         if is_cancelled():
