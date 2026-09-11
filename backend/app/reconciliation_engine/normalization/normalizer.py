@@ -1,14 +1,12 @@
 import pandas as pd
-import numpy as np
-import re
+
+from app.reconciliation_engine.cache import canonical_date_value
 
 
 def normalize_date_series(series: pd.Series) -> pd.Series:
     """Normalize a series of dates into a standard canonical format YYYY-MM-DD."""
-    # Convert to datetime and then to standard string format
-    # coerce errors to NaT
-    dt_series = pd.to_datetime(series, errors='coerce', dayfirst=True)
-    return dt_series.dt.strftime('%Y-%m-%d').fillna(series.astype(str))
+    normalized = series.map(canonical_date_value)
+    return normalized.map(lambda value: value.isoformat() if value is not None else None).fillna(series.astype(str))
 
 
 def normalize_text_series(series: pd.Series) -> pd.Series:
@@ -58,7 +56,9 @@ def normalize_dataframe(df: pd.DataFrame, config: dict) -> pd.DataFrame:
             df_norm[f"NORM_{col}"] = normalize_text_series(df_norm[col])
             
     for col in config.get("id_columns", []):
-        if col in df_norm.columns:
+        # Date keys are normalized as dates, not compacted identifiers. A date
+        # column can be both a configured primary key and a date field.
+        if col in df_norm.columns and col not in config.get("date_columns", []):
             df_norm[f"NORM_{col}"] = normalize_identifier_series(df_norm[col])
             
     for col in config.get("number_columns", []):

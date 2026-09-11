@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.reconciliation_engine.cache import (
     BUSINESS_SYNONYMS,
+    canonical_date_value,
     compact_identifier,
     is_blank,
     normalize_header,
@@ -46,6 +47,7 @@ from app.reconciliation_engine.preprocessing import (
 
 __all__ = [
     "BUSINESS_SYNONYMS",
+    "canonical_date_value",
     "IDENTIFIER_NAME_HINTS",
     "NUMERIC_NAME_HINTS",
     "DATE_NAME_HINTS",

@@ -1,4 +1,5 @@
 import sys
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
@@ -6,7 +7,8 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 
-from app.reconciliation.matchers import IndexedCandidateMatcher, compare_values, prepare_dataframe
+from app.reconciliation.matchers import IndexedCandidateMatcher, compare_values, parse_date_value, prepare_dataframe
+from app.reconciliation_engine.normalization import normalize_date_series
 
 
 def test_invoice_formatting_difference_scores_high():
@@ -55,3 +57,21 @@ def test_indexed_matcher_uses_every_composite_key_component():
     assert result is not None
     assert result.matcher_type == "composite"
     assert result.status == "Exact composite key match"
+
+
+def test_canonical_date_parser_uses_one_day_first_convention():
+    assert parse_date_value("07/09/2026") == date(2026, 9, 7)
+    assert parse_date_value("2026-09-07") == date(2026, 9, 7)
+    assert parse_date_value("7 Sep 2026") == date(2026, 9, 7)
+    assert parse_date_value(datetime(2026, 9, 7, 14, 30)) == date(2026, 9, 7)
+    assert parse_date_value(pd.Timestamp("2026-09-07")) == date(2026, 9, 7)
+    assert parse_date_value("not a date") is None
+
+
+def test_date_series_and_row_comparison_share_canonical_normalization():
+    normalized = normalize_date_series(pd.Series(["07/09/2026", "7 September 2026", "not a date"]))
+
+    assert normalized.tolist() == ["2026-09-07", "2026-09-07", "not a date"]
+    result = compare_values("07/09/2026", "2026-09-07", "Transaction Date", "Posting Date")
+    assert result.matched
+    assert result.confidence == 100

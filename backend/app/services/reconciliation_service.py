@@ -326,6 +326,7 @@ def process_reconciliation_job(job_id: str) -> None:
                     write_report=False,
                     secondary_conditions=pair.get("secondary_conditions", []),
                     similarity_policy=pair.get("similarity_policy", {}),
+                    date_only_override=bool(pair.get("date_only_override", False)),
                 )
             
             for k, v in res["summary"].items():

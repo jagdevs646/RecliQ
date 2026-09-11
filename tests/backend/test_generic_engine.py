@@ -214,3 +214,32 @@ def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Pat
     audit = result["universal_data"]["identity_resolution"][0]
     assert audit["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
     assert "required 75%" in audit["MATCH EXPLANATION"]
+
+
+def test_date_only_primary_key_requires_explicit_override(tmp_path: Path):
+    file1 = tmp_path / "source.xlsx"
+    file2 = tmp_path / "destination.xlsx"
+    output = tmp_path / "report.xlsx"
+    pd.DataFrame([{"Transaction Date": "07/09/2026", "Amount": 100}]).to_excel(file1, index=False)
+    pd.DataFrame([{"Posting Date": "2026-09-07", "Amount": 100}]).to_excel(file2, index=False)
+
+    with pytest.raises(ValueError, match="Date-only matching can be ambiguous"):
+        run_generic_reconciliation(
+            file1,
+            file2,
+            output,
+            key_file_1="Transaction Date",
+            key_file_2="Posting Date",
+            rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+        )
+
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        output,
+        key_file_1="Transaction Date",
+        key_file_2="Posting Date",
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+        date_only_override=True,
+    )
+    assert result["exact_matches"] == 1

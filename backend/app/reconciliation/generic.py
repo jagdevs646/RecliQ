@@ -89,6 +89,7 @@ def run_generic_reconciliation(
     is_cancelled=None,
     secondary_conditions: list[dict] | None = None,
     similarity_policy: dict | None = None,
+    date_only_override: bool = False,
 ) -> dict:
     import pandas as pd
     from app.reconciliation_engine.preprocessing import prepare_dataframe
@@ -119,4 +120,5 @@ def run_generic_reconciliation(
         is_cancelled=is_cancelled,
         secondary_conditions=secondary_conditions,
         similarity_policy=similarity_policy,
+        date_only_override=date_only_override,
     )

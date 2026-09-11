@@ -234,6 +234,7 @@ def run_generic_reconciliation(
     write_report: bool = True,
     secondary_conditions: list[dict] | None = None,
     similarity_policy: dict | None = None,
+    date_only_override: bool = False,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -277,12 +278,19 @@ def run_generic_reconciliation(
     validate_combined_numeric_rules(file_1_df, file_2_df, normalized_rules)
     
     # 1. Normalize data
-    date_cols = [rule[0][0] for rule in normalized_rules if 'date' in rule[0][0].lower()]
+    date_cols = list(dict.fromkeys(
+        [rule[0][0] for rule in normalized_rules if 'date' in rule[0][0].lower()]
+        + [key for key in file_1_id_col if 'date' in key.lower()]
+    ))
     text_cols = [rule[0][0] for rule in normalized_rules if 'name' in rule[0][0].lower() or 'vendor' in rule[0][0].lower()]
     num_cols = [rule[0][0] for rule in normalized_rules if 'amount' in rule[0][0].lower() or 'value' in rule[0][0].lower() or 'tax' in rule[0][0].lower()]
     
     f1_norm_config = {"date_columns": date_cols, "text_columns": text_cols, "number_columns": num_cols, "id_columns": file_1_id_col}
-    f2_norm_config = {"date_columns": [r[1][0] for r in normalized_rules if r[0][0] in date_cols], 
+    f2_date_cols = list(dict.fromkeys(
+        [r[1][0] for r in normalized_rules if r[0][0] in date_cols]
+        + [key for key in file_2_id_col if 'date' in key.lower()]
+    ))
+    f2_norm_config = {"date_columns": f2_date_cols,
                       "text_columns": [r[1][0] for r in normalized_rules if r[0][0] in text_cols], 
                       "number_columns": [r[1][0] for r in normalized_rules if r[0][0] in num_cols],
                       "id_columns": file_2_id_col}
@@ -319,6 +327,11 @@ def run_generic_reconciliation(
             file_2_id_col,
         )
     ]
+    if len(key_matcher_types) == 1 and key_matcher_types[0] == "date" and not date_only_override:
+        raise ValueError(
+            "Date-only matching can be ambiguous because multiple transactions may occur on the same date. "
+            "Select at least one additional identifying column or explicitly enable the date-only override."
+        )
     indexed_matcher = IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types)
     is_composite_key = len(file_1_match_keys) > 1
     primary_key_1 = file_1_match_keys[0]

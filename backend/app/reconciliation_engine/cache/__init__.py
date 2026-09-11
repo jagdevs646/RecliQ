@@ -1,5 +1,6 @@
 from app.reconciliation_engine.cache.cache_manager import (
     BUSINESS_SYNONYMS,
+    canonical_date_value,
     compact_identifier,
     is_blank,
     normalize_header,
@@ -13,6 +14,7 @@ from app.reconciliation_engine.cache.cache_manager import (
 
 __all__ = [
     "BUSINESS_SYNONYMS",
+    "canonical_date_value",
     "normalize_header",
     "is_blank",
     "unicode_clean",

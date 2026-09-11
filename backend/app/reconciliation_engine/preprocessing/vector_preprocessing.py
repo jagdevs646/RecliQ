@@ -6,6 +6,7 @@ from typing import Iterable
 import pandas as pd
 
 from app.reconciliation_engine.cache import (
+    canonical_date_value,
     is_blank,
     normalize_header,
     to_number,
@@ -63,7 +64,7 @@ def normalise_gst_df(df: pd.DataFrame, amount_columns: list[str]) -> pd.DataFram
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     if "INVOICE DATE" in df.columns:
-        df["INVOICE DATE"] = pd.to_datetime(df["INVOICE DATE"], errors="coerce")
+        df["INVOICE DATE"] = df["INVOICE DATE"].map(canonical_date_value)
     for col in ("GSTR", "INVOICE NO.", "NAME OF TRADER/FIRM/COMPANY"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.upper().str.strip()

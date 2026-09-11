@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from functools import lru_cache
 from typing import Tuple
 
@@ -141,9 +141,37 @@ def to_number(value: object) -> float | None:
 
 
 @lru_cache(maxsize=32768)
-def cached_parse_date_str(text: str) -> date | None:
+def _cached_canonical_date_from_text(text: str, dayfirst: bool) -> date | None:
+    """Parse user-entered date text with the reconciliation-wide convention.
+
+    ISO dates retain their year-month-day order. Other numeric slash/dash dates
+    follow the configurable day-first convention used by the original
+    dataframe normalizer. Textual months are handled after those deterministic
+    fast paths.
+    """
+    text = text.strip()
+    if not text:
+        return None
+
+    iso = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if iso:
+        year, month, day = (int(part) for part in iso.groups())
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+    numeric = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    if numeric:
+        first, second, year = (int(part) for part in numeric.groups())
+        month, day = (second, first) if dayfirst else (first, second)
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
     try:
-        parsed = pd.to_datetime(text, errors="coerce")
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=dayfirst)
     except Exception:
         return None
     if pd.isna(parsed):
@@ -151,14 +179,26 @@ def cached_parse_date_str(text: str) -> date | None:
     return parsed.date()
 
 
-def parse_date_value(value: object) -> date | None:
+def canonical_date_value(value: object, *, dayfirst: bool = True) -> date | None:
+    """Return a canonical calendar date for every matching/normalization path."""
     if is_blank(value):
         return None
-    if isinstance(value, date) and not isinstance(value, datetime_type_check := type(value)):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
         return value
+    if isinstance(value, pd.Timestamp):
+        return None if pd.isna(value) else value.date()
     if hasattr(value, "date") and callable(getattr(value, "date")):
         try:
-            return value.date()
+            parsed = value.date()
+            if isinstance(parsed, date):
+                return parsed
         except Exception:
             pass
-    return cached_parse_date_str(str(value))
+    return _cached_canonical_date_from_text(str(value), dayfirst)
+
+
+def parse_date_value(value: object) -> date | None:
+    """Backward-compatible name for the canonical day-first parser."""
+    return canonical_date_value(value, dayfirst=True)
