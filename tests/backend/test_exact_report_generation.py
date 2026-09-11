@@ -186,8 +186,8 @@ def test_generated_excel_structure_matches_sample(tmp_path: Path):
 
     # 5. Verify 02 Exceptions Distinct Record formula
     ws2 = wb["02 Exceptions"]
-    assert ws2["L4"].value == "Distinct Record"
-    assert ws2["L5"].value == "=IF(COUNTIF($B$5:B5,B5)=1,1,0)"
+    assert ws2["M4"].value == "Distinct Record"
+    assert ws2["M5"].value == "=IF(COUNTIF($C$5:C5,C5)=1,1,0)"
     assert ws2.freeze_panes == "A5"
 
     # 6. Verify 03 Matched Records Table

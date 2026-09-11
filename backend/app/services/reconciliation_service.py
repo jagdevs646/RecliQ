@@ -18,7 +18,12 @@ from app.reconciliation_engine.engine import (
     run_generic_reconciliation,
     run_gst_reconciliation,
 )
-from app.schemas.reconciliation import GenericReconciliationRequest, GSTReconciliationRequest
+from app.schemas.reconciliation import (
+    GenericReconciliationRequest,
+    GSTReconciliationRequest,
+    ReconciliationPlan,
+    normalize_legacy_request,
+)
 from app.services.job_service import append_history
 from app.storage import get_storage
 
@@ -36,21 +41,29 @@ def enqueue_generic_job(
     background_tasks: BackgroundTasks,
     session_id: str,
 ) -> ReconciliationJob:
-    file_1_id = payload.file_1_id or (payload.source_files_1[0].file_id if payload.source_files_1 else None)
-    file_2_id = payload.file_2_id or (payload.source_files_2[0].file_id if payload.source_files_2 else None)
+    try:
+        plan = normalize_legacy_request(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
+    source_file_ids = [
+        source.file_id
+        for file_pair in plan.file_pairs
+        for source in file_pair.source_files
+    ]
+    destination_file_ids = [
+        source.file_id
+        for file_pair in plan.file_pairs
+        for source in file_pair.destination_files
+    ]
+    file_1_id = source_file_ids[0] if source_file_ids else None
+    file_2_id = destination_file_ids[0] if destination_file_ids else None
     if not file_1_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 1 is required")
     if not file_2_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 2 is required")
 
-    files_to_check = {file_1_id, file_2_id}
-    for fs in payload.source_files_1:
-        if fs.file_id:
-            files_to_check.add(fs.file_id)
-    for fs in payload.source_files_2:
-        if fs.file_id:
-            files_to_check.add(fs.file_id)
+    files_to_check = set(source_file_ids + destination_file_ids)
 
     for fid in files_to_check:
         _file_record(db, fid, session_id)
@@ -60,10 +73,10 @@ def enqueue_generic_job(
         job_type="generic",
         status="queued",
         progress=0,
-        orientation=payload.orientation,
+        orientation=plan.orientation,
         input_file_1_id=file_1_id,
         input_file_2_id=file_2_id,
-        settings_json=payload.model_dump_json(),
+        settings_json=plan.model_dump_json(),
     )
     db.add(job)
     db.flush()
@@ -227,9 +240,13 @@ def process_reconciliation_job(job_id: str) -> None:
         from app.api.routes.analysis import _load_and_consolidate
         from app.schemas.reconciliation import FileSource
 
-        # Use pairs if present, otherwise fallback to legacy file_id
-        pairs = payload.get("pairs", [])
-        if not pairs:
+        if job.job_type == "generic":
+            plan = ReconciliationPlan.model_validate(payload)
+            pairs = plan.execution_pairs()
+        else:
+            # GST retains its existing, self-contained execution contract.
+            pairs = payload.get("pairs", [])
+        if job.job_type == "gst" and not pairs:
             source_files_1 = payload.get("source_files_1") or [{"file_id": payload.get("file_1_id") or job.input_file_1_id}]
             source_files_2 = payload.get("source_files_2") or [{"file_id": payload.get("file_2_id") or job.input_file_2_id}]
             sources_1 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_1 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
@@ -259,11 +276,15 @@ def process_reconciliation_job(job_id: str) -> None:
 
         # Iterating through sheet pairs
         for idx, pair in enumerate(pairs):
-            s1 = FileSource(**pair["source_file_1"]) if isinstance(pair["source_file_1"], dict) else pair["source_file_1"]
-            s2 = FileSource(**pair["source_file_2"]) if isinstance(pair["source_file_2"], dict) else pair["source_file_2"]
+            source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
+            source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
+            sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
+            sources_2 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_2]
+            s1 = sources_1[0]
+            s2 = sources_2[0]
             
-            df1 = _load_and_consolidate(db, job.session_id, [s1])
-            df2 = _load_and_consolidate(db, job.session_id, [s2])
+            df1 = _load_and_consolidate(db, job.session_id, sources_1)
+            df2 = _load_and_consolidate(db, job.session_id, sources_2)
             
             sheet_name_1 = s1.sheet_id or "default"
             sheet_name_2 = s2.sheet_id or "default"
@@ -280,6 +301,7 @@ def process_reconciliation_job(job_id: str) -> None:
                     file_1_name=f"{file_1.original_filename} ({sheet_name_1})",
                     file_2_name=f"{file_2.original_filename} ({sheet_name_2})",
                     is_cancelled=is_cancelled,
+                    write_report=False,
                 )
             else:
                 key_f1 = pair.get("key_file_1", payload.get("key_file_1"))
@@ -301,6 +323,7 @@ def process_reconciliation_job(job_id: str) -> None:
                     file_1_name=f"{file_1.original_filename if file_1 else 'File 1'} ({sheet_name_1})",
                     file_2_name=f"{file_2.original_filename if file_2 else 'File 2'} ({sheet_name_2})",
                     is_cancelled=is_cancelled,
+                    write_report=False,
                 )
             
             for k, v in res["summary"].items():

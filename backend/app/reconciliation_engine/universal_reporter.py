@@ -215,13 +215,13 @@ class UniversalReporter:
         kpi_values = [
             (
                 "B6:C6",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!L5:L{max_exc_row})"
+                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})"
                 f"+COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
                 self.colors["primary"],
                 "#,##0",
             ),
             ("D6:E6", f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})", self.colors["pass"], "#,##0"),
-            ("F6:G6", f"=SUM('02 Exceptions'!L5:L{max_exc_row})", self.colors["warning"], "#,##0"),
+            ("F6:G6", f"=SUM('02 Exceptions'!M5:M{max_exc_row})", self.colors["warning"], "#,##0"),
             (
                 "H6:I6",
                 f"=COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
@@ -988,8 +988,8 @@ class UniversalReporter:
         ctrl_rows = [
             (
                 "Total records in scope",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!L5:L{max_exc_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!L5:L{max_exc_row})+COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})",
+                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
+                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})+COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})",
                 '=IF(B5=C5,"Pass","Review")',
             ),
             (
@@ -1000,8 +1000,8 @@ class UniversalReporter:
             ),
             (
                 "Exception records (1+ field mismatch)",
-                f"=SUM('02 Exceptions'!L5:L{max_exc_row})",
-                f"=SUM('02 Exceptions'!L5:L{max_exc_row})",
+                f"=SUM('02 Exceptions'!M5:M{max_exc_row})",
+                f"=SUM('02 Exceptions'!M5:M{max_exc_row})",
                 '=IF(B7=0,"Pass","Review Required")',
             ),
             (

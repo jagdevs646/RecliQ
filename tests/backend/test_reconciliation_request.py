@@ -9,7 +9,17 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas.reconciliation import GenericReconciliationRequest, GSTReconciliationRequest, FileSource
+from app.schemas.reconciliation import (
+    FilePairConfig,
+    FileSource,
+    GenericReconciliationRequest,
+    GSTReconciliationRequest,
+    MatchingStrategy,
+    RuleMapping,
+    SheetPairConfig,
+    SheetRuleConfig,
+    normalize_legacy_request,
+)
 
 
 def test_schema_model_validators():
@@ -44,6 +54,89 @@ def test_schema_model_validators():
     )
     assert gst_req.file_1_id == "g1"
     assert gst_req.file_2_id == "g2"
+
+
+def test_legacy_generic_request_normalizes_to_one_canonical_plan():
+    request = GenericReconciliationRequest(
+        source_files_1=[FileSource(file_id="source-file", sheet_id="Sales")],
+        source_files_2=[FileSource(file_id="destination-file", sheet_id="Ledger")],
+        key_file_1=["Invoice", "Entity"],
+        key_file_2=["Invoice Number", "Company Code"],
+        rules=[RuleMapping(file_1_fields=["Amount"], file_2_fields=["Net Amount"])],
+        include_columns_file_1=["Currency"],
+        include_columns_file_2=["Tax"],
+    )
+
+    plan = normalize_legacy_request(request)
+
+    assert len(plan.file_pairs) == 1
+    rule = plan.file_pairs[0].sheet_rules[0]
+    assert rule.matching_strategy.primary_key_source == ["Invoice", "Entity"]
+    assert rule.matching_strategy.primary_key_destination == ["Invoice Number", "Company Code"]
+    assert rule.reconciliation_mapping == request.rules
+    assert rule.source_sheets == ["Sales"]
+    assert rule.destination_sheets == ["Ledger"]
+    assert plan.execution_pairs()[0]["key_file_1"] == ["Invoice", "Entity"]
+
+
+def test_legacy_sheet_pairs_keep_independent_rule_configuration():
+    request = GenericReconciliationRequest(
+        pairs=[
+            SheetPairConfig(
+                source_file_1=FileSource(file_id="source-file", sheet_id="Sales"),
+                source_file_2=FileSource(file_id="destination-file", sheet_id="Sales Ledger"),
+                key_file_1="Invoice",
+                key_file_2="Invoice Number",
+                rules=[RuleMapping(file_1_fields=["Amount"], file_2_fields=["Net Amount"])],
+            ),
+            SheetPairConfig(
+                source_file_1=FileSource(file_id="source-file", sheet_id="Payments"),
+                source_file_2=FileSource(file_id="destination-file", sheet_id="Bank"),
+                matching_strategy=MatchingStrategy(
+                    primary_key_source=["Reference", "Date"],
+                    primary_key_destination=["Bank Ref", "Posting Date"],
+                ),
+                reconciliation_mapping=[RuleMapping(file_1_fields=["Paid"], file_2_fields=["Credit"])],
+            ),
+        ]
+    )
+
+    plan = normalize_legacy_request(request)
+    first_rule = plan.file_pairs[0].sheet_rules[0]
+    second_rule = plan.file_pairs[1].sheet_rules[0]
+
+    assert first_rule.matching_strategy.primary_key_source == ["Invoice"]
+    assert second_rule.matching_strategy.primary_key_source == ["Reference", "Date"]
+    assert first_rule.reconciliation_mapping[0].file_1_fields == ["Amount"]
+    assert second_rule.reconciliation_mapping[0].file_1_fields == ["Paid"]
+    assert plan.execution_pairs()[1]["source_file_1"]["sheet_id"] == "Payments"
+
+
+def test_canonical_file_pairs_are_accepted_without_legacy_fields():
+    file_pair = FilePairConfig(
+        file_pair_id="january",
+        source_files=[FileSource(file_id="source-file")],
+        destination_files=[FileSource(file_id="destination-file")],
+        sheet_rules=[
+            SheetRuleConfig(
+                sheet_rule_id="january-sales",
+                source_sheets=["Sales"],
+                destination_sheets=["Ledger"],
+                matching_strategy=MatchingStrategy(
+                    primary_key_source=["Invoice"],
+                    primary_key_destination=["Invoice Number"],
+                ),
+                reconciliation_mapping=[RuleMapping(file_1_fields=["Amount"], file_2_fields=["Amount"])],
+                report_label="January sales",
+            )
+        ],
+    )
+    request = GenericReconciliationRequest(file_pairs=[file_pair])
+
+    plan = normalize_legacy_request(request)
+
+    assert plan.file_pairs[0].file_pair_id == "january"
+    assert plan.execution_pairs()[0]["report_label"] == "January sales"
 
 
 def test_enqueue_with_source_files_only():

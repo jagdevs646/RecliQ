@@ -123,6 +123,7 @@ def run_generic_reconciliation(
     file_1_name: str = "File 1",
     file_2_name: str = "File 2",
     is_cancelled: Optional[Callable[[], bool]] = None,
+    write_report: bool = True,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -307,6 +308,9 @@ def run_generic_reconciliation(
         total_file_1=len(file_1_df),
         total_file_2=len(file_2_df),
     )
+
+    if write_report:
+        generate_enterprise_report(universal_data, {}, output_path)
     
     tracker.finalized()
 
@@ -324,8 +328,9 @@ def run_generic_reconciliation(
     }
 
     return {
+        **summary_stats,
         "summary": summary_stats,
-        "universal_data": universal_data
+        "universal_data": universal_data,
     }
 
 
@@ -339,6 +344,7 @@ def run_gst_reconciliation(
     file_1_name: str = "File1",
     file_2_name: str = "File2",
     is_cancelled: Optional[Callable[[], bool]] = None,
+    write_report: bool = True,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -508,6 +514,16 @@ def run_gst_reconciliation(
         total_file_1=len(df1),
         total_file_2=len(df2),
     )
+
+    if write_report:
+        # The GST public engine has historically emitted this audit artifact.
+        # Generic job execution persists its merged JSON in the service layer.
+        from app.utils.json_encoder import safe_json_dump
+
+        raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+        with open(raw_path, "w", encoding="utf-8") as raw_file:
+            safe_json_dump(universal_data, raw_file)
+        generate_enterprise_report(universal_data, {}, output_path)
     
     tracker.finalized()
 
@@ -523,6 +539,7 @@ def run_gst_reconciliation(
     }
 
     return {
+        **summary_stats,
         "summary": summary_stats,
-        "universal_data": universal_data
+        "universal_data": universal_data,
     }
