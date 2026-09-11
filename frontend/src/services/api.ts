@@ -1,4 +1,4 @@
-import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, RuleMapping, UploadedFile } from "../types";
+import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, RuleMapping, UploadedFile, SecondaryMatchCondition, SimilarityPolicy } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -126,6 +126,27 @@ export class ApiClient {
       rules: RuleMapping[];
       include_columns_file_1: string[];
       include_columns_file_2: string[];
+    }>;
+    file_pairs?: Array<{
+      file_pair_id: string;
+      source_files: FileSource[];
+      destination_files: FileSource[];
+      sheet_rules: Array<{
+        sheet_rule_id: string;
+        source_sheets: string[];
+        destination_sheets: string[];
+        matching_strategy: {
+          primary_key_source: string[];
+          primary_key_destination: string[];
+          secondary_conditions: SecondaryMatchCondition[];
+          similarity_policy: SimilarityPolicy;
+          date_only_override: boolean;
+        };
+        reconciliation_mapping: RuleMapping[];
+        include_columns_file_1: string[];
+        include_columns_file_2: string[];
+        report_label: string;
+      }>;
     }>;
   }): Promise<Job> {
     return this.request<Job>("/reconciliation/generic", {

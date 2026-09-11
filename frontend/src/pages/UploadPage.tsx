@@ -9,7 +9,7 @@ import { SheetPairingStep } from "../components/SheetPairingStep";
 import type { SheetPairing } from "../components/SheetPairingStep";
 import { SmartMappingReview } from "../components/SmartMappingReview";
 import { api } from "../services/api";
-import type { GstConfiguration, Job, RuleMapping, UploadedFile, SheetMetadata, AnalysisResponse } from "../types";
+import type { GstConfiguration, Job, RuleMapping, UploadedFile, SheetMetadata, AnalysisResponse, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
 interface Props {
   onJobCreated: (job: Job) => void;
@@ -34,6 +34,7 @@ export function UploadPage({ onJobCreated }: Props) {
   const [selectedSheets1, setSelectedSheets1] = useState<string[]>([]);
   const [selectedSheets2, setSelectedSheets2] = useState<string[]>([]);
   const [pairings, setPairings] = useState<SheetPairing[]>([]);
+  const [pairConfigs, setPairConfigs] = useState<Record<string, SheetRuleDraft>>({});
   
   const [file1Columns, setFile1Columns] = useState<string[]>([]);
   const [file2Columns, setFile2Columns] = useState<string[]>([]);
@@ -61,6 +62,13 @@ export function UploadPage({ onJobCreated }: Props) {
 
   const file1Name = file1?.original_filename || "File 1";
   const file2Name = file2?.original_filename || "File 2";
+  const pairId = (pairing: SheetPairing) => `${pairing.sheet1.id}::${pairing.sheet2.id}`;
+  const selectedFile1Sheets = file1Sheets.filter((sheet) => selectedSheets1.includes(sheet.id));
+  const selectedFile2Sheets = file2Sheets.filter((sheet) => selectedSheets2.includes(sheet.id));
+  const genericConfigurationsReady = pairings.length > 0 && pairings.every((pairing) => {
+    const config = pairConfigs[pairId(pairing)];
+    return Boolean(config && config.primaryKeySource.length && config.primaryKeyDestination.length && config.rules.length);
+  });
 
   const canContinue = step === 1
     ? hasBothFiles && (file1Sheets.length === 0 || selectedSheets1.length > 0) && (file2Sheets.length === 0 || selectedSheets2.length > 0)
@@ -69,10 +77,71 @@ export function UploadPage({ onJobCreated }: Props) {
       : jobType === "gst"
         ? gstReady
         : step === 3
-          ? Boolean(key1 && key2)
+          ? pairings.length > 0 && pairings.every((pairing) => {
+              const config = pairConfigs[pairId(pairing)];
+              return Boolean(config?.primaryKeySource.length && config.primaryKeyDestination.length);
+            })
           : step === 4
-            ? rules.length > 0
+            ? genericConfigurationsReady
             : true;
+
+  function updatePairConfig(pairing: SheetPairing, update: (current: SheetRuleDraft) => SheetRuleDraft) {
+    const id = pairId(pairing);
+    setPairConfigs((current) => current[id] ? { ...current, [id]: update(current[id]) } : current);
+  }
+
+  async function configurePairings(nextPairings: SheetPairing[]) {
+    if (!file1 || !file2 || jobType !== "generic") return;
+    setBusy(true);
+    try {
+      const missing = nextPairings.filter((pairing) => !pairConfigs[pairId(pairing)]);
+      const configured = await Promise.all(missing.map(async (pairing) => {
+        const [sourceColumns, destinationColumns, pairAnalysis] = await Promise.all([
+          api.getColumns(file1.id, orientation, pairing.sheet1.id),
+          api.getColumns(file2.id, orientation, pairing.sheet2.id),
+          api.analyzeFiles({
+            source_files_1: [{ file_id: file1.id, sheet_id: pairing.sheet1.id }],
+            source_files_2: [{ file_id: file2.id, sheet_id: pairing.sheet2.id }],
+            orientation,
+          }),
+        ]);
+        const suggestedRules = pairAnalysis.recommended_mappings
+          .filter((mapping) => mapping.target && (mapping.confidence === "High" || mapping.confidence === "Medium"))
+          .map((mapping) => ({ file_1_fields: [mapping.source], file_2_fields: [mapping.target as string] }));
+        const draft: SheetRuleDraft = {
+          file1Columns: sourceColumns,
+          file2Columns: destinationColumns,
+          primaryKeySource: pairAnalysis.recommended_keys_1.filter((column) => sourceColumns.includes(column)),
+          primaryKeyDestination: pairAnalysis.recommended_keys_2.filter((column) => destinationColumns.includes(column)),
+          secondaryConditions: [],
+          similarityPolicy: {},
+          dateOnlyOverride: false,
+          rules: suggestedRules,
+          includeFile1: [],
+          includeFile2: [],
+          analysis: pairAnalysis,
+        };
+        return [pairId(pairing), draft] as const;
+      }));
+      setPairConfigs((current) => {
+        const retained = Object.fromEntries(nextPairings.flatMap((pairing) => {
+          const id = pairId(pairing);
+          return current[id] ? [[id, current[id]]] : [];
+        }));
+        return { ...retained, ...Object.fromEntries(configured) };
+      });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not configure every sheet pair");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handlePairingsChange(nextPairings: SheetPairing[]) {
+    setPairings(nextPairings);
+    if (jobType === "generic") configurePairings(nextPairings).catch(() => undefined);
+    else refreshColumns(nextPairings).catch(() => undefined);
+  }
 
   async function upload(which: 1 | 2, file: File) {
     setUploading(which);
@@ -204,26 +273,30 @@ export function UploadPage({ onJobCreated }: Props) {
             file_1_id: file1.id,
             file_2_id: file2.id,
             orientation,
-            // Build structured pairs from sheet pairings
-            pairs: pairings.length > 0
-              ? pairings.map(p => ({
-                  source_file_1: { file_id: file1.id, sheet_id: p.sheet1.id },
-                  source_file_2: { file_id: file2.id, sheet_id: p.sheet2.id },
-                  key_file_1: key1,
-                  key_file_2: key2,
-                  rules,
-                  include_columns_file_1: include1,
-                  include_columns_file_2: include2,
-                }))
-              : undefined,
-            // Legacy flat fields as fallback if no pairings
-            source_files_1: pairings.length === 0 ? source_files_1 : undefined,
-            source_files_2: pairings.length === 0 ? source_files_2 : undefined,
-            key_file_1: pairings.length === 0 ? key1 : undefined,
-            key_file_2: pairings.length === 0 ? key2 : undefined,
-            rules: pairings.length === 0 ? rules : undefined,
-            include_columns_file_1: pairings.length === 0 ? include1 : undefined,
-            include_columns_file_2: pairings.length === 0 ? include2 : undefined,
+            file_pairs: pairings.map((pairing, index) => {
+              const config = pairConfigs[pairId(pairing)];
+              return {
+                file_pair_id: `pair-${index + 1}-${pairId(pairing)}`,
+                source_files: [{ file_id: file1.id, sheet_id: pairing.sheet1.id }],
+                destination_files: [{ file_id: file2.id, sheet_id: pairing.sheet2.id }],
+                sheet_rules: [{
+                  sheet_rule_id: `rule-${index + 1}-${pairId(pairing)}`,
+                  source_sheets: [pairing.sheet1.id],
+                  destination_sheets: [pairing.sheet2.id],
+                  matching_strategy: {
+                    primary_key_source: config.primaryKeySource,
+                    primary_key_destination: config.primaryKeyDestination,
+                    secondary_conditions: config.secondaryConditions,
+                    similarity_policy: config.similarityPolicy,
+                    date_only_override: config.dateOnlyOverride,
+                  },
+                  reconciliation_mapping: config.rules,
+                  include_columns_file_1: config.includeFile1,
+                  include_columns_file_2: config.includeFile2,
+                  report_label: `${pairing.sheet1.name} -> ${pairing.sheet2.name}`,
+                }],
+              };
+            }),
           });
       onJobCreated(job);
     } catch (error) {
@@ -261,30 +334,28 @@ export function UploadPage({ onJobCreated }: Props) {
       </div>}
       {step === 2 && <div className="step-content">
         <div className="section-heading"><div><h2>Pair your sheets</h2><p>Map each sheet from {file1Name} to its counterpart in {file2Name}. Each pair is reconciled independently.</p></div></div>
-        {(file1Sheets.length > 1 || file2Sheets.length > 1)
-          ? <SheetPairingStep
-              file1Sheets={file1Sheets}
-              file2Sheets={file2Sheets}
-              file1Name={file1Name}
-              file2Name={file2Name}
-              pairings={pairings}
-              onChange={(newPairings) => {
-                setPairings(newPairings);
-                if (newPairings.length > 0) refreshColumns(newPairings).catch(() => undefined);
-              }}
-            />
-          : <div className="pairing-auto-notice info-callout"><Sparkles size={18} /><span>Single sheet in each file — automatically paired and ready to continue.</span></div>}
+        <SheetPairingStep
+          file1Sheets={selectedFile1Sheets}
+          file2Sheets={selectedFile2Sheets}
+          file1Name={file1Name}
+          file2Name={file2Name}
+          pairings={pairings}
+          onChange={handlePairingsChange}
+        />
       </div>}
       {step === 3 && <div className="step-content">
         {jobType === "generic" ? <>
-          <div className="section-heading"><div><h2>Choose the unique matching key</h2><p>Select the identifier that tells RecliQ which records belong together.</p></div><span className="key-hint">{estimatedFields}</span></div>
-          {busy ? <div className="loading-state"><Loader2 className="animate-spin" /> Analyzing dataset...</div> : analysis && <SmartMappingReview analysis={analysis} file1Name={file1Name} file2Name={file2Name} />}
-          <div className="key-selector-grid"><label><span>{file1Name}</span><select value={key1} onChange={(event) => setKey1(event.target.value)}>{file1Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file1Columns.length} columns detected</small></label><ArrowRight size={24} /><label><span>{file2Name}</span><select value={key2} onChange={(event) => setKey2(event.target.value)}>{file2Columns.map((column) => <option key={column}>{column}</option>)}</select><small>{file2Columns.length} columns detected</small></label></div><div className="info-callout"><Sparkles size={18} /><span>RecliQ automatically chooses the best numeric, date, identifier, or text comparison method for each mapped field.</span></div>
+          <div className="section-heading"><div><h2>Configure matching for each sheet pair</h2><p>Each relationship owns its keys, conditions, confidence policy, and mappings.</p></div></div>
+          {busy && <div className="loading-state"><Loader2 className="animate-spin" /> Analyzing sheet pairs...</div>}
+          {pairings.map((pairing) => {
+            const config = pairConfigs[pairId(pairing)];
+            return config ? <SheetRuleConfiguration key={pairId(pairing)} pairing={pairing} config={config} onChange={(next) => updatePairConfig(pairing, () => next)} /> : null;
+          })}
         </> : <GstMatchingKeyStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} error={gstConfigError} file1Name={file1Name} file2Name={file2Name} />}
       </div>}
-      {step === 4 && <div className="step-content">{jobType === "generic" ? <MappingBuilder file1Columns={file1Columns} file2Columns={file2Columns} rules={rules} onRulesChange={setRules} primaryFile1={key1} primaryFile2={key2} file1Name={file1Name} file2Name={file2Name} /> : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
-      {step === 5 && <div className="step-content">{jobType === "generic" ? <ReportColumnPicker file1Columns={file1Columns.filter((column) => column !== key1)} file2Columns={file2Columns.filter((column) => column !== key2)} selectedFile1={include1} selectedFile2={include2} onChangeFile1={setInclude1} onChangeFile2={setInclude2} file1Name={file1Name} file2Name={file2Name} /> : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}
-      {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div><div><dt>Sheet pairs</dt><dd>{pairings.length > 0 ? `${pairings.length} pair${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Matching key</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : `${key1} → ${key2}`}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : rules.length}</dd></div><div><dt>Report columns</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : include1.length + include2.length}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl><button type="button" className="primary run-button" onClick={start} disabled={busy || (jobType === "gst" && !gstReady)}><Play size={18} />{busy ? "Starting reconciliation..." : "Run reconciliation"}</button></div>}
+      {step === 4 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <MappingBuilder key={pairId(pairing)} file1Columns={config.file1Columns} file2Columns={config.file2Columns} rules={config.rules} onRulesChange={(nextRules) => updatePairConfig(pairing, (current) => ({ ...current, rules: nextRules }))} primaryFile1={config.primaryKeySource} primaryFile2={config.primaryKeyDestination} file1Name={`${file1Name} - ${pairing.sheet1.name}`} file2Name={`${file2Name} - ${pairing.sheet2.name}`} /> : null; }) : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
+      {step === 5 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <ReportColumnPicker key={pairId(pairing)} file1Columns={config.file1Columns.filter((column) => !config.primaryKeySource.includes(column))} file2Columns={config.file2Columns.filter((column) => !config.primaryKeyDestination.includes(column))} selectedFile1={config.includeFile1} selectedFile2={config.includeFile2} onChangeFile1={(includeFile1) => updatePairConfig(pairing, (current) => ({ ...current, includeFile1 }))} onChangeFile2={(includeFile2) => updatePairConfig(pairing, (current) => ({ ...current, includeFile2 }))} file1Name={`${file1Name} - ${pairing.sheet1.name}`} file2Name={`${file2Name} - ${pairing.sheet2.name}`} /> : null; }) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}
+      {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div><div><dt>Sheet pairs</dt><dd>{pairings.length > 0 ? `${pairings.length} pair${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Matching key</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return `${pairing.sheet1.name}: ${config?.primaryKeySource.join(" + ")} -> ${config?.primaryKeyDestination.join(" + ")}`; }).join("; ")}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : pairings.reduce((count, pairing) => count + (pairConfigs[pairId(pairing)]?.rules.length ?? 0), 0)}</dd></div><div><dt>Report columns</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0); }, 0)}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl><button type="button" className="primary run-button" onClick={start} disabled={busy || (jobType === "gst" && !gstReady) || (jobType === "generic" && !genericConfigurationsReady)}><Play size={18} />{busy ? "Starting reconciliation..." : "Run reconciliation"}</button></div>}
     </div>
     {message && <p className="error-text">{message}</p>}
     <div className="workflow-actions"><button type="button" className="secondary" onClick={() => setStep((current) => Math.max(1, current - 1))} disabled={step === 1 || busy}><ArrowLeft size={16} />Back</button>{step < 6 ? <button type="button" className="primary" onClick={() => setStep((current) => current + 1)} disabled={!canContinue || busy}>Continue<ArrowRight size={16} /></button> : null}</div>
@@ -301,6 +372,38 @@ interface GstStepProps {
 
 function GstMatchingKeyStep({ config, missingFile1, missingFile2, error, file1Name = "File 1", file2Name = "File 2" }: GstStepProps & { error: string }) {
   return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Confirm GST matching keys</h2><p>GST reconciliations use a fixed business key to keep invoice matching accurate and auditable.</p></div></div><div className="gst-key-list">{(config?.matching_fields ?? []).map((field) => <div key={field}><CheckCircle2 size={17} /><span>{field}</span><small>Required in both files ({file1Name} & {file2Name})</small></div>)}</div><GstValidationAlert config={config} missingFile1={missingFile1} missingFile2={missingFile2} error={error} file1Name={file1Name} file2Name={file2Name} /></section>;
+}
+
+function SheetRuleConfiguration({ pairing, config, onChange }: { pairing: SheetPairing; config: SheetRuleDraft; onChange: (config: SheetRuleDraft) => void }) {
+  const toggleKey = (side: "source" | "destination", column: string) => {
+    const current = side === "source" ? config.primaryKeySource : config.primaryKeyDestination;
+    const next = current.includes(column) ? current.filter((item) => item !== column) : [...current, column];
+    onChange({ ...config, [side === "source" ? "primaryKeySource" : "primaryKeyDestination"]: next });
+  };
+  const addCondition = () => {
+    const source = config.file1Columns.find((column) => !config.primaryKeySource.includes(column));
+    const destination = config.file2Columns.find((column) => !config.primaryKeyDestination.includes(column));
+    if (!source || !destination) return;
+    onChange({ ...config, secondaryConditions: [...config.secondaryConditions, { source_column: source, destination_column: destination, comparison_method: "exact_text" }] });
+  };
+  const updateCondition = (index: number, update: Partial<SecondaryMatchCondition>) => {
+    onChange({ ...config, secondaryConditions: config.secondaryConditions.map((condition, itemIndex) => itemIndex === index ? { ...condition, ...update } : condition) });
+  };
+  const dateOnly = config.primaryKeySource.length === 1 && /date|\bdt\b/i.test(config.primaryKeySource[0] ?? "");
+
+  return <section className="mapping-workspace sheet-rule-config">
+    <div className="section-heading"><div><h3>{pairing.sheet1.name} <ArrowRight size={16} /> {pairing.sheet2.name}</h3><p>Primary keys are composite-capable. Secondary conditions are only evaluated when those keys do not match exactly.</p></div><span className="mapping-count">{config.rules.length} mapped fields</span></div>
+    {config.analysis && <SmartMappingReview analysis={config.analysis} file1Name={pairing.sheet1.name} file2Name={pairing.sheet2.name} />}
+    <div className="key-selector-grid">
+      <fieldset><legend>{pairing.sheet1.name} primary key</legend>{config.file1Columns.map((column) => <label key={column} className="row-mapping-option"><input type="checkbox" checked={config.primaryKeySource.includes(column)} onChange={() => toggleKey("source", column)} /><span>{column}</span></label>)}</fieldset>
+      <ArrowRight size={24} />
+      <fieldset><legend>{pairing.sheet2.name} primary key</legend>{config.file2Columns.map((column) => <label key={column} className="row-mapping-option"><input type="checkbox" checked={config.primaryKeyDestination.includes(column)} onChange={() => toggleKey("destination", column)} /><span>{column}</span></label>)}</fieldset>
+    </div>
+    {dateOnly && <label className="error-text"><input type="checkbox" checked={config.dateOnlyOverride} onChange={(event) => onChange({ ...config, dateOnlyOverride: event.target.checked })} />Date-only matching can be ambiguous because multiple transactions may occur on the same date. Select another identifier, or explicitly allow this exception.</label>}
+    <div className="mapping-toolbar"><div><h4>Secondary conditions</h4><p>All conditions must pass before an exception match can be considered.</p></div><button type="button" className="secondary" onClick={addCondition}>Add condition</button></div>
+    {config.secondaryConditions.map((condition, index) => <div className="key-selector-grid" key={`${condition.source_column}-${condition.destination_column}-${index}`}><select value={condition.source_column} onChange={(event) => updateCondition(index, { source_column: event.target.value })}>{config.file1Columns.map((column) => <option key={column}>{column}</option>)}</select><ArrowRight size={18} /><select value={condition.destination_column} onChange={(event) => updateCondition(index, { destination_column: event.target.value })}>{config.file2Columns.map((column) => <option key={column}>{column}</option>)}</select><select value={condition.comparison_method} onChange={(event) => updateCondition(index, { comparison_method: event.target.value as SecondaryMatchCondition["comparison_method"] })}><option value="exact_text">Exact text</option><option value="normalized_date">Normalized date</option><option value="numeric_tolerance">Numeric tolerance</option><option value="matcher_based">Explicit fuzzy match</option></select>{condition.comparison_method === "numeric_tolerance" && <input type="number" min="0" value={condition.numeric_tolerance ?? 0} onChange={(event) => updateCondition(index, { numeric_tolerance: Number(event.target.value) })} aria-label="Numeric tolerance" />}<button type="button" className="icon-button" onClick={() => onChange({ ...config, secondaryConditions: config.secondaryConditions.filter((_, itemIndex) => itemIndex !== index) })} title="Remove condition">×</button></div>)}
+    <div className="key-selector-grid"><label><span>Primary key comparison</span><select value={config.similarityPolicy.matcher_type_override ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, matcher_type_override: event.target.value || undefined } })}><option value="">Automatic by data type</option><option value="text">Text</option><option value="company_name">Company name</option><option value="person_name">Person name</option><option value="identifier">Identifier</option></select></label><label><span>Minimum confidence</span><input type="number" min="0" max="100" placeholder="Automatic" value={config.similarityPolicy.threshold ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, threshold: event.target.value === "" ? undefined : Number(event.target.value) } })} /></label></div>
+  </section>;
 }
 
 function GstColumnMappingStep({ config, missingFile1, missingFile2, file1Name = "File 1", file2Name = "File 2" }: GstStepProps) {

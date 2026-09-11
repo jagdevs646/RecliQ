@@ -7,8 +7,8 @@ interface Props {
   file2Columns: string[];
   rules: RuleMapping[];
   onRulesChange: (rules: RuleMapping[]) => void;
-  primaryFile1?: string;
-  primaryFile2?: string;
+  primaryFile1?: string | string[];
+  primaryFile2?: string | string[];
   file1Name?: string;
   file2Name?: string;
 }
@@ -43,8 +43,10 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
   const [future, setFuture] = useState<RuleMapping[][]>([]);
   const [templateName, setTemplateName] = useState("");
   const [autoMatches, setAutoMatches] = useState<AutoMatch[]>([]);
-  const availableFile1 = useMemo(() => file1Columns.filter((column) => column !== primaryFile1), [file1Columns, primaryFile1]);
-  const availableFile2 = useMemo(() => file2Columns.filter((column) => column !== primaryFile2), [file2Columns, primaryFile2]);
+  const primaryFile1Columns = Array.isArray(primaryFile1) ? primaryFile1 : primaryFile1 ? [primaryFile1] : [];
+  const primaryFile2Columns = Array.isArray(primaryFile2) ? primaryFile2 : primaryFile2 ? [primaryFile2] : [];
+  const availableFile1 = useMemo(() => file1Columns.filter((column) => !primaryFile1Columns.includes(column)), [file1Columns, primaryFile1Columns]);
+  const availableFile2 = useMemo(() => file2Columns.filter((column) => !primaryFile2Columns.includes(column)), [file2Columns, primaryFile2Columns]);
   const mappedSource = new Set(rules.flatMap((rule) => rule.file_1_fields));
   const mappedDestination = new Set(rules.flatMap((rule) => rule.file_2_fields));
 

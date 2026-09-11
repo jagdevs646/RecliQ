@@ -1,4 +1,4 @@
-import { CheckCircle2 } from "lucide-react";
+import { CheckCircle2, CheckSquare } from "lucide-react";
 import type { SheetMetadata } from "../types";
 
 interface Props {
@@ -31,18 +31,20 @@ export function SheetSelector({ sheets, selectedSheets, onChange, fileName }: Pr
     <div className="sheet-selector">
       <div className="sheet-selector-header">
         <h4>Select sheets to include from {fileName}</h4>
+        <button type="button" className="text-button" onClick={selectAll} disabled={selectedSheets.length === sheets.length}>
+          <CheckSquare size={14} />Select all
+        </button>
       </div>
       <div className="sheet-list">
         {sheets.map(sheet => (
-          <label key={sheet.id} className={`sheet-item ${selectedSheets[0] === sheet.id ? 'is-selected' : ''}`}>
+          <label key={sheet.id} className={`sheet-item ${selectedSheets.includes(sheet.id) ? 'is-selected' : ''}`}>
             <input 
-              type="radio" 
-              name={`sheet-selector-${fileName}`}
-              checked={selectedSheets[0] === sheet.id} 
-              onChange={() => onChange([sheet.id])} 
+              type="checkbox"
+              checked={selectedSheets.includes(sheet.id)}
+              onChange={() => toggleSheet(sheet.id)}
             />
             <span>{sheet.name}</span>
-            {selectedSheets[0] === sheet.id && <CheckCircle2 size={16} className="text-success" />}
+            {selectedSheets.includes(sheet.id) && <CheckCircle2 size={16} className="text-success" />}
           </label>
         ))}
       </div>

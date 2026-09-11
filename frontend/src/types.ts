@@ -36,6 +36,34 @@ export interface RuleMapping {
   file_2_fields: string[];
 }
 
+export type SecondaryComparisonMethod = "exact_text" | "normalized_date" | "numeric_tolerance" | "matcher_based";
+
+export interface SecondaryMatchCondition {
+  source_column: string;
+  destination_column: string;
+  comparison_method: SecondaryComparisonMethod;
+  numeric_tolerance?: number;
+}
+
+export interface SimilarityPolicy {
+  matcher_type_override?: string;
+  threshold?: number;
+}
+
+export interface SheetRuleDraft {
+  file1Columns: string[];
+  file2Columns: string[];
+  primaryKeySource: string[];
+  primaryKeyDestination: string[];
+  secondaryConditions: SecondaryMatchCondition[];
+  similarityPolicy: SimilarityPolicy;
+  dateOnlyOverride: boolean;
+  rules: RuleMapping[];
+  includeFile1: string[];
+  includeFile2: string[];
+  analysis: AnalysisResponse | null;
+}
+
 export interface AnalysisResponse {
   recommended_keys_1: string[];
   recommended_keys_2: string[];
