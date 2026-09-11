@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,6 +34,48 @@ def _file_record(db: Session, file_id: str, session_id: str) -> UploadedFile:
     if not record:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {file_id}")
     return record
+
+
+_UNIVERSAL_RECORD_CATEGORIES = (
+    "exceptions",
+    "matched_records",
+    "missing_in_file_1",
+    "missing_in_file_2",
+    "field_differences",
+    "identity_resolution",
+)
+
+
+def _merge_statistic_values(left, right):
+    if isinstance(left, dict) and isinstance(right, dict):
+        keys = set(left) | set(right)
+        return {key: _merge_statistic_values(left.get(key, 0), right.get(key, 0)) for key in keys}
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left + right
+    return right if right is not None else left
+
+
+def _merge_rule_universal_data(rule_results: list[dict]) -> dict:
+    """Aggregate only after every sheet-rule result remains independently complete."""
+    merged = deepcopy(rule_results[0]["universal_data"])
+    for result in rule_results[1:]:
+        universal_data = result["universal_data"]
+        merged["statistics"] = _merge_statistic_values(
+            merged.get("statistics", {}),
+            universal_data.get("statistics", {}),
+        )
+        if universal_data.get("overall_status") != "PASSED":
+            merged["overall_status"] = universal_data["overall_status"]
+        for category in _UNIVERSAL_RECORD_CATEGORIES:
+            merged.setdefault(category, []).extend(universal_data.get(category, []))
+        for existing, incoming in zip(merged.get("control_checks", []), universal_data.get("control_checks", [])):
+            for file_key in ("File 1", "File 2"):
+                if isinstance(existing.get(file_key), (int, float)) and isinstance(incoming.get(file_key), (int, float)):
+                    existing[file_key] += incoming[file_key]
+            if incoming.get("Result") == "Exception":
+                existing["Result"] = "Exception"
+    merged["execution_results"] = rule_results
+    return merged
 
 
 def enqueue_generic_job(
@@ -242,11 +285,11 @@ def process_reconciliation_job(job_id: str) -> None:
 
         if job.job_type == "generic":
             plan = ReconciliationPlan.model_validate(payload)
-            pairs = plan.execution_pairs()
+            execution_items = plan.execution_rules()
         else:
             # GST retains its existing, self-contained execution contract.
-            pairs = payload.get("pairs", [])
-        if job.job_type == "gst" and not pairs:
+            execution_items = payload.get("pairs", [])
+        if job.job_type == "gst" and not execution_items:
             source_files_1 = payload.get("source_files_1") or [{"file_id": payload.get("file_1_id") or job.input_file_1_id}]
             source_files_2 = payload.get("source_files_2") or [{"file_id": payload.get("file_2_id") or job.input_file_2_id}]
             sources_1 = [FileSource(**fs) if isinstance(fs, dict) else fs for fs in source_files_1 if (fs.get("file_id") if isinstance(fs, dict) else getattr(fs, "file_id", None))]
@@ -257,7 +300,7 @@ def process_reconciliation_job(job_id: str) -> None:
                 sources_2 = [FileSource(file_id=job.input_file_2_id)]
                 
             # Construct a dummy pair for backwards compatibility
-            pairs = [{
+            execution_items = [{
                 "source_file_1": sources_1[0].model_dump() if hasattr(sources_1[0], "model_dump") else (sources_1[0] if isinstance(sources_1[0], dict) else {"file_id": sources_1[0].file_id, "sheet_id": sources_1[0].sheet_id}),
                 "source_file_2": sources_2[0].model_dump() if hasattr(sources_2[0], "model_dump") else (sources_2[0] if isinstance(sources_2[0], dict) else {"file_id": sources_2[0].file_id, "sheet_id": sources_2[0].sheet_id}),
                 "key_file_1": payload.get("key_file_1"),
@@ -267,15 +310,16 @@ def process_reconciliation_job(job_id: str) -> None:
                 "include_columns_file_2": payload.get("include_columns_file_2", [])
             }]
 
-        all_universal_data = []
+        rule_results: list[dict] = []
         overall_summary = {
             "report_rows": 0, "only_in_file_1": 0, "only_in_file_2": 0, 
             "confidence_review": 0, "source_records": 0, "destination_records": 0,
             "matched_records": 0, "fully_matched_records": 0
         }
 
-        # Iterating through sheet pairs
-        for idx, pair in enumerate(pairs):
+        # Every canonical sheet rule runs in isolation. Aggregation happens only
+        # after this loop, preserving independent configuration and audit data.
+        for idx, pair in enumerate(execution_items, start=1):
             source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
             source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
             sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
@@ -288,7 +332,10 @@ def process_reconciliation_job(job_id: str) -> None:
             
             sheet_name_1 = s1.sheet_id or "default"
             sheet_name_2 = s2.sheet_id or "default"
-            pair_label = f"[{sheet_name_1} <-> {sheet_name_2}]"
+            file_pair_id = pair.get("file_pair_id", f"file-pair-{idx}")
+            sheet_rule_id = pair.get("sheet_rule_id", f"rule-{idx}")
+            report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
+            pair_label = f"[{report_label}]"
 
             if job.job_type == "gst":
                 res = run_gst_reconciliation(
@@ -333,39 +380,31 @@ def process_reconciliation_job(job_id: str) -> None:
                 overall_summary[k] = overall_summary.get(k, 0) + v
                 
             ud = res["universal_data"]
-            # Tag all records with the sheet pair label for unified reporting
-            for category in ["exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "field_differences"]:
+            # Tags stay with the isolated result and later let reports/previews
+            # address a precise file pair and sheet rule.
+            for category in _UNIVERSAL_RECORD_CATEGORIES:
                 for record in ud.get(category, []):
                     record["Sheet Pair"] = pair_label
+                    record["File Pair ID"] = file_pair_id
+                    record["Sheet Rule ID"] = sheet_rule_id
             
-            all_universal_data.append(ud)
+            rule_results.append(
+                {
+                    "file_pair_id": file_pair_id,
+                    "sheet_rule_id": sheet_rule_id,
+                    "report_label": report_label,
+                    "source_sheets": [source.sheet_id or "default" for source in sources_1],
+                    "destination_sheets": [source.sheet_id or "default" for source in sources_2],
+                    "summary": res["summary"],
+                    "status": "completed",
+                    "universal_data": ud,
+                }
+            )
 
-        if not all_universal_data:
+        if not rule_results:
             raise ValueError("No data processed for any sheet pair.")
 
-        # Merge universal data
-        merged_ud = all_universal_data[0]
-        if len(all_universal_data) > 1:
-            for i in range(1, len(all_universal_data)):
-                ud = all_universal_data[i]
-                merged_ud["statistics"] = {k: merged_ud["statistics"].get(k, 0) + ud["statistics"].get(k, 0) for k in merged_ud["statistics"]}
-                if ud["overall_status"] != "PASSED":
-                    merged_ud["overall_status"] = ud["overall_status"]
-                for category in ["exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "field_differences"]:
-                    merged_ud[category].extend(ud.get(category, []))
-                
-                # Combine control checks
-                for cc1, cc2 in zip(merged_ud["control_checks"], ud["control_checks"]):
-                    if cc1["File 1"] != "-" and cc2["File 1"] != "-":
-                        cc1["File 1"] += cc2["File 1"]
-                    if cc1["File 2"] != "-" and cc2["File 2"] != "-":
-                        cc1["File 2"] += cc2["File 2"]
-                    if cc2["Result"] == "Exception":
-                        cc1["Result"] = "Exception"
-                        
-            # Recompute exception summaries across pairs
-            # Note: For simplicity, the detailed summary arrays might need re-aggregation, 
-            # but we can rely on the reporter for the final output formatting.
+        merged_ud = _merge_rule_universal_data(rule_results)
 
         from app.utils.json_encoder import safe_json_dump
         raw_path = output_path.with_name(f"{output_path.stem}_data.json")

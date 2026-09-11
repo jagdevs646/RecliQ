@@ -89,14 +89,9 @@ class ReconciliationPlan(BaseModel):
             for sheet_id in sheet_ids
         ]
 
-    def execution_pairs(self) -> list[dict[str, Any]]:
-        """Project the canonical plan into the existing single-sheet executor shape.
-
-        Phase 5 replaces this bridge with native file-pair/sheet-rule execution.
-        Keeping the projection here, instead of scattered through services, means
-        old and new request bodies still have one normalization path today.
-        """
-        pairs: list[dict[str, Any]] = []
+    def execution_rules(self) -> list[dict[str, Any]]:
+        """Return independently executable file-pair/sheet-rule work items."""
+        items: list[dict[str, Any]] = []
         for pair_index, file_pair in enumerate(self.file_pairs, start=1):
             if not file_pair.source_files or not file_pair.destination_files:
                 raise ValueError(f"File pair {pair_index} requires source and destination files")
@@ -104,12 +99,10 @@ class ReconciliationPlan(BaseModel):
             for rule_index, rule in enumerate(file_pair.sheet_rules, start=1):
                 source_files = self._sources_for_rule(file_pair.source_files, rule.source_sheets)
                 destination_files = self._sources_for_rule(file_pair.destination_files, rule.destination_sheets)
-                source_file = source_files[0]
-                destination_file = destination_files[0]
-                pairs.append(
+                if not source_files or not destination_files:
+                    raise ValueError(f"Sheet rule {rule_index} has no scoped source or destination sheets")
+                items.append(
                     {
-                        "source_file_1": source_file.model_dump(),
-                        "source_file_2": destination_file.model_dump(),
                         "source_files_1": [source.model_dump() for source in source_files],
                         "source_files_2": [source.model_dump() for source in destination_files],
                         "key_file_1": rule.matching_strategy.primary_key_source,
@@ -128,7 +121,18 @@ class ReconciliationPlan(BaseModel):
                         "report_label": rule.report_label,
                     }
                 )
-        return pairs
+        return items
+
+    def execution_pairs(self) -> list[dict[str, Any]]:
+        """Backward-compatible alias for callers not yet renamed to rules."""
+        return [
+            {
+                **item,
+                "source_file_1": item["source_files_1"][0],
+                "source_file_2": item["source_files_2"][0],
+            }
+            for item in self.execution_rules()
+        ]
 
 
 class SheetPairConfig(BaseModel):

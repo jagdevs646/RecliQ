@@ -20,6 +20,7 @@ from app.schemas.reconciliation import (
     SheetRuleConfig,
     normalize_legacy_request,
 )
+from app.services.reconciliation_service import _merge_rule_universal_data
 
 
 def test_schema_model_validators():
@@ -137,6 +138,85 @@ def test_canonical_file_pairs_are_accepted_without_legacy_fields():
 
     assert plan.file_pairs[0].file_pair_id == "january"
     assert plan.execution_pairs()[0]["report_label"] == "January sales"
+
+
+def test_execution_rules_keep_each_file_pair_and_sheet_rule_independent():
+    plan = normalize_legacy_request(
+        {
+            "file_pairs": [
+                {
+                    "file_pair_id": "north",
+                    "source_files": [{"file_id": "source", "sheet_id": "North"}],
+                    "destination_files": [{"file_id": "destination", "sheet_id": "North ledger"}],
+                    "sheet_rules": [
+                        {
+                            "sheet_rule_id": "north-rule",
+                            "source_sheets": ["North"],
+                            "destination_sheets": ["North ledger"],
+                            "matching_strategy": {
+                                "primary_key_source": ["Invoice"],
+                                "primary_key_destination": ["Document"],
+                            },
+                            "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Net"]}],
+                            "report_label": "North reconciliation",
+                        }
+                    ],
+                },
+                {
+                    "file_pair_id": "south",
+                    "source_files": [{"file_id": "source", "sheet_id": "South"}],
+                    "destination_files": [{"file_id": "destination", "sheet_id": "South ledger"}],
+                    "sheet_rules": [
+                        {
+                            "sheet_rule_id": "south-rule",
+                            "source_sheets": ["South"],
+                            "destination_sheets": ["South ledger"],
+                            "matching_strategy": {
+                                "primary_key_source": ["Reference", "Entity"],
+                                "primary_key_destination": ["Ref", "Company"],
+                            },
+                            "reconciliation_mapping": [{"file_1_fields": ["Paid"], "file_2_fields": ["Credit"]}],
+                            "report_label": "South reconciliation",
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    rules = plan.execution_rules()
+    assert [rule["file_pair_id"] for rule in rules] == ["north", "south"]
+    assert rules[0]["key_file_1"] == ["Invoice"]
+    assert rules[1]["key_file_1"] == ["Reference", "Entity"]
+    assert rules[0]["rules"][0]["file_1_fields"] == ["Amount"]
+    assert rules[1]["rules"][0]["file_1_fields"] == ["Paid"]
+
+
+def test_rule_result_merge_preserves_nested_identity_statistics():
+    base = {
+        "statistics": {"matched": 1, "identity": {"EXACT_MATCH": 1}},
+        "overall_status": "PASSED",
+        "control_checks": [{"File 1": 1, "File 2": 1, "Result": "Pass"}],
+        "exceptions": [], "matched_records": [], "missing_in_file_1": [], "missing_in_file_2": [],
+        "field_differences": [], "identity_resolution": [],
+    }
+    second = {
+        "statistics": {"matched": 2, "identity": {"EXCEPTION_MATCH": 2}},
+        "overall_status": "EXCEPTIONS FOUND",
+        "control_checks": [{"File 1": 2, "File 2": 2, "Result": "Exception"}],
+        "exceptions": [], "matched_records": [], "missing_in_file_1": [], "missing_in_file_2": [],
+        "field_differences": [], "identity_resolution": [],
+    }
+
+    merged = _merge_rule_universal_data([
+        {"file_pair_id": "north", "sheet_rule_id": "north-rule", "universal_data": base},
+        {"file_pair_id": "south", "sheet_rule_id": "south-rule", "universal_data": second},
+    ])
+
+    assert merged["statistics"]["matched"] == 3
+    assert merged["statistics"]["identity"] == {"EXACT_MATCH": 1, "EXCEPTION_MATCH": 2}
+    assert merged["control_checks"][0]["File 1"] == 3
+    assert len(merged["execution_results"]) == 2
 
 
 def test_enqueue_with_source_files_only():
