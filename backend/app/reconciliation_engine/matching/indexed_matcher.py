@@ -154,6 +154,41 @@ def match_threshold(matcher_type: str) -> int:
     return 75
 
 
+def normalized_identity_value(value: object, matcher_type: str) -> str | None:
+    """Return one deterministic, exact-match-safe identity component.
+
+    This is intentionally stricter than ``compare_values``. Composite identity
+    lookup must not turn a fuzzy text score into a record identity; each member
+    must have a stable normalized representation before it can enter the index.
+    """
+    if is_blank(value):
+        return None
+    if matcher_type in {"invoice", "gstin", "pan", "identifier"}:
+        normalized = compact_identifier(value)
+    elif matcher_type == "date":
+        parsed = parse_date_value(value)
+        normalized = parsed.isoformat() if parsed else ""
+    elif matcher_type == "numeric":
+        number = to_number(value)
+        normalized = str(number) if number is not None else ""
+    else:
+        normalized = normalize_text(value, use_synonyms=False)
+    return normalized or None
+
+
+def composite_identity_key(values: Sequence[object], matcher_types: Sequence[str]) -> tuple[str, ...] | None:
+    """Build a complete primary-key identity or reject an incomplete one."""
+    if len(values) != len(matcher_types) or not values:
+        return None
+    components = [
+        normalized_identity_value(value, matcher_type)
+        for value, matcher_type in zip(values, matcher_types)
+    ]
+    if any(component is None for component in components):
+        return None
+    return tuple(component for component in components if component is not None)
+
+
 def _compare_numeric(value1: object, value2: object) -> MatchResult | None:
     num1 = to_number(value1)
     num2 = to_number(value2)
@@ -286,11 +321,26 @@ class IndexedCandidateMatcher:
     Replaces O(n^2) nested row scanning.
     """
 
-    def __init__(self, candidates_df: pd.DataFrame, candidate_column: str, matcher_type: str):
+    def __init__(
+        self,
+        candidates_df: pd.DataFrame,
+        candidate_column: str | Sequence[str],
+        matcher_type: str | Sequence[str],
+    ):
         self.candidates_df = candidates_df
-        self.candidate_column = candidate_column
-        self.matcher_type = matcher_type
-        self.threshold = match_threshold(matcher_type)
+        self.candidate_columns = [candidate_column] if isinstance(candidate_column, str) else list(candidate_column)
+        if not self.candidate_columns:
+            raise ValueError("At least one candidate key column is required")
+        matcher_types = [matcher_type] if isinstance(matcher_type, str) else list(matcher_type)
+        if len(matcher_types) == 1 and len(self.candidate_columns) > 1:
+            matcher_types *= len(self.candidate_columns)
+        if len(matcher_types) != len(self.candidate_columns):
+            raise ValueError("Each candidate key column requires a matcher type")
+        self.component_matcher_types = matcher_types
+        self.is_composite = len(self.candidate_columns) > 1
+        self.candidate_column = self.candidate_columns[0]
+        self.matcher_type = "composite" if self.is_composite else matcher_types[0]
+        self.threshold = match_threshold(self.matcher_type)
 
         self.rows: List[dict] = []
         self.indices: List[object] = []
@@ -301,11 +351,12 @@ class IndexedCandidateMatcher:
         self.synonym_key_map: Dict[str, List[int]] = {}
         self.token_blocks: Dict[str, List[int]] = {}
         self.date_map: Dict[str, List[int]] = {}
+        self.composite_map: Dict[tuple[str, ...], List[int]] = {}
 
         self._build_index()
 
     def _build_index(self) -> None:
-        if self.candidate_column not in self.candidates_df.columns:
+        if any(column not in self.candidates_df.columns for column in self.candidate_columns):
             return
 
         # Fast extraction using dict records
@@ -315,6 +366,15 @@ class IndexedCandidateMatcher:
         for pos, (df_idx, row_dict) in enumerate(zip(df_indices, records)):
             self.rows.append(row_dict)
             self.indices.append(df_idx)
+
+            if self.is_composite:
+                identity = composite_identity_key(
+                    [row_dict.get(column) for column in self.candidate_columns],
+                    self.component_matcher_types,
+                )
+                if identity is not None:
+                    self.composite_map.setdefault(identity, []).append(pos)
+                continue
 
             raw_val = row_dict.get(self.candidate_column)
 
@@ -353,13 +413,45 @@ class IndexedCandidateMatcher:
 
     def find_best_match(
         self,
-        target_value: object,
-        target_column: str = "",
+        target_value: object | Sequence[object],
+        target_column: str | Sequence[str] = "",
         used_indices: Set[object] | None = None,
     ) -> Tuple[object | None, dict | None, MatchResult | None]:
         used_indices = used_indices or set()
 
-        if is_blank(target_value) or not self.rows:
+        if not self.rows:
+            return None, None, None
+
+        if self.is_composite:
+            values = list(target_value) if isinstance(target_value, (list, tuple)) else [target_value]
+            identity = composite_identity_key(values, self.component_matcher_types)
+            if identity is None:
+                return None, None, None
+            available_positions = [
+                position
+                for position in self.composite_map.get(identity, [])
+                if self.indices[position] not in used_indices
+            ]
+            if not available_positions:
+                return None, None, None
+            position = available_positions[0]
+            detail = f"Exact normalized match across {len(self.candidate_columns)} primary-key columns"
+            normalized_value = " | ".join(identity)
+            return (
+                self.indices[position],
+                self.rows[position],
+                MatchResult(
+                    True,
+                    100,
+                    "composite",
+                    "Exact composite key match",
+                    detail,
+                    normalized_value,
+                    normalized_value,
+                ),
+            )
+
+        if is_blank(target_value):
             return None, None, None
 
         norm_target = normalize_text(target_value)

@@ -716,8 +716,14 @@ class UniversalReporter:
             fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
             r1 = row.get("ROW (FILE 1)", row.get("ROW (File 1)", row_idx - 3))
             r2 = row.get("ROW (FILE 2)", row.get("ROW (File 2)", row_idx - 3))
-            k1 = row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)", "")))
-            k2 = row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", k1)))
+            k1 = row.get(
+                "COMPOSITE MATCH KEY",
+                row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)", ""))),
+            )
+            k2 = row.get(
+                "MATCHED COMPOSITE KEY",
+                row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", k1))),
+            )
 
             row_data = [
                 (r1, "center"),

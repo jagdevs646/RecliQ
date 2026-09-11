@@ -6,7 +6,7 @@ sys.path.insert(0, str(ROOT))
 
 import pandas as pd
 
-from app.reconciliation.matchers import compare_values, prepare_dataframe
+from app.reconciliation.matchers import IndexedCandidateMatcher, compare_values, prepare_dataframe
 
 
 def test_invoice_formatting_difference_scores_high():
@@ -34,3 +34,24 @@ def test_horizontal_orientation_is_transformed():
     assert list(result.columns) == ["INVOICE", "AMOUNT"]
     assert len(result) == 2
 
+
+def test_indexed_matcher_uses_every_composite_key_component():
+    candidates = pd.DataFrame(
+        [
+            {"Invoice": "INV-100", "Entity": "North", "Amount": 100},
+            {"Invoice": "INV-100", "Entity": "South", "Amount": 200},
+        ]
+    )
+    matcher = IndexedCandidateMatcher(
+        candidates,
+        ["Invoice", "Entity"],
+        ["invoice", "text"],
+    )
+
+    index, row, result = matcher.find_best_match(["INV100", "South"], ["Invoice", "Entity"])
+
+    assert index == 1
+    assert row is not None and row["Entity"] == "South"
+    assert result is not None
+    assert result.matcher_type == "composite"
+    assert result.status == "Exact composite key match"

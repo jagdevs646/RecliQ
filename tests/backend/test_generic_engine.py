@@ -96,3 +96,33 @@ def test_combined_mapping_rejects_non_numeric_columns(tmp_path: Path):
                 "file_2_fields": ["Standard Hours", "Comment"],
             }],
         )
+
+
+def test_generic_reconciliation_uses_all_composite_key_columns(tmp_path: Path):
+    file1 = tmp_path / "source.xlsx"
+    file2 = tmp_path / "destination.xlsx"
+    output = tmp_path / "report.xlsx"
+
+    pd.DataFrame(
+        [
+            {"Invoice": "INV-100", "Entity": "North", "Amount": 100},
+            {"Invoice": "INV-100", "Entity": "South", "Amount": 200},
+        ]
+    ).to_excel(file1, index=False)
+    pd.DataFrame(
+        [{"Invoice Number": "INV100", "Company": "South", "Amount": 200}]
+    ).to_excel(file2, index=False)
+
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        output,
+        key_file_1=["Invoice", "Entity"],
+        key_file_2=["Invoice Number", "Company"],
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+    )
+
+    assert result["matched_records"] == 1
+    assert result["only_in_file_1"] == 1
+    assert result["universal_data"]["matched_records"][0]["COMPOSITE MATCH KEY"] == "INV-100 | South"
+    assert result["universal_data"]["missing_in_file_2"][0]["ENTITY"] == "North"

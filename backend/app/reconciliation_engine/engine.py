@@ -136,6 +136,10 @@ def run_generic_reconciliation(
         
     file_1_id_col = [normalize_header(k) for k in key_file_1]
     file_2_id_col = [normalize_header(k) for k in key_file_2]
+    if len(file_1_id_col) != len(file_2_id_col):
+        raise ValueError("File 1 and File 2 must use the same number of primary-key columns.")
+    if not file_1_id_col:
+        raise ValueError("At least one primary-key column is required.")
 
     normalized_rules = [
         (
@@ -183,22 +187,28 @@ def run_generic_reconciliation(
     file_1_df = group_for_many_to_one(file_1_df, file_1_match_keys, num_cols)
     file_2_df = group_for_many_to_one(file_2_df, file_2_match_keys, f2_norm_config["number_columns"])
     
-    # Let's map back to primary key for matcher for simplicity (using just the first key if composite)
-    primary_key_1 = file_1_match_keys[0]
-    primary_key_2 = file_2_match_keys[0]
-
     if is_cancelled and is_cancelled():
         raise InterruptedError("Reconciliation cancelled by user")
 
     tracker.building_indexes()
 
-    key_type = detect_matcher_type(
-        list(file_1_df[primary_key_1]) + list(file_2_df[primary_key_2]),
-        primary_key_1,
-        primary_key_2,
-    )
-
-    indexed_matcher = IndexedCandidateMatcher(file_2_df, primary_key_2, key_type)
+    key_matcher_types = [
+        detect_matcher_type(
+            list(file_1_df[source_key]) + list(file_2_df[destination_key]),
+            source_column,
+            destination_column,
+        )
+        for source_key, destination_key, source_column, destination_column in zip(
+            file_1_match_keys,
+            file_2_match_keys,
+            file_1_id_col,
+            file_2_id_col,
+        )
+    ]
+    indexed_matcher = IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types)
+    is_composite_key = len(file_1_match_keys) > 1
+    primary_key_1 = file_1_match_keys[0]
+    primary_key_2 = file_2_match_keys[0]
 
     reconciliation_results: list[dict] = []
     file_1_not_found: list[dict] = []
@@ -215,11 +225,15 @@ def run_generic_reconciliation(
         if is_cancelled and row_idx % 25 == 0 and is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
 
-        file_1_id = file_1_row.get(primary_key_1)
+        file_1_id = (
+            [file_1_row.get(key) for key in file_1_match_keys]
+            if is_composite_key
+            else file_1_row.get(primary_key_1)
+        )
 
         best_idx, file_2_row, key_result = indexed_matcher.find_best_match(
             file_1_id,
-            primary_key_1,
+            file_1_match_keys if is_composite_key else primary_key_1,
             matched_file_2_indices,
         )
 
@@ -241,13 +255,24 @@ def run_generic_reconciliation(
         reconciliation_result = {
             "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
             "ROW (FILE 2)": file_2_row.get("_ROW_NO", best_idx + 2),
-            primary_key_1: file_1_id,
-            f"MATCHED {primary_key_2}": file_2_row.get(primary_key_2),
             "MATCH TYPE": key_result.matcher_type,
             "MATCH CONFIDENCE": f"{key_result.confidence}%",
             "MATCH STATUS": key_result.status,
             "GROUP CLASSIFICATION": group_status
         }
+        if is_composite_key:
+            reconciliation_result["COMPOSITE MATCH KEY"] = " | ".join(
+                str(file_1_row.get(column, "")) for column in file_1_id_col
+            )
+            reconciliation_result["MATCHED COMPOSITE KEY"] = " | ".join(
+                str(file_2_row.get(column, "")) for column in file_2_id_col
+            )
+            for source_column, destination_column in zip(file_1_id_col, file_2_id_col):
+                reconciliation_result[source_column] = file_1_row.get(source_column)
+                reconciliation_result[f"MATCHED {destination_column}"] = file_2_row.get(destination_column)
+        else:
+            reconciliation_result[primary_key_1] = file_1_id
+            reconciliation_result[f"MATCHED {primary_key_2}"] = file_2_row.get(primary_key_2)
 
         for col in file_1_extra:
             if col != "_ROW_NO":

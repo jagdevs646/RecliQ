@@ -26,7 +26,12 @@ def build_universal_data_model(
     # Analyze reconciliation_results (which contains mismatches)
     for idx, row in enumerate(reconciliation_results, start=1):
         exc_id = f"EX-{str(idx).zfill(6)}"
-        match_key = str(row.get(matching_keys[0], "")) if matching_keys else ""
+        match_key = str(
+            row.get(
+                "COMPOSITE MATCH KEY",
+                row.get(matching_keys[0], "") if matching_keys else "",
+            )
+        )
         
         # Determine specific field differences
         # Keys typically look like "FIELD (FILE 1)", "FIELD (FILE 2)", "FIELD DIFF", "FIELD STATUS"
