@@ -324,6 +324,8 @@ def process_reconciliation_job(job_id: str) -> None:
                     file_2_name=f"{file_2.original_filename if file_2 else 'File 2'} ({sheet_name_2})",
                     is_cancelled=is_cancelled,
                     write_report=False,
+                    secondary_conditions=pair.get("secondary_conditions", []),
+                    similarity_policy=pair.get("similarity_policy", {}),
                 )
             
             for k, v in res["summary"].items():

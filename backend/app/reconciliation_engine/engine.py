@@ -12,8 +12,11 @@ from app.reconciliation_engine.cache import (
 )
 from app.reconciliation_engine.matching import (
     IndexedCandidateMatcher,
+    MatchClassification,
+    MatchResult,
     compare_values,
     detect_matcher_type,
+    match_threshold,
 )
 from app.reconciliation_engine.preprocessing import (
     aggregate_by_key,
@@ -109,6 +112,111 @@ def compare_rule_values(
     }
 
 
+def _normalize_secondary_conditions(conditions: list[dict] | None) -> list[dict]:
+    """Translate API column names once, before the indexed matcher sees them."""
+    normalized: list[dict] = []
+    for condition in conditions or []:
+        if not isinstance(condition, dict):
+            continue
+        source_column = normalize_header(condition.get("source_column", ""))
+        destination_column = normalize_header(condition.get("destination_column", ""))
+        if not source_column or not destination_column:
+            raise ValueError("Secondary conditions require a source and destination column.")
+        normalized.append(
+            {
+                **condition,
+                "source_column": source_column,
+                "destination_column": destination_column,
+            }
+        )
+    return normalized
+
+
+def _primary_similarity_result(
+    file_1_row: dict,
+    file_2_row: dict,
+    file_1_key_columns: list[str],
+    file_2_key_columns: list[str],
+    detected_matcher_types: list[str],
+    similarity_policy: dict | None,
+) -> tuple[MatchResult, int]:
+    """Compare raw primary keys only after secondary filters isolate one row."""
+    policy = similarity_policy or {}
+    override = policy.get("matcher_type_override")
+    component_results: list[MatchResult] = []
+    for source_column, destination_column, detected_type in zip(
+        file_1_key_columns,
+        file_2_key_columns,
+        detected_matcher_types,
+    ):
+        component_results.append(
+            compare_values(
+                file_1_row.get(source_column),
+                file_2_row.get(destination_column),
+                source_column,
+                destination_column,
+                override or detected_type,
+            )
+        )
+
+    if not component_results:
+        return MatchResult(False, 0, "text", "No primary-key components"), 100
+
+    threshold = policy.get("threshold")
+    if threshold is None:
+        threshold = max(match_threshold(result.matcher_type) for result in component_results)
+    threshold = max(0, min(100, int(threshold)))
+
+    if len(component_results) == 1:
+        return component_results[0], threshold
+
+    confidence = min(result.confidence for result in component_results)
+    matched = all(result.confidence >= threshold for result in component_results)
+    detail = "; ".join(
+        f"{source_column}: {result.status} ({result.confidence}%)"
+        for source_column, result in zip(file_1_key_columns, component_results)
+    )
+    return (
+        MatchResult(
+            matched,
+            confidence,
+            "composite",
+            "Composite primary-key similarity",
+            detail,
+            " | ".join(result.value1_normalized for result in component_results),
+            " | ".join(result.value2_normalized for result in component_results),
+        ),
+        threshold,
+    )
+
+
+def _identity_explanation(
+    classification: MatchClassification,
+    result: MatchResult | None = None,
+    threshold: int | None = None,
+    secondary_details: list[str] | None = None,
+) -> str:
+    conditions = ", ".join(secondary_details or [])
+    if classification is MatchClassification.EXACT_MATCH:
+        return "Primary key matched exactly after deterministic normalization."
+    if classification is MatchClassification.AMBIGUOUS_MATCH:
+        return (
+            "More than one unused destination record passed every secondary condition"
+            f" ({conditions or 'configured conditions'}); no record was selected."
+        )
+    if classification is MatchClassification.NOT_FOUND and result is None:
+        return (
+            "No unused destination record passed every secondary condition"
+            f" ({conditions or 'no deterministic candidate'})."
+        )
+    assert result is not None
+    return (
+        f"Primary key comparison used {result.matcher_type}: {result.status} "
+        f"({result.confidence}% vs required {threshold}%). "
+        f"{result.detail or 'The candidate was narrowed by configured secondary conditions.'}"
+    ).strip()
+
+
 def run_generic_reconciliation(
     file_1_df: pd.DataFrame,
     file_2_df: pd.DataFrame,
@@ -124,6 +232,8 @@ def run_generic_reconciliation(
     file_2_name: str = "File 2",
     is_cancelled: Optional[Callable[[], bool]] = None,
     write_report: bool = True,
+    secondary_conditions: list[dict] | None = None,
+    similarity_policy: dict | None = None,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -151,12 +261,16 @@ def run_generic_reconciliation(
     normalized_rules = [(left, right) for left, right in normalized_rules if left and right]
     file_1_extra = normalize_fields(include_columns_file_1 or [])
     file_2_extra = normalize_fields(include_columns_file_2 or [])
+    normalized_secondary_conditions = _normalize_secondary_conditions(secondary_conditions)
 
     if not normalized_rules:
         raise ValueError("At least one reconciliation rule is required.")
 
     validate_columns(file_1_df, [*file_1_id_col, *file_1_extra], "File 1")
     validate_columns(file_2_df, [*file_2_id_col, *file_2_extra], "File 2")
+    for condition in normalized_secondary_conditions:
+        validate_columns(file_1_df, [condition["source_column"]], "File 1 secondary condition")
+        validate_columns(file_2_df, [condition["destination_column"]], "File 2 secondary condition")
     for left, right in normalized_rules:
         validate_columns(file_1_df, left, "File 1 rule")
         validate_columns(file_2_df, right, "File 2 rule")
@@ -214,6 +328,7 @@ def run_generic_reconciliation(
     file_1_not_found: list[dict] = []
     matched_records: list[dict] = []
     matched_file_2_indices: set = set()
+    identity_resolution: list[dict] = []
 
     tracker.matching_records()
 
@@ -231,15 +346,64 @@ def run_generic_reconciliation(
             else file_1_row.get(primary_key_1)
         )
 
-        best_idx, file_2_row, key_result = indexed_matcher.find_best_match(
-            file_1_id,
-            file_1_match_keys if is_composite_key else primary_key_1,
-            matched_file_2_indices,
+        exact_candidates = indexed_matcher.find_exact_candidates(file_1_id, matched_file_2_indices)
+        classification = MatchClassification.NOT_FOUND
+        secondary_details: list[str] = []
+        key_result: MatchResult | None = None
+        required_threshold: int | None = None
+        best_idx = None
+        file_2_row = None
+
+        if len(exact_candidates) == 1:
+            best_idx, file_2_row, key_result = exact_candidates[0]
+            classification = MatchClassification.EXACT_MATCH
+        elif len(exact_candidates) > 1:
+            classification = MatchClassification.AMBIGUOUS_MATCH
+        elif normalized_secondary_conditions:
+            secondary_candidates, secondary_details = indexed_matcher.find_secondary_candidates(
+                file_1_row,
+                normalized_secondary_conditions,
+                matched_file_2_indices,
+            )
+            if len(secondary_candidates) > 1:
+                classification = MatchClassification.AMBIGUOUS_MATCH
+            elif len(secondary_candidates) == 1:
+                candidate_idx, candidate_row = secondary_candidates[0]
+                similarity_result, required_threshold = _primary_similarity_result(
+                    file_1_row,
+                    candidate_row,
+                    file_1_id_col,
+                    file_2_id_col,
+                    key_matcher_types,
+                    similarity_policy,
+                )
+                key_result = similarity_result
+                if similarity_result.confidence >= required_threshold:
+                    best_idx, file_2_row = candidate_idx, candidate_row
+                    classification = MatchClassification.EXCEPTION_MATCH
+
+        explanation = _identity_explanation(
+            classification,
+            key_result,
+            required_threshold,
+            secondary_details,
+        )
+        identity_resolution.append(
+            {
+                "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
+                "IDENTITY CLASSIFICATION": classification.value,
+                "MATCH EXPLANATION": explanation,
+                "MATCH TYPE": key_result.matcher_type if key_result else "",
+                "MATCH CONFIDENCE": f"{key_result.confidence}%" if key_result else "0%",
+                "MATCH THRESHOLD": f"{required_threshold}%" if required_threshold is not None else "",
+            }
         )
 
         if file_2_row is None or key_result is None:
             clean_f1_row = {k: v for k, v in file_1_row.items() if k in allowed_f1_cols}
             clean_f1_row["ROW (FILE 1)"] = file_1_row.get("_ROW_NO", row_idx + 2)
+            clean_f1_row["IDENTITY CLASSIFICATION"] = classification.value
+            clean_f1_row["MATCH EXPLANATION"] = explanation
             file_1_not_found.append(clean_f1_row)
             continue
 
@@ -258,6 +422,8 @@ def run_generic_reconciliation(
             "MATCH TYPE": key_result.matcher_type,
             "MATCH CONFIDENCE": f"{key_result.confidence}%",
             "MATCH STATUS": key_result.status,
+            "IDENTITY CLASSIFICATION": classification.value,
+            "MATCH EXPLANATION": explanation,
             "GROUP CLASSIFICATION": group_status
         }
         if is_composite_key:
@@ -281,7 +447,7 @@ def run_generic_reconciliation(
             if col != "_ROW_NO":
                 reconciliation_result[f"{col} (FILE 2)"] = file_2_row.get(col)
 
-        has_reportable_issue = key_result.confidence < 100
+        has_reportable_issue = classification is MatchClassification.EXCEPTION_MATCH
         for file_1_fields, file_2_fields in normalized_rules:
             differences = compare_rule_values(file_1_row, file_2_row, file_1_fields, file_2_fields)
             if differences:
@@ -332,6 +498,7 @@ def run_generic_reconciliation(
         matched_records=matched_records,
         total_file_1=len(file_1_df),
         total_file_2=len(file_2_df),
+        identity_resolution=identity_resolution,
     )
 
     if write_report:
@@ -350,6 +517,10 @@ def run_generic_reconciliation(
         "destination_records": len(file_2_df),
         "matched_records": len(matched_file_2_indices),
         "fully_matched_records": len(matched_file_2_indices) - len(reconciliation_results),
+        "exact_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXACT_MATCH.value for item in identity_resolution),
+        "exception_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXCEPTION_MATCH.value for item in identity_resolution),
+        "ambiguous_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.AMBIGUOUS_MATCH.value for item in identity_resolution),
+        "not_found_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.NOT_FOUND.value for item in identity_resolution),
     }
 
     return {

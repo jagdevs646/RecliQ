@@ -117,6 +117,12 @@ class ReconciliationPlan(BaseModel):
                         "rules": [mapping.model_dump() for mapping in rule.reconciliation_mapping],
                         "include_columns_file_1": rule.include_columns_file_1,
                         "include_columns_file_2": rule.include_columns_file_2,
+                        "secondary_conditions": [
+                            condition.model_dump()
+                            for condition in rule.matching_strategy.secondary_conditions
+                        ],
+                        "similarity_policy": rule.matching_strategy.similarity_policy.model_dump(),
+                        "date_only_override": rule.matching_strategy.date_only_override,
                         "file_pair_id": file_pair.file_pair_id or f"file-pair-{pair_index}",
                         "sheet_rule_id": rule.sheet_rule_id or f"rule-{rule_index}",
                         "report_label": rule.report_label,

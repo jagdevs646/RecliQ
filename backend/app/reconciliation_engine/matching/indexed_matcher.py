@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
+from enum import Enum
+from bisect import bisect_left, bisect_right
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import pandas as pd
@@ -70,6 +72,13 @@ class MatchResult:
     detail: str = ""
     value1_normalized: str = ""
     value2_normalized: str = ""
+
+
+class MatchClassification(str, Enum):
+    EXACT_MATCH = "EXACT_MATCH"
+    EXCEPTION_MATCH = "EXCEPTION_MATCH"
+    AMBIGUOUS_MATCH = "AMBIGUOUS_MATCH"
+    NOT_FOUND = "NOT_FOUND"
 
 
 def non_empty_values(values: Iterable[object], limit: int = 100) -> list[object]:
@@ -352,6 +361,11 @@ class IndexedCandidateMatcher:
         self.token_blocks: Dict[str, List[int]] = {}
         self.date_map: Dict[str, List[int]] = {}
         self.composite_map: Dict[tuple[str, ...], List[int]] = {}
+        self.identity_map: Dict[str, List[int]] = {}
+        self.condition_exact_maps: Dict[str, Dict[str, List[int]]] = {}
+        self.condition_date_maps: Dict[str, Dict[str, List[int]]] = {}
+        self.condition_numeric_values: Dict[str, List[tuple[float, int]]] = {}
+        self.condition_token_blocks: Dict[str, Dict[str, List[int]]] = {}
 
         self._build_index()
 
@@ -380,6 +394,10 @@ class IndexedCandidateMatcher:
 
             if is_blank(raw_val):
                 continue
+
+            identity = normalized_identity_value(raw_val, self.matcher_type)
+            if identity:
+                self.identity_map.setdefault(identity, []).append(pos)
 
             # 1. Exact normalized map
             norm = normalize_text(raw_val)
@@ -411,6 +429,178 @@ class IndexedCandidateMatcher:
                 if date_val:
                     self.date_map.setdefault(date_val.isoformat(), []).append(pos)
 
+    def find_exact_candidates(
+        self,
+        target_value: object | Sequence[object],
+        used_indices: Set[object] | None = None,
+    ) -> list[tuple[object, dict, MatchResult]]:
+        """Return all unused exact normalized primary-key candidates.
+
+        The caller, not this low-level index, decides whether multiple exact
+        candidates are an ambiguity. This prevents accidental first-row wins.
+        """
+        used_indices = used_indices or set()
+        if self.is_composite:
+            values = list(target_value) if isinstance(target_value, (list, tuple)) else [target_value]
+            identity = composite_identity_key(values, self.component_matcher_types)
+            if identity is None:
+                return []
+            positions = self.composite_map.get(identity, [])
+            normalized_value = " | ".join(identity)
+            result = MatchResult(
+                True,
+                100,
+                "composite",
+                "Exact composite key match",
+                f"Exact normalized match across {len(self.candidate_columns)} primary-key columns",
+                normalized_value,
+                normalized_value,
+            )
+        else:
+            identity = normalized_identity_value(target_value, self.matcher_type)
+            if identity is None:
+                return []
+            positions = self.identity_map.get(identity, [])
+            result = MatchResult(
+                True,
+                100,
+                self.matcher_type,
+                "Exact normalized primary-key match",
+                value1_normalized=identity,
+                value2_normalized=identity,
+            )
+
+        return [
+            (self.indices[position], self.rows[position], result)
+            for position in positions
+            if self.indices[position] not in used_indices
+        ]
+
+    def _condition_exact_map(self, column: str) -> Dict[str, List[int]]:
+        if column not in self.condition_exact_maps:
+            index: Dict[str, List[int]] = {}
+            for position, row in enumerate(self.rows):
+                value = normalize_text(row.get(column))
+                if value:
+                    index.setdefault(value, []).append(position)
+            self.condition_exact_maps[column] = index
+        return self.condition_exact_maps[column]
+
+    def _condition_date_map(self, column: str) -> Dict[str, List[int]]:
+        if column not in self.condition_date_maps:
+            index: Dict[str, List[int]] = {}
+            for position, row in enumerate(self.rows):
+                parsed = parse_date_value(row.get(column))
+                if parsed:
+                    index.setdefault(parsed.isoformat(), []).append(position)
+            self.condition_date_maps[column] = index
+        return self.condition_date_maps[column]
+
+    def _condition_numeric_index(self, column: str) -> List[tuple[float, int]]:
+        if column not in self.condition_numeric_values:
+            values = [
+                (number, position)
+                for position, row in enumerate(self.rows)
+                if (number := to_number(row.get(column))) is not None
+            ]
+            self.condition_numeric_values[column] = sorted(values)
+        return self.condition_numeric_values[column]
+
+    def _condition_token_blocks(self, column: str) -> Dict[str, List[int]]:
+        if column not in self.condition_token_blocks:
+            blocks: Dict[str, List[int]] = {}
+            for position, row in enumerate(self.rows):
+                for token in tokens(row.get(column), use_synonyms=True):
+                    blocks.setdefault(token, []).append(position)
+            self.condition_token_blocks[column] = blocks
+        return self.condition_token_blocks[column]
+
+    def _candidate_positions_for_condition(self, condition: dict) -> tuple[Set[int], str]:
+        source_value = condition.get("source_value")
+        destination_column = str(condition.get("destination_column", ""))
+        method = str(condition.get("comparison_method", ""))
+        if not destination_column or destination_column not in self.candidates_df.columns:
+            return set(), f"{destination_column or 'destination column'} is unavailable"
+
+        if method == "exact_text":
+            value = normalize_text(source_value)
+            positions = set(self._condition_exact_map(destination_column).get(value, [])) if value else set()
+            return positions, f"{destination_column} exact text"
+
+        if method == "normalized_date":
+            parsed = parse_date_value(source_value)
+            positions = set(self._condition_date_map(destination_column).get(parsed.isoformat(), [])) if parsed else set()
+            return positions, f"{destination_column} normalized date"
+
+        if method == "numeric_tolerance":
+            number = to_number(source_value)
+            tolerance = float(condition.get("numeric_tolerance") or 0)
+            if number is None:
+                return set(), f"{destination_column} numeric value is invalid"
+            numeric_index = self._condition_numeric_index(destination_column)
+            left = bisect_left(numeric_index, (number - tolerance, -1))
+            right = bisect_right(numeric_index, (number + tolerance, float("inf")))
+            return {position for _, position in numeric_index[left:right]}, f"{destination_column} within {tolerance:g}"
+
+        if method == "matcher_based":
+            candidate_positions: Set[int] = set()
+            for token in tokens(source_value, use_synonyms=True):
+                candidate_positions.update(self._condition_token_blocks(destination_column).get(token, []))
+            valid_positions = {
+                position
+                for position in candidate_positions
+                if compare_values(
+                    source_value,
+                    self.rows[position].get(destination_column),
+                    "",
+                    destination_column,
+                ).matched
+            }
+            return valid_positions, f"{destination_column} explicit matcher"
+
+        return set(), f"Unsupported comparison method: {method}"
+
+    def find_secondary_candidates(
+        self,
+        source_row: dict,
+        conditions: Sequence[dict],
+        used_indices: Set[object] | None = None,
+    ) -> tuple[list[tuple[object, dict]], list[str]]:
+        """Narrow candidates with every configured secondary condition.
+
+        Each condition uses an index; explicit fuzzy matching is limited to the
+        token block produced by that condition. Conditions are ANDed, never ORed.
+        """
+        used_indices = used_indices or set()
+        method_order = {
+            "exact_text": 0,
+            "normalized_date": 1,
+            "numeric_tolerance": 2,
+            "matcher_based": 3,
+        }
+        positions: Set[int] | None = None
+        details: list[str] = []
+        for configured_condition in sorted(
+            conditions,
+            key=lambda condition: method_order.get(str(condition.get("comparison_method", "")), 99),
+        ):
+            source_column = str(configured_condition.get("source_column", ""))
+            condition = dict(configured_condition)
+            condition["source_value"] = source_row.get(source_column)
+            matches, detail = self._candidate_positions_for_condition(condition)
+            details.append(detail)
+            positions = matches if positions is None else positions.intersection(matches)
+            if not positions:
+                return [], details
+
+        if positions is None:
+            return [], details
+        return [
+            (self.indices[position], self.rows[position])
+            for position in sorted(positions)
+            if self.indices[position] not in used_indices
+        ], details
+
     def find_best_match(
         self,
         target_value: object | Sequence[object],
@@ -423,33 +613,10 @@ class IndexedCandidateMatcher:
             return None, None, None
 
         if self.is_composite:
-            values = list(target_value) if isinstance(target_value, (list, tuple)) else [target_value]
-            identity = composite_identity_key(values, self.component_matcher_types)
-            if identity is None:
+            exact_candidates = self.find_exact_candidates(target_value, used_indices)
+            if not exact_candidates:
                 return None, None, None
-            available_positions = [
-                position
-                for position in self.composite_map.get(identity, [])
-                if self.indices[position] not in used_indices
-            ]
-            if not available_positions:
-                return None, None, None
-            position = available_positions[0]
-            detail = f"Exact normalized match across {len(self.candidate_columns)} primary-key columns"
-            normalized_value = " | ".join(identity)
-            return (
-                self.indices[position],
-                self.rows[position],
-                MatchResult(
-                    True,
-                    100,
-                    "composite",
-                    "Exact composite key match",
-                    detail,
-                    normalized_value,
-                    normalized_value,
-                ),
-            )
+            return exact_candidates[0]
 
         if is_blank(target_value):
             return None, None, None

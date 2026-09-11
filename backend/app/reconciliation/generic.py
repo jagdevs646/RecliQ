@@ -87,6 +87,8 @@ def run_generic_reconciliation(
     file_1_name: str = "File 1",
     file_2_name: str = "File 2",
     is_cancelled=None,
+    secondary_conditions: list[dict] | None = None,
+    similarity_policy: dict | None = None,
 ) -> dict:
     import pandas as pd
     from app.reconciliation_engine.preprocessing import prepare_dataframe
@@ -115,4 +117,6 @@ def run_generic_reconciliation(
         file_1_name=file_1_name,
         file_2_name=file_2_name,
         is_cancelled=is_cancelled,
+        secondary_conditions=secondary_conditions,
+        similarity_policy=similarity_policy,
     )

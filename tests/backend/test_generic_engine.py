@@ -126,3 +126,91 @@ def test_generic_reconciliation_uses_all_composite_key_columns(tmp_path: Path):
     assert result["only_in_file_1"] == 1
     assert result["universal_data"]["matched_records"][0]["COMPOSITE MATCH KEY"] == "INV-100 | South"
     assert result["universal_data"]["missing_in_file_2"][0]["ENTITY"] == "North"
+
+
+def _secondary_conditions():
+    return [
+        {
+            "source_column": "Transaction Date",
+            "destination_column": "Posting Date",
+            "comparison_method": "normalized_date",
+        },
+        {
+            "source_column": "Amount",
+            "destination_column": "Gross Amount",
+            "comparison_method": "numeric_tolerance",
+            "numeric_tolerance": 0,
+        },
+    ]
+
+
+def _secondary_match_result(tmp_path: Path, destination_rows: list[dict]):
+    file1 = tmp_path / "source.xlsx"
+    file2 = tmp_path / "destination.xlsx"
+    output = tmp_path / "report.xlsx"
+    pd.DataFrame(
+        [{"Customer": "Alpah Consulting", "Transaction Date": "7 September 2026", "Amount": 100}]
+    ).to_excel(file1, index=False)
+    pd.DataFrame(destination_rows).to_excel(file2, index=False)
+    return run_generic_reconciliation(
+        file1,
+        file2,
+        output,
+        key_file_1="Customer",
+        key_file_2="Customer Name",
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Gross Amount"]}],
+        secondary_conditions=_secondary_conditions(),
+    )
+
+
+def test_secondary_conditions_create_exception_identity_match(tmp_path: Path):
+    result = _secondary_match_result(
+        tmp_path,
+        [{"Customer Name": "Alpha Consulting", "Posting Date": "2026-09-07", "Gross Amount": 100}],
+    )
+
+    assert result["exception_matches"] == 1
+    assert result["matched_records"] == 1
+    audit = result["universal_data"]["identity_resolution"][0]
+    assert audit["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"
+    assert "Primary key comparison" in audit["MATCH EXPLANATION"]
+
+
+def test_secondary_condition_mismatch_is_not_found(tmp_path: Path):
+    result = _secondary_match_result(
+        tmp_path,
+        [{"Customer Name": "Alpha Consulting", "Posting Date": "2026-09-07", "Gross Amount": 101}],
+    )
+
+    assert result["not_found_matches"] == 1
+    missing = result["universal_data"]["missing_in_file_2"][0]
+    assert missing["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
+    assert "No unused destination record" in missing["MATCH EXPLANATION"]
+
+
+def test_multiple_secondary_candidates_are_ambiguous(tmp_path: Path):
+    result = _secondary_match_result(
+        tmp_path,
+        [
+            {"Customer Name": "Alpha Consulting", "Posting Date": "2026-09-07", "Gross Amount": 100},
+            {"Customer Name": "Alpaca Consulting", "Posting Date": "2026-09-07", "Gross Amount": 100},
+        ],
+    )
+
+    assert result["ambiguous_matches"] == 1
+    assert result["matched_records"] == 0
+    missing = result["universal_data"]["missing_in_file_2"][0]
+    assert missing["IDENTITY CLASSIFICATION"] == "AMBIGUOUS_MATCH"
+    assert "More than one" in missing["MATCH EXPLANATION"]
+
+
+def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Path):
+    result = _secondary_match_result(
+        tmp_path,
+        [{"Customer Name": "Different Supplier", "Posting Date": "2026-09-07", "Gross Amount": 100}],
+    )
+
+    assert result["not_found_matches"] == 1
+    audit = result["universal_data"]["identity_resolution"][0]
+    assert audit["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
+    assert "required 75%" in audit["MATCH EXPLANATION"]

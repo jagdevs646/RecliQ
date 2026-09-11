@@ -13,6 +13,7 @@ def build_universal_data_model(
     matched_records: list[dict],
     total_file_1: int,
     total_file_2: int,
+    identity_resolution: list[dict] | None = None,
 ) -> dict:
     
     # 1. exceptions and field_differences
@@ -157,6 +158,15 @@ def build_universal_data_model(
         }
     ]
 
+    identity_resolution = identity_resolution or []
+    identity_counts = {
+        classification: sum(
+            record.get("IDENTITY CLASSIFICATION") == classification
+            for record in identity_resolution
+        )
+        for classification in ("EXACT_MATCH", "EXCEPTION_MATCH", "AMBIGUOUS_MATCH", "NOT_FOUND")
+    }
+
     return {
         "metadata": {
             "reconciliation_name": "Generic Reconciliation" if job_type == "generic" else "GST Reconciliation",
@@ -172,6 +182,7 @@ def build_universal_data_model(
             "mismatched": len(reconciliation_results),
             "missing_in_file_1": len(file_2_not_found),
             "missing_in_file_2": len(file_1_not_found),
+            "identity": identity_counts,
         },
         "overall_status": overall_status,
         "exception_summary": exception_summary,
@@ -181,5 +192,6 @@ def build_universal_data_model(
         "missing_in_file_1": file_2_not_found,  # Items in file 2 not in file 1
         "missing_in_file_2": file_1_not_found,  # Items in file 1 not in file 2
         "field_differences": field_differences,
+        "identity_resolution": identity_resolution,
         "control_checks": control_checks,
     }
