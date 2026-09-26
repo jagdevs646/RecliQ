@@ -11,6 +11,8 @@ interface Props {
   primaryFile2?: string | string[];
   file1Name?: string;
   file2Name?: string;
+  /** Column pairs RecliQ thinks belong together; offered, never auto-applied. */
+  suggestions?: Array<{ source: string; target: string }>;
 }
 
 type MappingMode = "drag" | "rows";
@@ -35,7 +37,7 @@ function matchConfidence(source: string, destination: string) {
   return Math.round((common.length / Math.max(left.length, right.length)) * 90);
 }
 
-export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name }: Props) {
+export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name, suggestions = [] }: Props) {
   const [mode, setMode] = useState<MappingMode>("drag");
   const [left, setLeft] = useState<string[]>([]);
   const [right, setRight] = useState<string[]>([]);
@@ -49,6 +51,10 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
   const availableFile2 = useMemo(() => file2Columns.filter((column) => !primaryFile2Columns.includes(column)), [file2Columns, primaryFile2Columns]);
   const mappedSource = new Set(rules.flatMap((rule) => rule.file_1_fields));
   const mappedDestination = new Set(rules.flatMap((rule) => rule.file_2_fields));
+  const openSuggestions = suggestions.filter((suggestion) => (
+    availableFile1.includes(suggestion.source) && availableFile2.includes(suggestion.target)
+    && !mappedSource.has(suggestion.source) && !mappedDestination.has(suggestion.target)
+  ));
 
   const sourceTitle = file1Name ? `${file1Name} columns` : "Source columns";
   const destTitle = file2Name ? `${file2Name} columns` : "Destination columns";
@@ -139,6 +145,13 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
       <button type="button" className="primary" onClick={autoMap} title="Map compatible unmapped columns without changing your manual mappings"><Sparkles size={16} />Auto map columns</button>
       <div className="icon-actions"><button type="button" className="icon-button" onClick={undo} disabled={!past.length} title="Undo mapping"><Undo2 size={16} /></button><button type="button" className="icon-button" onClick={redo} disabled={!future.length} title="Redo mapping"><Redo2 size={16} /></button><button type="button" className="icon-button" onClick={() => commit([])} disabled={!rules.length} title="Reset all mappings"><Trash2 size={16} /></button></div>
     </div>
+    {openSuggestions.length > 0 && <div className="suggestion-strip">
+      <span>Suggested pairs</span>
+      {openSuggestions.map((suggestion) => <button type="button" key={`${suggestion.source}-${suggestion.target}`} className="suggestion-chip" onClick={() => commit([...rules, { file_1_fields: [suggestion.source], file_2_fields: [suggestion.target] }])} title="Add this mapping">
+        <Plus size={14} />{suggestion.source} <ArrowRight size={12} /> {suggestion.target}
+      </button>)}
+      {openSuggestions.length > 1 && <button type="button" className="text-command" onClick={() => commit([...rules, ...openSuggestions.map((suggestion) => ({ file_1_fields: [suggestion.source], file_2_fields: [suggestion.target] }))])}>Add all</button>}
+    </div>}
     {mode === "drag" ? <div className="mapping-boards">
       <ColumnBoard title={sourceTitle} columns={availableFile1} selected={left} mapped={mappedSource} onToggle={(column) => toggle(left, column, setLeft)} draggable onDropColumn={dropOn} />
       <div className="mapping-bridge"><ArrowRight size={24} /><button className="secondary" type="button" onClick={() => addRule()} disabled={!left.length || !right.length}><Plus size={16} />Map selected</button><small>Select one or more fields on each side to create a combined rule.</small></div>
@@ -156,7 +169,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
       onClear={() => { setLeft([]); setRight([]); }}
     />}
     <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className="mapping-row" key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}><span>{rule.file_1_fields.join(" + ")}</span><ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span><button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button></div>)}</div>
-    {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically. Confidence: {autoMatches.map((match) => `${match.source} to ${match.destination} (${match.confidence}%)`).join(", ")}.</p>}
+    {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
     <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button><button type="button" className="icon-button" title="Importing templates is planned for a future release" disabled><Upload size={16} /></button></div>
   </section>;
 }

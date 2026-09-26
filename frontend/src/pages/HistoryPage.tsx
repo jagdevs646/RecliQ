@@ -121,7 +121,7 @@ export function HistoryPage({ onOpenJob }: Props) {
                 <tr key={job.id} onClick={() => onOpenJob(job)} style={{ cursor: "pointer" }}>
                   <td><strong>{job.id.slice(0, 8)}</strong></td>
                   <td>{job.job_type === "gst" ? "GST Invoices" : "General"}</td>
-                  <td>{job.input_file_1_name && job.input_file_2_name ? `${job.input_file_1_name} vs ${job.input_file_2_name}` : "—"}</td>
+                  <td>{job.input_file_1_name && job.input_file_2_name ? `${job.input_file_1_name} vs ${job.input_file_2_name}${(job.file_pair_count ?? 1) > 1 ? ` +${(job.file_pair_count ?? 1) - 1} more pair${(job.file_pair_count ?? 1) > 2 ? "s" : ""}` : ""}` : "—"}</td>
                   <td><StatusBadge status={job.status} /></td>
                   <td>{job.progress}%</td>
                   <td>{new Date(job.created_at).toLocaleString()}</td>

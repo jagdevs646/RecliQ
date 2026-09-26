@@ -75,7 +75,7 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_exceptions} onChange={(e) => handleChange("include_exceptions", e.target.checked)} />
-              <span>Exceptions (All mismatched records)</span>
+              <span>Differences (matched records whose values differ)</span>
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_matched} onChange={(e) => handleChange("include_matched", e.target.checked)} />
@@ -83,19 +83,19 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_missing_file_1} onChange={(e) => handleChange("include_missing_file_1", e.target.checked)} />
-              <span>Missing in {source1Name}</span>
+              <span>Only in {source1Name}</span>
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_missing_file_2} onChange={(e) => handleChange("include_missing_file_2", e.target.checked)} />
-              <span>Missing in {source2Name}</span>
+              <span>Only in {source2Name}</span>
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_field_differences} onChange={(e) => handleChange("include_field_differences", e.target.checked)} />
-              <span>Field Differences (Detailed breakdown)</span>
+              <span>Match review (secondary-key and ambiguous matches)</span>
             </label>
             <label className="checkbox-row">
               <input type="checkbox" checked={config.include_controls} onChange={(e) => handleChange("include_controls", e.target.checked)} />
-              <span>Control Checks (Data integrity checks)</span>
+              <span>Checks (every record accounted for)</span>
             </label>
           </div>
         </div>

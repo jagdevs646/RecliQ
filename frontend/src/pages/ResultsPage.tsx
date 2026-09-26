@@ -84,6 +84,8 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
   async function download(pairId?: string) { if (!job) return; try { await api.downloadJobReport(job.id, pairId); } catch (error) { setMessage(error instanceof Error ? error.message : "Download failed"); } }
   const downloadLabel = isMultiPair ? `Download all reports (ZIP, ${filePairs.filter((pair) => pair.report_filename).length})` : "Default Report";
   const pairDownload = isMultiPair && (activeRule ? filePairs.find((pair) => pair.file_pair_id === activeRule.file_pair_id) : activePair);
+  // A workbook can be customized when there is one: the job's, or the selected pair's.
+  const canCustomize = !isMultiPair || Boolean(pairDownload && pairDownload.report_filename);
 
   if (!job || !["completed", "completed_with_errors"].includes(job.status)) return <section className="page"><div className="empty-state"><h2>No completed report selected</h2><p>Complete a reconciliation to see its results dashboard.</p><button type="button" className="primary" onClick={onNewReconciliation}>Start reconciliation</button></div></section>;
 
@@ -128,7 +130,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
           </div>
           <button type="button" className="primary run-button" onClick={() => {
             if (job && customConfig) {
-              api.downloadCustomReport(job.id, customConfig).catch((err) => setMessage(err instanceof Error ? err.message : "Download failed"));
+              api.downloadCustomReport(job.id, customConfig, pairDownload ? pairDownload.file_pair_id : undefined).catch((err) => setMessage(err instanceof Error ? err.message : "Download failed"));
             }
           }}>
             <Download size={20} /> Download Report
@@ -141,8 +143,8 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
   return <section className="page results-page">
     <div className="page-title"><div><span className="eyebrow">Reconciliation complete</span><h1>Results dashboard</h1><p>{isMultiPair ? `${filePairs.length} file pairs were reconciled independently, each with its own workbook.` : "Review exceptions, inspect the records behind them, and download the detailed workbook."}</p></div>
       <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-        {/* Customization rebuilds one workbook, so it is offered only for single-pair jobs. */}
-        {!isMultiPair && <button type="button" className="secondary" onClick={() => setViewStage("customize")}><Settings2 size={18} />Customize Report</button>}
+        {/* Customization rebuilds one workbook: the job's, or the selected file pair's. */}
+        {canCustomize && <button type="button" className="secondary" onClick={() => setViewStage("customize")}><Settings2 size={18} />{pairDownload ? "Customize this pair" : "Customize Report"}</button>}
         {pairDownload && pairDownload.report_filename && <button type="button" className="secondary" onClick={() => download(pairDownload.file_pair_id)}><Download size={18} />{pairDownload.report_filename}</button>}
         <button type="button" className="primary" onClick={() => download()}><Download size={18} />{downloadLabel}</button>
       </div>
@@ -168,7 +170,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
     </div>}
     <div className="results-insights"><div className="chart-card"><div><h2>Result distribution</h2><p>Matched records and exceptions in this run.</p></div><div className="donut-wrap"><div className="donut" style={chartStyle}><span>{total}</span><small>records</small></div><ul className="chart-legend"><li><i className="legend-green" />Matched <strong>{matched}</strong></li><li><i className="legend-coral" />Discrepancies <strong>{summary.report_rows}</strong></li><li><i className="legend-amber" />{file1Name} only <strong>{summary.only_in_file_1}</strong></li><li><i className="legend-slate" />{file2Name} only <strong>{summary.only_in_file_2}</strong></li></ul></div></div><div className="result-note"><ShieldCheck size={23} /><div><h2>Report ready</h2><p>The detailed Excel workbook contains the complete reconciliation, including every exception and selected context field.</p>
       <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-        {!isMultiPair && <button type="button" className="text-command" onClick={() => setViewStage("customize")}><Settings2 size={16} />Customize</button>}
+        {canCustomize && <button type="button" className="text-command" onClick={() => setViewStage("customize")}><Settings2 size={16} />Customize</button>}
         <button type="button" className="text-command" onClick={() => download()}><Download size={16} />{isMultiPair ? "Download ZIP" : "Download default"}</button>
       </div>
     </div></div></div>

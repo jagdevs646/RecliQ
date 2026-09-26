@@ -247,8 +247,9 @@ export class ApiClient {
     saveBlob(await response.blob(), responseFilename(response, isZip ? "RecliQ_Reconciliation_Reports.zip" : "RecliQ_Reconciliation_Report.xlsx"));
   }
 
-  async downloadCustomReport(jobId: string, config: import("../types").ReportCustomConfig): Promise<void> {
-    const response = await fetch(`${API_BASE}/reports/job/${jobId}/download_custom`, {
+  async downloadCustomReport(jobId: string, config: import("../types").ReportCustomConfig, filePairId?: string): Promise<void> {
+    const query = filePairId ? `?file_pair_id=${encodeURIComponent(filePairId)}` : "";
+    const response = await fetch(`${API_BASE}/reports/job/${jobId}/download_custom${query}`, {
       method: "POST",
       body: JSON.stringify(config),
       credentials: "include",

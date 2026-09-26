@@ -69,6 +69,10 @@ export interface AnalysisResponse {
   recommended_keys_2: string[];
   key_confidence: number;
   is_composite_key: boolean;
+  key_reason?: string;
+  /** Columns whose values are dates (drives the date-only key guard). */
+  date_columns_1?: string[];
+  date_columns_2?: string[];
   recommended_mappings: {
     source: string;
     target: string | null;
@@ -95,6 +99,7 @@ export interface Job {
   input_file_2_id: string | null;
   input_file_1_name?: string | null;
   input_file_2_name?: string | null;
+  file_pair_count?: number;
   report_id: string | null;
   created_at: string;
   started_at: string | null;
