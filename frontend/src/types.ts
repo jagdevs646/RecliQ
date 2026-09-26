@@ -114,9 +114,53 @@ export interface ReconciliationSummary {
   exception_matches?: number;
   ambiguous_matches?: number;
   not_found_matches?: number;
+  field_discrepancies?: number;
+  completed_rules?: number;
+  failed_rules?: number;
+  /** Job manifest (generic jobs): one entry per file pair and per sheet rule. */
+  file_pairs?: FilePairManifest[];
+  sheet_rules?: SheetRuleManifest[];
 }
 
-export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review";
+export type RuleStatus = "completed" | "completed_with_errors" | "failed";
+
+export interface FilePairManifest {
+  file_pair_id: string;
+  label: string;
+  source_file: string | null;
+  destination_file: string | null;
+  status: RuleStatus;
+  sheet_rule_ids: string[];
+  summary: ReconciliationSummary;
+  report_filename: string | null;
+}
+
+export interface SheetRuleManifest {
+  file_pair_id: string;
+  sheet_rule_id: string;
+  rule_index: number;
+  report_label: string;
+  source_file: string | null;
+  destination_file: string | null;
+  source_sheets: string[];
+  destination_sheets: string[];
+  primary_key_source: string[];
+  primary_key_destination: string[];
+  secondary_conditions: SecondaryMatchCondition[];
+  similarity_policy: SimilarityPolicy;
+  date_only_override: boolean;
+  mapping_count: number;
+  status: RuleStatus;
+  error: string | null;
+  summary: ReconciliationSummary;
+}
+
+export interface ReportScope {
+  filePairId?: string;
+  sheetRuleId?: string;
+}
+
+export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review" | "exception_matches" | "ambiguous_matches" | "not_found";
 
 export interface ReportPreview {
   category: PreviewCategory;

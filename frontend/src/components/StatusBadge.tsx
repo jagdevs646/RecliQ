@@ -10,7 +10,7 @@ export function StatusBadge({ status }: Props) {
   return (
     <span className={`status-badge status-${value}`}>
       <Icon size={14} />
-      {status}
+      {status.replace(/_/g, " ")}
     </span>
   );
 }

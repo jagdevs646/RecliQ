@@ -1,4 +1,4 @@
-import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, RuleMapping, UploadedFile, SecondaryMatchCondition, SimilarityPolicy } from "../types";
+import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, RuleMapping, UploadedFile, SecondaryMatchCondition, SimilarityPolicy } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -29,6 +29,21 @@ function rememberXhrSession(request: XMLHttpRequest): void {
   } catch {
     // Cookies remain the server-side fallback when storage is unavailable.
   }
+}
+
+/** Reads the server-chosen filename from Content-Disposition, else the fallback. */
+function responseFilename(response: Response, fallback: string): string {
+  const match = response.headers.get("Content-Disposition")?.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  return match ? decodeURIComponent(match[1]) : fallback;
+}
+
+function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 function sessionHeaders(): Headers {
@@ -131,6 +146,7 @@ export class ApiClient {
       file_pair_id: string;
       source_files: FileSource[];
       destination_files: FileSource[];
+      report_metadata?: { label?: string };
       sheet_rules: Array<{
         sheet_rule_id: string;
         source_sheets: string[];
@@ -208,27 +224,27 @@ export class ApiClient {
     return this.request<ReconciliationSummary>(`/reports/job/${jobId}/summary`);
   }
 
-  async getReportPreview(jobId: string, category: PreviewCategory, offset = 0): Promise<ReportPreview> {
-    return this.request<ReportPreview>(`/reports/job/${jobId}/preview?category=${category}&offset=${offset}&limit=25`);
+  async getReportPreview(jobId: string, category: PreviewCategory, offset = 0, scope: ReportScope = {}): Promise<ReportPreview> {
+    const params = new URLSearchParams({ category, offset: String(offset), limit: "25" });
+    if (scope.filePairId) params.append("file_pair_id", scope.filePairId);
+    if (scope.sheetRuleId) params.append("sheet_rule_id", scope.sheetRuleId);
+    return this.request<ReportPreview>(`/reports/job/${jobId}/preview?${params.toString()}`);
   }
 
-  reportUrl(jobId: string): string {
-    return `${API_BASE}/reports/job/${jobId}/download`;
+  reportUrl(jobId: string, filePairId?: string): string {
+    const query = filePairId ? `?file_pair_id=${encodeURIComponent(filePairId)}` : "";
+    return `${API_BASE}/reports/job/${jobId}/download${query}`;
   }
 
-  async downloadJobReport(jobId: string): Promise<void> {
-    const response = await fetch(this.reportUrl(jobId), { credentials: "include", headers: sessionHeaders() });
+  /** Downloads the job report: one workbook, a ZIP of every file pair, or one pair from that ZIP. */
+  async downloadJobReport(jobId: string, filePairId?: string): Promise<void> {
+    const response = await fetch(this.reportUrl(jobId, filePairId), { credentials: "include", headers: sessionHeaders() });
     rememberSession(response);
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "RecliQ_Reconciliation_Report.xlsx";
-    link.click();
-    URL.revokeObjectURL(url);
+    const isZip = (response.headers.get("Content-Type") ?? "").includes("zip");
+    saveBlob(await response.blob(), responseFilename(response, isZip ? "RecliQ_Reconciliation_Reports.zip" : "RecliQ_Reconciliation_Report.xlsx"));
   }
 
   async downloadCustomReport(jobId: string, config: import("../types").ReportCustomConfig): Promise<void> {
@@ -245,22 +261,7 @@ export class ApiClient {
     if (!response.ok) {
       throw new Error(await response.text());
     }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    // Fastapi sends Content-Disposition with filename, we can try to extract or default
-    const contentDisposition = response.headers.get("Content-Disposition");
-    let filename = "RecliQ_Custom_Report.xlsx";
-    if (contentDisposition) {
-      const match = contentDisposition.match(/filename="?([^"]+)"?/);
-      if (match) {
-        filename = match[1];
-      }
-    }
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
+    saveBlob(await response.blob(), responseFilename(response, "RecliQ_Custom_Report.xlsx"));
   }
 
   async downloadSampleTemplate(type: "generic" | "gst"): Promise<void> {
