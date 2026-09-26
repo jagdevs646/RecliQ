@@ -115,12 +115,24 @@ def sorted_token_key(value: object, use_synonyms: bool = False) -> str:
     return cached_sorted_token_key(str(value), use_synonyms=use_synonyms)
 
 
+_CURRENCY_MARKERS = re.compile(r"(?i)(?:inr|usd|eur|gbp|rs)\.?|[₹$€£¥]")
+
+
 @lru_cache(maxsize=32768)
 def cached_to_number_from_str(text: str) -> float | None:
     text = cached_unicode_clean(text)
+    text = _CURRENCY_MARKERS.sub("", text)
     text = text.replace(",", "").replace(" ", "")
     if text.startswith("(") and text.endswith(")"):
         text = f"-{text[1:-1]}"
+    try:
+        number = float(text)  # Plain and scientific notation.
+        return number if math.isfinite(number) else None  # Not "inf"/"nan" text.
+    except ValueError:
+        pass
+    # Identifiers ("S-3", "INV-005"), dates and times are not numbers.
+    if re.search(r"[A-Za-z/:]", text):
+        return None
     text = re.sub(r"[^0-9.+-]", "", text)
     if text in {"", ".", "+", "-"}:
         return None

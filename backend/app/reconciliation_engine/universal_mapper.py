@@ -30,7 +30,7 @@ def build_universal_data_model(
         match_key = str(
             row.get(
                 "COMPOSITE MATCH KEY",
-                row.get(matching_keys[0], "") if matching_keys else "",
+                row.get("MATCH KEY", row.get(matching_keys[0], "") if matching_keys else ""),
             )
         )
         

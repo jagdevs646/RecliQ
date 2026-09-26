@@ -96,6 +96,7 @@ class ReconciliationPlan(BaseModel):
             if not file_pair.source_files or not file_pair.destination_files:
                 raise ValueError(f"File pair {pair_index} requires source and destination files")
 
+            file_pair_label = str(file_pair.report_metadata.get("label") or "").strip()
             for rule_index, rule in enumerate(file_pair.sheet_rules, start=1):
                 source_files = self._sources_for_rule(file_pair.source_files, rule.source_sheets)
                 destination_files = self._sources_for_rule(file_pair.destination_files, rule.destination_sheets)
@@ -117,7 +118,12 @@ class ReconciliationPlan(BaseModel):
                         "similarity_policy": rule.matching_strategy.similarity_policy.model_dump(),
                         "date_only_override": rule.matching_strategy.date_only_override,
                         "file_pair_id": file_pair.file_pair_id or f"file-pair-{pair_index}",
+                        "file_pair_label": file_pair_label,
+                        "file_pair_index": pair_index,
+                        "file_pair_count": len(self.file_pairs),
                         "sheet_rule_id": rule.sheet_rule_id or f"rule-{rule_index}",
+                        "rule_index": rule_index,
+                        "rule_count": len(file_pair.sheet_rules),
                         "report_label": rule.report_label,
                     }
                 )

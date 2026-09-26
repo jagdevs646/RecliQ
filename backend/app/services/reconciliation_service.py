@@ -81,8 +81,67 @@ def _merge_rule_universal_data(rule_results: list[dict]) -> dict:
                     existing[file_key] += incoming[file_key]
             if incoming.get("Result") == "Exception":
                 existing["Result"] = "Exception"
-    merged["execution_results"] = rule_results
+    # Records already live in the merged categories; keep only rule metadata
+    # here so the stored audit JSON does not hold every record twice.
+    merged["execution_results"] = [
+        {key: value for key, value in result.items() if key != "universal_data"}
+        for result in rule_results
+    ]
     return merged
+
+
+_REPORT_ARCHIVE_NAME = "RecliQ_Reconciliation_Reports.zip"
+
+
+def _file_stem(filename: str | None) -> str:
+    return Path(filename).stem if filename else ""
+
+
+def _file_pair_manifest(rule_manifest: list[dict]) -> list[dict]:
+    """Summarize each file pair from its own rules, in submission order."""
+    pairs: dict[str, list[dict]] = {}
+    for rule in rule_manifest:
+        pairs.setdefault(rule["file_pair_id"], []).append(rule)
+
+    manifest: list[dict] = []
+    for file_pair_id, rules in pairs.items():
+        completed = [rule for rule in rules if rule["status"] == "completed"]
+        summary: dict[str, int | float] = {}
+        for rule in completed:
+            for key, value in rule["summary"].items():
+                if isinstance(value, (int, float)):
+                    summary[key] = summary.get(key, 0) + value
+        first = rules[0]
+        source_stem, destination_stem = _file_stem(first["source_file"]), _file_stem(first["destination_file"])
+        label = (
+            first["file_pair_label"]
+            or (first["report_label"] if len(rules) == 1 else "")
+            or (f"{source_stem} vs {destination_stem}" if source_stem and destination_stem else file_pair_id)
+        )
+        manifest.append(
+            {
+                "file_pair_id": file_pair_id,
+                "label": label,
+                "source_file": first["source_file"],
+                "destination_file": first["destination_file"],
+                "status": "completed" if len(completed) == len(rules) else ("completed_with_errors" if completed else "failed"),
+                "sheet_rule_ids": [rule["sheet_rule_id"] for rule in rules],
+                "summary": summary,
+                "report_filename": None,
+            }
+        )
+    return manifest
+
+
+def _label_multi_rule_report(universal_data: dict, rules: list[dict]) -> None:
+    """Multi-rule workbooks name their sources by workbook, not by first sheet."""
+    if len(rules) <= 1:
+        return
+    metadata = universal_data.setdefault("metadata", {})
+    metadata["file_1_name"] = rules[0].get("source_file") or metadata.get("file_1_name")
+    metadata["file_2_name"] = rules[0].get("destination_file") or metadata.get("file_2_name")
+    # Keys differ per rule; tab '08 Sheet Rules' lists each rule's own key.
+    metadata["matching_keys"] = ["Match Key"]
 
 
 def enqueue_generic_job(
@@ -315,11 +374,13 @@ def process_reconciliation_job(job_id: str) -> None:
 
         rule_results: list[dict] = []
         overall_summary = {
-            "report_rows": 0, "only_in_file_1": 0, "only_in_file_2": 0, 
+            "report_rows": 0, "only_in_file_1": 0, "only_in_file_2": 0,
             "confidence_review": 0, "source_records": 0, "destination_records": 0,
             "matched_records": 0, "fully_matched_records": 0
         }
         rule_errors: list[dict] = []
+        rule_manifest: list[dict] = []
+        total_rules = len(execution_items)
 
         # Every canonical sheet rule runs in isolation. Aggregation happens only
         # after this loop, preserving independent configuration and audit data.
@@ -327,18 +388,58 @@ def process_reconciliation_job(job_id: str) -> None:
             file_pair_id = pair.get("file_pair_id", f"file-pair-{idx}")
             sheet_rule_id = pair.get("sheet_rule_id", f"rule-{idx}")
             report_label = pair.get("report_label") or sheet_rule_id
+            source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
+            source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
+            sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
+            sources_2 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_2]
+            key_f1, key_f2 = pair.get("key_file_1", payload.get("key_file_1")), pair.get("key_file_2", payload.get("key_file_2"))
+            manifest_entry = {
+                "file_pair_id": file_pair_id,
+                "file_pair_label": pair.get("file_pair_label", ""),
+                "sheet_rule_id": sheet_rule_id,
+                "rule_index": pair.get("rule_index", idx),
+                "report_label": report_label,
+                "source_file": None,
+                "destination_file": None,
+                "source_sheets": [source.sheet_id or "default" for source in sources_1],
+                "destination_sheets": [source.sheet_id or "default" for source in sources_2],
+                "primary_key_source": [key_f1] if isinstance(key_f1, str) else list(key_f1 or []),
+                "primary_key_destination": [key_f2] if isinstance(key_f2, str) else list(key_f2 or []),
+                "secondary_conditions": pair.get("secondary_conditions", []),
+                "similarity_policy": pair.get("similarity_policy", {}),
+                "date_only_override": bool(pair.get("date_only_override", False)),
+                "mapping_count": len(pair.get("rules", [])),
+                "status": "failed",
+                "error": None,
+                "summary": {},
+            }
+            rule_manifest.append(manifest_entry)
+
+            # Scale each rule's real engine progress into its share of the job
+            # (10-90%) so the bar never restarts, and name the rule being run.
+            rule_start, rule_span = 10 + (idx - 1) * 80 / total_rules, 80 / total_rules
+            stage = f"{', '.join(manifest_entry['source_sheets'])} → {', '.join(manifest_entry['destination_sheets'])}"
+            if pair.get("file_pair_count", 1) > 1:
+                stage = f"File pair {pair['file_pair_index']} of {pair['file_pair_count']} · {stage}"
+            if pair.get("rule_count", 1) > 1:
+                stage = f"{stage} (rule {pair['rule_index']} of {pair['rule_count']})"
+
+            def rule_progress(percent: int, step_msg: str, _start=rule_start, _span=rule_span, _stage=stage) -> None:
+                on_progress(int(_start + _span * max(0, min(100, percent)) / 100), f"{_stage}: {step_msg}")
+
             try:
-                source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
-                source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
-                sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
-                sources_2 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_2]
                 s1, s2 = sources_1[0], sources_2[0]
                 source_record = _file_record(db, s1.file_id, job.session_id)
                 destination_record = _file_record(db, s2.file_id, job.session_id)
+                manifest_entry["source_file"] = source_record.original_filename
+                manifest_entry["destination_file"] = destination_record.original_filename
+                if job.job_type == "generic":
+                    on_progress(int(rule_start), f"Reconciling {stage}")
                 df1 = _load_and_consolidate(db, job.session_id, sources_1)
                 df2 = _load_and_consolidate(db, job.session_id, sources_2)
                 sheet_name_1, sheet_name_2 = s1.sheet_id or "default", s2.sheet_id or "default"
                 report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
+                manifest_entry["report_label"] = report_label
                 pair_label = f"[{report_label}]"
 
                 if job.job_type == "gst":
@@ -355,7 +456,6 @@ def process_reconciliation_job(job_id: str) -> None:
                         write_report=False,
                     )
                 else:
-                    key_f1, key_f2 = pair.get("key_file_1", payload.get("key_file_1")), pair.get("key_file_2", payload.get("key_file_2"))
                     res = run_generic_reconciliation(
                         file_1_df=df1, file_2_df=df2, output_path=output_path,
                         key_file_1=[key_f1] if isinstance(key_f1, str) else key_f1,
@@ -363,7 +463,7 @@ def process_reconciliation_job(job_id: str) -> None:
                         rules=pair.get("rules", payload.get("rules", [])), orientation=payload.get("orientation", job.orientation),
                         include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
                         include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
-                        progress_callback=on_progress, file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
+                        progress_callback=rule_progress, file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
                         file_2_name=f"{destination_record.original_filename} ({sheet_name_2})", is_cancelled=is_cancelled,
                         write_report=False, secondary_conditions=pair.get("secondary_conditions", []),
                         similarity_policy=pair.get("similarity_policy", {}), date_only_override=bool(pair.get("date_only_override", False)),
@@ -375,19 +475,24 @@ def process_reconciliation_job(job_id: str) -> None:
                 for category in _UNIVERSAL_RECORD_CATEGORIES:
                     for record in ud.get(category, []):
                         record["Sheet Pair"], record["File Pair ID"], record["Sheet Rule ID"] = pair_label, file_pair_id, sheet_rule_id
-                rule_results.append({"file_pair_id": file_pair_id, "sheet_rule_id": sheet_rule_id, "report_label": report_label, "source_sheets": [source.sheet_id or "default" for source in sources_1], "destination_sheets": [source.sheet_id or "default" for source in sources_2], "summary": res["summary"], "status": "completed", "universal_data": ud})
+                manifest_entry.update(status="completed", summary=res["summary"])
+                rule_results.append({**manifest_entry, "universal_data": ud})
             except InterruptedError:
                 raise
             except Exception as exc:
-                error = {"file_pair_id": file_pair_id, "sheet_rule_id": sheet_rule_id, "report_label": report_label, "status": "failed", "error": str(exc)}
+                # str(KeyError) wraps its message in quotes; report the message itself.
+                message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+                manifest_entry.update(status="failed", error=message)
+                error = {"file_pair_id": file_pair_id, "sheet_rule_id": sheet_rule_id, "report_label": report_label, "status": "failed", "error": message}
                 rule_errors.append(error)
-                append_history(db, job, "processing", f"{report_label} failed: {exc}")
+                append_history(db, job, "processing", f"{report_label} failed: {message}")
                 db.commit()
 
         if not rule_results:
             details = "; ".join(error["error"] for error in rule_errors) or "No data processed for any sheet pair."
             raise ValueError(details)
 
+        file_pair_manifest = _file_pair_manifest(rule_manifest)
         merged_ud = _merge_rule_universal_data(rule_results)
         merged_ud["execution_errors"] = rule_errors
         overall_summary["failed_rules"] = len(rule_errors)
@@ -396,34 +501,43 @@ def process_reconciliation_job(job_id: str) -> None:
         from app.utils.json_encoder import safe_json_dump
         from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
+        on_progress(90, "Generating reconciliation report" if len(file_pair_manifest) == 1 else f"Generating {len(file_pair_manifest)} file-pair reports")
+
         # A file pair is a report boundary. One pair preserves the original
         # direct XLSX download; more than one pair is delivered as a ZIP.
         if job.job_type == "generic":
-            pair_groups: dict[str, list[dict]] = {}
-            for rule_result in rule_results:
-                pair_groups.setdefault(rule_result["file_pair_id"], []).append(rule_result)
-            if len(pair_groups) == 1:
+            merged_ud["sheet_rules"] = rule_manifest
+            merged_ud["file_pairs"] = file_pair_manifest
+            if len(file_pair_manifest) == 1:
+                _label_multi_rule_report(merged_ud, rule_manifest)
                 generate_enterprise_report(merged_ud, {}, output_path)
             else:
-                archive_path = output_path.with_name(f"{job.id}-Reconciliation_Reports.zip")
+                archive_path = output_path.with_name(f"{job.id}-{_REPORT_ARCHIVE_NAME}")
                 with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                     used_names: set[str] = set()
-                    for number, (file_pair_id, pair_rules) in enumerate(pair_groups.items(), start=1):
+                    for number, pair_entry in enumerate(file_pair_manifest, start=1):
+                        pair_rules = [result for result in rule_results if result["file_pair_id"] == pair_entry["file_pair_id"]]
+                        if not pair_rules:
+                            continue  # Every rule failed; the manifest records why.
                         pair_data = _merge_rule_universal_data(pair_rules)
-                        label = pair_rules[0].get("report_label") or file_pair_id
-                        stem = _safe_report_stem(label, f"Reconciliation_{number}")
+                        pair_data["sheet_rules"] = [rule for rule in rule_manifest if rule["file_pair_id"] == pair_entry["file_pair_id"]]
+                        _label_multi_rule_report(pair_data, pair_data["sheet_rules"])
+                        stem = _safe_report_stem(pair_entry["label"], f"Reconciliation_{number}")
                         filename = f"{stem}.xlsx"
                         suffix = 2
                         while filename.lower() in used_names:
                             filename = f"{stem}_{suffix}.xlsx"
                             suffix += 1
                         used_names.add(filename.lower())
+                        pair_entry["report_filename"] = filename
                         pair_path = work_dir / f"{job.id}-{number}-{filename}"
                         generate_enterprise_report(pair_data, {}, pair_path)
                         archive.write(pair_path, filename)
                         pair_path.unlink(missing_ok=True)
                 output_path = archive_path
-                output_name = "Reconciliation_Reports.zip"
+                output_name = _REPORT_ARCHIVE_NAME
+            if len(file_pair_manifest) == 1:
+                file_pair_manifest[0]["report_filename"] = output_name
         else:
             generate_enterprise_report(merged_ud, {}, output_path)
 
@@ -446,13 +560,19 @@ def process_reconciliation_job(job_id: str) -> None:
             
         from app.utils.json_encoder import safe_json_dumps
 
+        # The report summary doubles as the job manifest: aggregate counts at the
+        # top level (legacy shape) plus per-file-pair and per-sheet-rule detail.
+        report_summary = dict(summary)
+        if job.job_type == "generic":
+            report_summary["file_pairs"] = file_pair_manifest
+            report_summary["sheet_rules"] = rule_manifest
         report = Report(
             session_id=job.session_id,
             filename=output_name,
             storage_backend=stored_report.storage_backend,
             storage_path=stored_report.storage_path,
             size_bytes=stored_report.size_bytes,
-            summary_json=safe_json_dumps(summary.get("statistics", {}) if "statistics" in summary else summary),
+            summary_json=safe_json_dumps(report_summary),
         )
         db.add(report)
         db.flush()

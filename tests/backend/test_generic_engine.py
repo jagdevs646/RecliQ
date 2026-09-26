@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
+import openpyxl
 import pandas as pd
 import pytest
 
@@ -243,3 +244,41 @@ def test_date_only_primary_key_requires_explicit_override(tmp_path: Path):
         date_only_override=True,
     )
     assert result["exact_matches"] == 1
+
+
+def test_report_sheets_show_raw_keys_and_keep_every_missing_row_column(tmp_path: Path):
+    file1 = tmp_path / "source.xlsx"
+    file2 = tmp_path / "destination.xlsx"
+    output = tmp_path / "report.xlsx"
+    pd.DataFrame(
+        [
+            {"Invoice": "INV-1", "Amount": 10},
+            {"Invoice": "INV-3", "Amount": 30},
+            {"Invoice": "INV-3", "Amount": 5},
+        ]
+    ).to_excel(file1, index=False)
+    pd.DataFrame([{"Invoice": "INV1", "Amount": 10}]).to_excel(file2, index=False)
+
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        output,
+        key_file_1="Invoice",
+        key_file_2="Invoice",
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+    )
+
+    audit = result["universal_data"]["identity_resolution"]
+    assert audit[0]["MATCH KEY"] == "INV-1"
+    assert audit[0]["CANDIDATE KEY"] == "INV1"
+    # Without secondary conditions the explanation must not mention them.
+    not_found = next(row for row in audit if row["IDENTITY CLASSIFICATION"] == "NOT_FOUND")
+    assert not_found["MATCH EXPLANATION"] == "No destination record has this primary key after deterministic normalization."
+
+    workbook = openpyxl.load_workbook(output)
+    matched = workbook["03 Matched Records"]
+    assert (matched["C5"].value, matched["D5"].value) == ("INV-1", "INV1")
+    # Duplicate rows carry a CLASSIFICATION column the first missing row lacks.
+    missing_sheet = next(name for name in workbook.sheetnames if name.startswith("05 Missing"))
+    missing_headers = [cell.value for cell in workbook[missing_sheet][4]]
+    assert "CLASSIFICATION" in missing_headers

@@ -196,14 +196,19 @@ def _identity_explanation(
     threshold: int | None = None,
     secondary_details: list[str] | None = None,
 ) -> str:
+    # ``secondary_details is None`` means secondary matching never ran.
     conditions = ", ".join(secondary_details or [])
     if classification is MatchClassification.EXACT_MATCH:
         return "Primary key matched exactly after deterministic normalization."
+    if classification is MatchClassification.AMBIGUOUS_MATCH and secondary_details is None:
+        return "More than one unused destination record shares this primary key; no record was selected."
     if classification is MatchClassification.AMBIGUOUS_MATCH:
         return (
             "More than one unused destination record passed every secondary condition"
             f" ({conditions or 'configured conditions'}); no record was selected."
         )
+    if classification is MatchClassification.NOT_FOUND and result is None and secondary_details is None:
+        return "No destination record has this primary key after deterministic normalization."
     if classification is MatchClassification.NOT_FOUND and result is None:
         return (
             "No unused destination record passed every secondary condition"
@@ -342,6 +347,7 @@ def run_generic_reconciliation(
     matched_records: list[dict] = []
     matched_file_2_indices: set = set()
     identity_resolution: list[dict] = []
+    field_discrepancy_count = 0
 
     tracker.matching_records()
 
@@ -361,14 +367,16 @@ def run_generic_reconciliation(
 
         exact_candidates = indexed_matcher.find_exact_candidates(file_1_id, matched_file_2_indices)
         classification = MatchClassification.NOT_FOUND
-        secondary_details: list[str] = []
+        secondary_details: list[str] | None = None
         key_result: MatchResult | None = None
         required_threshold: int | None = None
         best_idx = None
         file_2_row = None
+        candidate_row = None
 
         if len(exact_candidates) == 1:
             best_idx, file_2_row, key_result = exact_candidates[0]
+            candidate_row = file_2_row
             classification = MatchClassification.EXACT_MATCH
         elif len(exact_candidates) > 1:
             classification = MatchClassification.AMBIGUOUS_MATCH
@@ -409,6 +417,13 @@ def run_generic_reconciliation(
                 "MATCH TYPE": key_result.matcher_type if key_result else "",
                 "MATCH CONFIDENCE": f"{key_result.confidence}%" if key_result else "0%",
                 "MATCH THRESHOLD": f"{required_threshold}%" if required_threshold is not None else "",
+                # Raw key values make every audit row traceable without row lookups.
+                "MATCH KEY": " | ".join(str(file_1_row.get(column, "")) for column in file_1_id_col),
+                "CANDIDATE KEY": (
+                    " | ".join(str(candidate_row.get(column, "")) for column in file_2_id_col)
+                    if candidate_row is not None
+                    else ""
+                ),
             }
         )
 
@@ -452,6 +467,9 @@ def run_generic_reconciliation(
         else:
             reconciliation_result[primary_key_1] = file_1_id
             reconciliation_result[f"MATCHED {primary_key_2}"] = file_2_row.get(primary_key_2)
+            # Raw (display) key values; the NORM_ columns above hold match forms.
+            reconciliation_result["MATCH KEY"] = file_1_row.get(file_1_id_col[0])
+            reconciliation_result["MATCHED KEY"] = file_2_row.get(file_2_id_col[0])
 
         for col in file_1_extra:
             if col != "_ROW_NO":
@@ -460,14 +478,16 @@ def run_generic_reconciliation(
             if col != "_ROW_NO":
                 reconciliation_result[f"{col} (FILE 2)"] = file_2_row.get(col)
 
-        has_reportable_issue = classification is MatchClassification.EXCEPTION_MATCH
+        has_field_difference = False
         for file_1_fields, file_2_fields in normalized_rules:
             differences = compare_rule_values(file_1_row, file_2_row, file_1_fields, file_2_fields)
             if differences:
-                has_reportable_issue = True
+                has_field_difference = True
                 reconciliation_result.update(differences)
+        if has_field_difference:
+            field_discrepancy_count += 1
 
-        if has_reportable_issue:
+        if has_field_difference or classification is MatchClassification.EXCEPTION_MATCH:
             reconciliation_results.append(reconciliation_result)
         else:
             matched_records.append(reconciliation_result)
@@ -530,6 +550,7 @@ def run_generic_reconciliation(
         "destination_records": len(file_2_df),
         "matched_records": len(matched_file_2_indices),
         "fully_matched_records": len(matched_file_2_indices) - len(reconciliation_results),
+        "field_discrepancies": field_discrepancy_count,
         "exact_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXACT_MATCH.value for item in identity_resolution),
         "exception_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXCEPTION_MATCH.value for item in identity_resolution),
         "ambiguous_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.AMBIGUOUS_MATCH.value for item in identity_resolution),

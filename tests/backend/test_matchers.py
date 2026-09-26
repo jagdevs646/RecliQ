@@ -75,3 +75,18 @@ def test_date_series_and_row_comparison_share_canonical_normalization():
     result = compare_values("07/09/2026", "2026-09-07", "Transaction Date", "Posting Date")
     assert result.matched
     assert result.confidence == 100
+
+
+def test_identifiers_and_dates_are_never_parsed_as_numbers():
+    from app.reconciliation_engine.cache import to_number
+    from app.reconciliation_engine.engine import compare_rule_values
+
+    assert to_number("INR 1,20,000") == 120000.0
+    assert to_number("(250.50)") == -250.5
+    # Previously "S-3" parsed as -3.0 and "07/09/2026" as 7092026.0.
+    assert to_number("S-3") is None
+    assert to_number("INV-005") is None
+    assert to_number("07/09/2026") is None
+    # A formatting-only identifier difference is text, never a numeric DIFF.
+    differences = compare_rule_values({"INVOICE": "S-3"}, {"INVOICE": "S3"}, ["INVOICE"], ["INVOICE"])
+    assert "INVOICE DIFF" not in differences

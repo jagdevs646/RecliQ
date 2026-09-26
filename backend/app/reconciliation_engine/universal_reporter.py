@@ -43,6 +43,9 @@ class ReportConfig:
         self.number_format = number_format
 
 
+_INTERNAL_RECORD_COLUMNS = {"File Pair ID", "Sheet Rule ID"}
+
+
 def _clean_table_name(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9_]", "", name)
     if cleaned and cleaned[0].isdigit():
@@ -121,6 +124,8 @@ class UniversalReporter:
             self._generate_identity_resolution(wb)
         if self.config.include_controls:
             self._generate_controls(wb, sheet_missing_1, sheet_missing_2)
+        if self._has_rule_breakdown():
+            self._generate_sheet_rules(wb)
 
         if default_sheet and default_sheet in wb.worksheets:
             wb.remove(default_sheet)
@@ -719,14 +724,12 @@ class UniversalReporter:
         for row_idx, row in enumerate(matched_list, start=5):
             r1 = row.get("ROW (FILE 1)", row.get("ROW (File 1)", row_idx - 3))
             r2 = row.get("ROW (FILE 2)", row.get("ROW (File 2)", row_idx - 3))
-            k1 = row.get(
-                "COMPOSITE MATCH KEY",
-                row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)", ""))),
-            )
-            k2 = row.get(
-                "MATCHED COMPOSITE KEY",
-                row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", k1))),
-            )
+            k1 = row.get("COMPOSITE MATCH KEY", row.get("MATCH KEY"))
+            if k1 is None:
+                k1 = row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)", "")))
+            k2 = row.get("MATCHED COMPOSITE KEY", row.get("MATCHED KEY"))
+            if k2 is None:
+                k2 = row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", k1)))
 
             row_data = [
                 (r1, "center"),
@@ -777,7 +780,13 @@ class UniversalReporter:
         # Determine all column names from missing rows
         cols = []
         if missing_rows:
-            raw_cols = list(missing_rows[0].keys())
+            # Union across rows: sheet rules and duplicate rows carry different
+            # columns, and none may be dropped. Internal IDs stay out of view.
+            raw_cols = [
+                column
+                for column in dict.fromkeys(column for row in missing_rows for column in row)
+                if column not in _INTERNAL_RECORD_COLUMNS
+            ]
             # Ensure ROW column is at the end
             cols = [c for c in raw_cols if not c.startswith("ROW")]
             row_col = next((c for c in raw_cols if c.startswith("ROW")), None)
@@ -980,6 +989,130 @@ class UniversalReporter:
         ws.add_table(table)
 
     # ═══════════════════════════════════════════════════════════════════════
+    # SHEET RULES: one block per sheet rule (configuration + outcome counts)
+    # ═══════════════════════════════════════════════════════════════════════
+    def _has_rule_breakdown(self) -> bool:
+        """Legacy single-rule reports keep their original sheet set."""
+        rules = self.data.get("sheet_rules") or []
+        return len(rules) > 1 or any(
+            rule.get("status") != "completed"
+            or rule.get("secondary_conditions")
+            or rule.get("date_only_override")
+            for rule in rules
+        )
+
+    def _generate_sheet_rules(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet("08 Sheet Rules")
+        ws.sheet_properties.tabColor = self.colors["accent"]
+        ws.views.sheetView[0].showGridLines = False
+
+        metric_columns = [
+            ("Source records", "source_records"),
+            ("Destination records", "destination_records"),
+            ("Exact", "exact_matches"),
+            ("Exception", "exception_matches"),
+            ("Ambiguous", "ambiguous_matches"),
+            ("Not found", "not_found_matches"),
+            ("Field discrepancies", "field_discrepancies"),
+            ("Only in source", "only_in_file_1"),
+            ("Only in destination", "only_in_file_2"),
+        ]
+        last_col = get_column_letter(len(metric_columns))
+        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
+        accent_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
+        border = self._thin_border()
+
+        ws.merge_cells(f"A1:{last_col}1")
+        ws["A1"] = "Sheet Rules — Independent Configuration and Results"
+        ws["A1"].font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
+        ws.merge_cells(f"A2:{last_col}2")
+        ws["A2"] = "Every sheet rule is matched with its own keys, conditions and mappings. Counts below are per rule, never shared."
+        ws["A2"].font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
+
+        def describe_sources(workbook: str | None, sheets: list[str]) -> str:
+            sheet_text = ", ".join(sheets) if sheets else "Default sheet"
+            return f"{workbook} › {sheet_text}" if workbook else sheet_text
+
+        def describe_condition(condition: dict) -> str:
+            method = str(condition.get("comparison_method", "")).replace("_", " ")
+            if condition.get("comparison_method") == "numeric_tolerance":
+                method = f"{method} ±{condition.get('numeric_tolerance') or 0}"
+            return f"{condition.get('source_column')} ↔ {condition.get('destination_column')} ({method})"
+
+        def describe_similarity(policy: dict) -> str:
+            matcher = policy.get("matcher_type_override") or "automatic by data type"
+            threshold = policy.get("threshold")
+            return f"{matcher}; minimum confidence {f'{threshold}%' if threshold is not None else 'automatic'}"
+
+        row = 4
+        for number, rule in enumerate(self.data.get("sheet_rules") or [], start=1):
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(metric_columns))
+            source_sheets = ", ".join(rule.get("source_sheets") or []) or "Default sheet"
+            destination_sheets = ", ".join(rule.get("destination_sheets") or []) or "Default sheet"
+            header = ws.cell(row=row, column=1, value=f"RULE {number} — {source_sheets} ↔ {destination_sheets}")
+            header.font = Font(name=self.font_family, size=11, bold=True, color=self.colors["header_fg"])
+            header.fill = navy_fill
+            row += 1
+
+            failed = rule.get("status") != "completed"
+            details = [
+                ("Report label", rule.get("report_label") or ""),
+                ("Source", describe_sources(rule.get("source_file"), rule.get("source_sheets") or [])),
+                ("Destination", describe_sources(rule.get("destination_file"), rule.get("destination_sheets") or [])),
+                (
+                    "Primary key",
+                    f"{' + '.join(rule.get('primary_key_source') or [])} → {' + '.join(rule.get('primary_key_destination') or [])}",
+                ),
+                (
+                    "Secondary conditions",
+                    "; ".join(describe_condition(condition) for condition in rule.get("secondary_conditions") or []) or "None",
+                ),
+                ("Primary-key similarity", describe_similarity(rule.get("similarity_policy") or {})),
+                (
+                    "Date-only override",
+                    "ENABLED — date-only keys can match unrelated same-day transactions"
+                    if rule.get("date_only_override")
+                    else "No",
+                ),
+                ("Mapped fields", rule.get("mapping_count", 0)),
+                ("Status", f"FAILED — {rule.get('error')}" if failed else "Completed"),
+            ]
+            for label, value in details:
+                label_cell = ws.cell(row=row, column=1, value=label)
+                label_cell.font = Font(name=self.font_family, size=9, bold=True)
+                label_cell.fill = accent_fill
+                label_cell.border = border
+                ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=len(metric_columns))
+                value_cell = ws.cell(row=row, column=2, value=value)
+                warn = (label == "Status" and failed) or (label == "Date-only override" and rule.get("date_only_override"))
+                value_cell.font = Font(
+                    name=self.font_family, size=9, bold=bool(warn),
+                    color=self.colors["exception"] if warn else self.colors["text_dark"],
+                )
+                value_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                value_cell.border = border
+                row += 1
+
+            if not failed:
+                summary = rule.get("summary") or {}
+                for col_idx, (label, key) in enumerate(metric_columns, start=1):
+                    head = ws.cell(row=row, column=col_idx, value=label)
+                    head.font = Font(name=self.font_family, size=9, bold=True, color=self.colors["header_fg"])
+                    head.fill = PatternFill("solid", fgColor=self.colors["accent"])
+                    head.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    head.border = border
+                    value = ws.cell(row=row + 1, column=col_idx, value=summary.get(key, 0))
+                    value.font = Font(name=self.font_family, size=10)
+                    value.alignment = Alignment(horizontal="center", vertical="center")
+                    value.border = border
+                row += 2
+            row += 1
+
+        ws.column_dimensions["A"].width = 24.0
+        for col_idx in range(2, len(metric_columns) + 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = 16.0
+
+    # ═══════════════════════════════════════════════════════════════════════
     # SHEET 7: 07 Control Checks
     # ═══════════════════════════════════════════════════════════════════════
     def _generate_controls(self, wb: openpyxl.Workbook, sheet_missing_1: str, sheet_missing_2: str) -> None:
@@ -1103,6 +1236,18 @@ class UniversalReporter:
             "• An 'Exception record' has 1 or more field-level mismatches — see tab '02 Exceptions' for detail.",
             f"• Source files: {file1_name} vs {file2_name}.",
         ]
+        override_rules = [
+            rule.get("report_label") or rule.get("sheet_rule_id", "")
+            for rule in self.data.get("sheet_rules") or []
+            if rule.get("date_only_override")
+        ]
+        if override_rules:
+            methodology.append(
+                "• WARNING: date-only matching override explicitly enabled for "
+                f"{', '.join(override_rules)}; same-day transactions may be ambiguous."
+            )
+        if len(self.data.get("sheet_rules") or []) > 1:
+            methodology.append("• Multiple sheet rules: per-rule keys and counts are listed in tab '08 Sheet Rules'.")
         for i, m_text in enumerate(methodology, start=12):
             ws.merge_cells(start_row=i, start_column=1, end_row=i, end_column=4)
             c = ws.cell(row=i, column=1, value=m_text)

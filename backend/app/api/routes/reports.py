@@ -1,11 +1,12 @@
 import json
+import zipfile
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session_id
@@ -35,7 +36,35 @@ _PREVIEW_SECTIONS = {
     "only_file_1": "missing_in_file_2",
     "only_file_2": "missing_in_file_1",
     "review": "identity_resolution",
+    "exception_matches": "identity_resolution",
+    "ambiguous_matches": "identity_resolution",
+    "not_found": "identity_resolution",
 }
+
+# Identity-scoped categories select audit rows by their recorded classification.
+_PREVIEW_CLASSIFICATIONS = {
+    "exception_matches": {"EXCEPTION_MATCH"},
+    "ambiguous_matches": {"AMBIGUOUS_MATCH"},
+    "not_found": {"NOT_FOUND"},
+}
+
+# Scope identifiers are for filtering, not for display.
+_HIDDEN_PREVIEW_COLUMNS = {"File Pair ID", "Sheet Rule ID"}
+
+
+def _scoped_summary(summary: dict[str, Any], file_pair_id: str | None, sheet_rule_id: str | None) -> dict[str, Any]:
+    """Return one file pair's or sheet rule's own counts from the job manifest."""
+    if sheet_rule_id:
+        rule = next((item for item in summary.get("sheet_rules", []) if item.get("sheet_rule_id") == sheet_rule_id), None)
+        if rule is None or (file_pair_id and rule.get("file_pair_id") != file_pair_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sheet rule not found in this job")
+        return {**rule.get("summary", {}), "scope": {"file_pair_id": rule.get("file_pair_id"), "sheet_rule_id": sheet_rule_id}, "status": rule.get("status"), "error": rule.get("error")}
+    if file_pair_id:
+        pair = next((item for item in summary.get("file_pairs", []) if item.get("file_pair_id") == file_pair_id), None)
+        if pair is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job")
+        return {**pair.get("summary", {}), "scope": {"file_pair_id": file_pair_id}, "status": pair.get("status")}
+    return summary
 
 
 def _report_media_type(path: Path) -> str:
@@ -86,15 +115,36 @@ def download_report(
     return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
 
 
-@router.get("/job/{job_id}/download")
+@router.get("/job/{job_id}/download", response_model=None)
 def download_job_report(
     job_id: str,
+    file_pair_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
-) -> FileResponse:
+) -> FileResponse | Response:
     _, report = _job_report(db, job_id, session_id)
     path = get_storage().resolve_path(report.storage_path)
-    return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
+    if not file_pair_id or path.suffix.lower() != ".zip":
+        # A single-pair job's only workbook is the whole report.
+        return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
+
+    try:
+        manifest = json.loads(report.summary_json or "{}").get("file_pairs", [])
+    except json.JSONDecodeError:
+        manifest = []
+    pair = next((item for item in manifest if item.get("file_pair_id") == file_pair_id), None)
+    member = pair.get("report_filename") if pair else None
+    if not member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No report was generated for this file pair")
+    with zipfile.ZipFile(path) as archive:
+        if member not in archive.namelist():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair report not found in archive")
+        content = archive.read(member)
+    return Response(
+        content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{member}"'},
+    )
 
 
 @router.post("/job/{job_id}/download_custom")
@@ -149,12 +199,19 @@ def download_custom_report(
 
 
 @router.get("/job/{job_id}/summary")
-def job_report_summary(job_id: str, db: Session = Depends(get_db), session_id: str = Depends(get_session_id)) -> dict[str, Any]:
+def job_report_summary(
+    job_id: str,
+    file_pair_id: str | None = Query(default=None),
+    sheet_rule_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> dict[str, Any]:
     _, report = _job_report(db, job_id, session_id)
     try:
-        return json.loads(report.summary_json or "{}")
+        summary = json.loads(report.summary_json or "{}")
     except json.JSONDecodeError:
-        return {}
+        summary = {}
+    return _scoped_summary(summary, file_pair_id, sheet_rule_id)
 
 
 @router.get("/job/{job_id}/preview")
@@ -163,6 +220,8 @@ def job_report_preview(
     category: str = Query(default="discrepancies"),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=25, ge=1, le=25),
+    file_pair_id: str | None = Query(default=None),
+    sheet_rule_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
 ) -> dict[str, Any]:
@@ -173,16 +232,29 @@ def job_report_preview(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown preview category")
     data = _report_preview_data(path)
     records = data.get(section, [])
+    if file_pair_id:
+        records = [record for record in records if record.get("File Pair ID") == file_pair_id]
+    if sheet_rule_id:
+        records = [record for record in records if record.get("Sheet Rule ID") == sheet_rule_id]
     if category == "review":
         records = [record for record in records if record.get("IDENTITY CLASSIFICATION") != "EXACT_MATCH"]
-    columns = list(dict.fromkeys(str(column) for record in records for column in record))
+    elif category in _PREVIEW_CLASSIFICATIONS:
+        records = [record for record in records if record.get("IDENTITY CLASSIFICATION") in _PREVIEW_CLASSIFICATIONS[category]]
+    columns = [
+        column
+        for column in dict.fromkeys(str(column) for record in records for column in record)
+        if column not in _HIDDEN_PREVIEW_COLUMNS
+    ]
     total_rows = len(records)
     page = records[offset:offset + limit]
     return {
         "category": category,
         "sheet_name": section,
         "columns": columns,
-        "rows": [{str(column): _json_value(value) for column, value in record.items()} for record in page],
+        "rows": [
+            {str(column): _json_value(value) for column, value in record.items() if column not in _HIDDEN_PREVIEW_COLUMNS}
+            for record in page
+        ],
         "total_rows": total_rows,
         "offset": offset,
         "limit": limit,
