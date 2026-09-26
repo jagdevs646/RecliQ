@@ -148,6 +148,10 @@ tbody tr:hover { background: #f2f9f7; }
 .gst-report-sheets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 
 .mapping-workspace { display: grid; gap: 18px; }
+.uploaded-workbook-list { display: grid; gap: 8px; max-width: 900px; margin: 12px auto 0; }
+.uploaded-workbook-list h3 { margin: 0; color: #52646b; font-size: 13px; }
+.uploaded-workbook-list > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 9px 11px; border: 1px solid #d8e5e4; border-radius: 7px; background: #fff; color: #384a50; font-size: 13px; font-weight: 700; }
+.uploaded-workbook-list small { color: #718187; font-weight: 600; }
 .mapping-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .icon-actions { display: inline-flex; gap: 6px; margin-left: auto; }
 .mapping-boards { display: grid; grid-template-columns: minmax(0, 1fr) 175px minmax(0, 1fr); gap: 16px; align-items: stretch; }
@@ -321,4 +325,3 @@ dd { overflow-wrap: anywhere; margin: 0; color: #25373d; font-size: 13px; font-w
 .pairing-summary { padding-top: 4px; }
 .pairing-count-badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border: 1px solid #c3deda; border-radius: 999px; background: #ebf7f5; color: #087d72; font-size: 12px; font-weight: 750; }
 .pairing-auto-notice { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border: 1px solid #c3deda; border-radius: 8px; background: #ebf7f5; color: #1e5c55; font-size: 13px; font-weight: 600; }
-

@@ -16,7 +16,7 @@ export function DashboardPage({ onNavigateUpload, onOpenJob }: Props) {
     api.listJobs().then(setJobs).catch(() => setJobs([]));
   }, []);
 
-  const completed = jobs.filter((job) => job.status === "completed").length;
+  const completed = jobs.filter((job) => job.status === "completed" || job.status === "completed_with_errors").length;
   const processing = jobs.filter((job) => job.status === "processing" || job.status === "queued").length;
   const failed = jobs.filter((job) => job.status === "failed").length;
 
@@ -67,4 +67,3 @@ export function DashboardPage({ onNavigateUpload, onOpenJob }: Props) {
     </section>
   );
 }
-

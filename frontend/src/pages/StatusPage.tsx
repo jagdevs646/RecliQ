@@ -19,6 +19,17 @@ const stages = [
   { label: "Completed", threshold: 100 }
 ];
 
+function jobErrorMessage(job: Job) {
+  if (!job.error_message || job.status !== "completed_with_errors") return job.error_message;
+  try {
+    const errors = JSON.parse(job.error_message) as Array<{ report_label?: string; error?: string }>;
+    if (!Array.isArray(errors) || !errors.length) return job.error_message;
+    return errors.map((error) => `${error.report_label || "Sheet rule"}: ${error.error || "failed"}`).join("; ");
+  } catch {
+    return job.error_message;
+  }
+}
+
 export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -56,7 +67,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
   }
 
   useEffect(() => {
-    if (!job || job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+    if (!job || ["completed", "completed_with_errors", "failed", "cancelled"].includes(job.status)) {
       return;
     }
     const timer = window.setInterval(() => refresh(), 1000);
@@ -64,7 +75,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
   }, [job?.id, job?.status]);
 
   useEffect(() => {
-    if (job?.status === "completed" && redirectedJob.current !== job.id) {
+    if (job && ["completed", "completed_with_errors"].includes(job.status) && redirectedJob.current !== job.id) {
       redirectedJob.current = job.id;
       const timer = window.setTimeout(onViewResults, 700);
       return () => window.clearTimeout(timer);
@@ -90,7 +101,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
         <div>
           <span className="eyebrow">Live reconciliation</span>
           <h1>
-            {job?.status === "completed"
+            {["completed", "completed_with_errors"].includes(job?.status ?? "")
               ? "Your report is ready"
               : job?.status === "cancelled"
               ? "Reconciliation cancelled"
@@ -139,7 +150,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
             <ProgressBar value={job.status === "cancelled" ? 0 : job.progress} />
             <ol className="process-timeline">{stages.map((stage) => {
               const failed = (job.status === "failed" || job.status === "cancelled") && stage.threshold >= job.progress;
-              const complete = job.status === "completed" || (job.status !== "cancelled" && job.progress >= stage.threshold);
+              const complete = ["completed", "completed_with_errors"].includes(job.status) || (job.status !== "cancelled" && job.progress >= stage.threshold);
               const active = !failed && !complete && job.progress >= Math.max(0, stage.threshold - 35);
               return (
                 <li key={stage.label} className={complete ? "is-complete" : failed ? "is-failed" : active ? "is-active" : ""}>
@@ -160,7 +171,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
               <div><dt>Orientation</dt><dd>{job.orientation === "horizontal" ? "Row headers" : "Column headers"}</dd></div>
               <div><dt>Job ID</dt><dd>{job.id.slice(0, 8)}</dd></div>
             </dl>
-            {job.status === "completed" && (
+            {["completed", "completed_with_errors"].includes(job.status) && (
               <>
                 <button type="button" className="primary full-width" onClick={onViewResults}>View results</button>
                 <button type="button" className="text-command centered" onClick={download}><Download size={16} />Download Excel report</button>
@@ -180,7 +191,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
             )}
           </aside>
         </div>
-        {job.error_message && <p className="error-text">{job.error_message}</p>}
+        {job.error_message && <p className="error-text">{jobErrorMessage(job)}</p>}
       </>)}
       {message && <p className="info-text" style={{ marginTop: "1rem" }}>{message}</p>}
     </section>

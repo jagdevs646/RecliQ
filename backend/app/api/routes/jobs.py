@@ -93,7 +93,7 @@ async def job_progress_websocket(websocket: WebSocket, job_id: str):
                             "input_file_2_name": job.input_file_2_name,
                             "report_id": job.report_id,
                         })
-                    if job.status in {"completed", "failed", "cancelled"}:
+                    if job.status in {"completed", "completed_with_errors", "failed", "cancelled"}:
                         break
             finally:
                 db.close()

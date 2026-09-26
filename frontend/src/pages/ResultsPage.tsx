@@ -24,7 +24,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
 
   useEffect(() => {
     setPreview(null); setMessage("");
-    if (!job?.id || job.status !== "completed") return;
+    if (!job?.id || !["completed", "completed_with_errors"].includes(job.status)) return;
     api.getReportSummary(job.id).then(setSummary).catch((error: Error) => setMessage(error.message));
   }, [job?.id, job?.status]);
 
@@ -56,7 +56,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
 
   async function download() { if (!job) return; try { await api.downloadJobReport(job.id); } catch (error) { setMessage(error instanceof Error ? error.message : "Download failed"); } }
 
-  if (!job || job.status !== "completed") return <section className="page"><div className="empty-state"><h2>No completed report selected</h2><p>Complete a reconciliation to see its results dashboard.</p><button type="button" className="primary" onClick={onNewReconciliation}>Start reconciliation</button></div></section>;
+  if (!job || !["completed", "completed_with_errors"].includes(job.status)) return <section className="page"><div className="empty-state"><h2>No completed report selected</h2><p>Complete a reconciliation to see its results dashboard.</p><button type="button" className="primary" onClick={onNewReconciliation}>Start reconciliation</button></div></section>;
 
   if (viewStage === "customize") {
     return (
@@ -125,6 +125,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
     </div></div></div>
     <section><div className="section-heading"><div><h2>Exception categories</h2><p>Open any category to inspect a paginated preview of up to 25 report rows at a time.</p></div></div><div className="result-card-grid">{cards.map(({ category: cardCategory, title, label, count, icon: Icon, tone }) => <article className={`result-card tone-${tone}`} key={cardCategory}><Icon size={20} /><span>{title}</span><strong>{count.toLocaleString()}</strong><p>{label}</p><button type="button" className="text-command" onClick={() => openPreview(cardCategory)}><Eye size={16} />View details</button></article>)}</div></section>
     {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{preview.sheet_name}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div><div className="table-scroll"><table><thead><tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length)}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column}>{row[column] ?? "—"}</td>)}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
+    {job.status === "completed_with_errors" && <p className="error-text">Some sheet rules failed. Successful sheet rules are included below; inspect the run details for the recorded errors.</p>}
     {message && <p className="error-text">{message}</p>}
   </section>;
 }

@@ -1,5 +1,5 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Play, RefreshCw, Sparkles, Loader2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Play, RefreshCw, Sparkles, Loader2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { FileDropzone } from "../components/FileDropzone";
 import { MappingBuilder } from "../components/MappingBuilder";
 import { ReportColumnPicker } from "../components/ReportColumnPicker";
@@ -7,9 +7,11 @@ import { WorkflowSteps } from "../components/WorkflowSteps";
 import { SheetSelector } from "../components/SheetSelector";
 import { SheetPairingStep } from "../components/SheetPairingStep";
 import type { SheetPairing } from "../components/SheetPairingStep";
+import { FilePairingStep } from "../components/FilePairingStep";
+import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { SmartMappingReview } from "../components/SmartMappingReview";
 import { api } from "../services/api";
-import type { GstConfiguration, Job, RuleMapping, UploadedFile, SheetMetadata, AnalysisResponse, SheetRuleDraft, SecondaryMatchCondition } from "../types";
+import type { GstConfiguration, Job, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
 interface Props {
   onJobCreated: (job: Job) => void;
@@ -31,6 +33,9 @@ export function UploadPage({ onJobCreated }: Props) {
   const [file2, setFile2] = useState<UploadedFile | null>(null);
   const [file1Sheets, setFile1Sheets] = useState<SheetMetadata[]>([]);
   const [file2Sheets, setFile2Sheets] = useState<SheetMetadata[]>([]);
+  const [additionalSourceFiles, setAdditionalSourceFiles] = useState<WorkbookWithSheets[]>([]);
+  const [additionalDestinationFiles, setAdditionalDestinationFiles] = useState<WorkbookWithSheets[]>([]);
+  const [filePairings, setFilePairings] = useState<FilePairing[]>([]);
   const [selectedSheets1, setSelectedSheets1] = useState<string[]>([]);
   const [selectedSheets2, setSelectedSheets2] = useState<string[]>([]);
   const [pairings, setPairings] = useState<SheetPairing[]>([]);
@@ -38,13 +43,6 @@ export function UploadPage({ onJobCreated }: Props) {
   
   const [file1Columns, setFile1Columns] = useState<string[]>([]);
   const [file2Columns, setFile2Columns] = useState<string[]>([]);
-  const [key1, setKey1] = useState("");
-  const [key2, setKey2] = useState("");
-  const [rules, setRules] = useState<RuleMapping[]>([]);
-  
-  const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
-  const [include1, setInclude1] = useState<string[]>([]);
-  const [include2, setInclude2] = useState<string[]>([]);
   const [gstConfig, setGstConfig] = useState<GstConfiguration | null>(null);
   const [gstConfigError, setGstConfigError] = useState("");
   const [gstTextThreshold, setGstTextThreshold] = useState(85);
@@ -53,16 +51,17 @@ export function UploadPage({ onJobCreated }: Props) {
   const [uploading, setUploading] = useState<1 | 2 | null>(null);
   const [uploadProgress, setUploadProgress] = useState({ 1: 0, 2: 0 });
 
-  const hasBothFiles = Boolean(file1 && file2);
+  const sourceWorkbooks = useMemo<WorkbookWithSheets[]>(() => file1 ? [{ file: file1, sheets: file1Sheets }, ...additionalSourceFiles] : additionalSourceFiles, [file1, file1Sheets, additionalSourceFiles]);
+  const destinationWorkbooks = useMemo<WorkbookWithSheets[]>(() => file2 ? [{ file: file2, sheets: file2Sheets }, ...additionalDestinationFiles] : additionalDestinationFiles, [file2, file2Sheets, additionalDestinationFiles]);
+  const hasBothFiles = sourceWorkbooks.length > 0 && destinationWorkbooks.length > 0;
   const completedThrough = step === 1 ? 0 : step - 1;
-  const estimatedFields = useMemo(() => `${file1Columns.length + file2Columns.length} fields available`, [file1Columns.length, file2Columns.length]);
   const missingGstFile1 = useMemo(() => missingGstColumns(file1Columns, gstConfig), [file1Columns, gstConfig]);
   const missingGstFile2 = useMemo(() => missingGstColumns(file2Columns, gstConfig), [file2Columns, gstConfig]);
   const gstReady = Boolean(gstConfig && hasBothFiles && !missingGstFile1.length && !missingGstFile2.length);
 
   const file1Name = file1?.original_filename || "File 1";
   const file2Name = file2?.original_filename || "File 2";
-  const pairId = (pairing: SheetPairing) => `${pairing.sheet1.id}::${pairing.sheet2.id}`;
+  const pairId = (pairing: SheetPairing) => `${pairing.sourceFileId ?? file1?.id ?? "source"}::${pairing.sheet1.id}::${pairing.destinationFileId ?? file2?.id ?? "destination"}::${pairing.sheet2.id}`;
   const selectedFile1Sheets = file1Sheets.filter((sheet) => selectedSheets1.includes(sheet.id));
   const selectedFile2Sheets = file2Sheets.filter((sheet) => selectedSheets2.includes(sheet.id));
   const genericConfigurationsReady = pairings.length > 0 && pairings.every((pairing) => {
@@ -73,7 +72,7 @@ export function UploadPage({ onJobCreated }: Props) {
   const canContinue = step === 1
     ? hasBothFiles && (file1Sheets.length === 0 || selectedSheets1.length > 0) && (file2Sheets.length === 0 || selectedSheets2.length > 0)
     : step === 2
-      ? pairings.length > 0 || (file1Sheets.length <= 1 && file2Sheets.length <= 1)
+      ? pairings.length > 0
       : jobType === "gst"
         ? gstReady
         : step === 3
@@ -91,17 +90,20 @@ export function UploadPage({ onJobCreated }: Props) {
   }
 
   async function configurePairings(nextPairings: SheetPairing[]) {
-    if (!file1 || !file2 || jobType !== "generic") return;
+    if (jobType !== "generic") return;
     setBusy(true);
     try {
       const missing = nextPairings.filter((pairing) => !pairConfigs[pairId(pairing)]);
       const configured = await Promise.all(missing.map(async (pairing) => {
+        const sourceWorkbook = workbookFor("source", pairing.sourceFileId ?? file1?.id ?? "");
+        const destinationWorkbook = workbookFor("destination", pairing.destinationFileId ?? file2?.id ?? "");
+        if (!sourceWorkbook || !destinationWorkbook) throw new Error("A sheet pairing refers to an unavailable workbook.");
         const [sourceColumns, destinationColumns, pairAnalysis] = await Promise.all([
-          api.getColumns(file1.id, orientation, pairing.sheet1.id),
-          api.getColumns(file2.id, orientation, pairing.sheet2.id),
+          api.getColumns(sourceWorkbook.file.id, orientation, pairing.sheet1.id),
+          api.getColumns(destinationWorkbook.file.id, orientation, pairing.sheet2.id),
           api.analyzeFiles({
-            source_files_1: [{ file_id: file1.id, sheet_id: pairing.sheet1.id }],
-            source_files_2: [{ file_id: file2.id, sheet_id: pairing.sheet2.id }],
+            source_files_1: [{ file_id: sourceWorkbook.file.id, sheet_id: pairing.sheet1.id }],
+            source_files_2: [{ file_id: destinationWorkbook.file.id, sheet_id: pairing.sheet2.id }],
             orientation,
           }),
         ]);
@@ -143,6 +145,31 @@ export function UploadPage({ onJobCreated }: Props) {
     else refreshColumns(nextPairings).catch(() => undefined);
   }
 
+  function handleWorkbookPairingsChange(nextFilePairings: FilePairing[]) {
+    setFilePairings(nextFilePairings);
+    const permitted = new Set(nextFilePairings.map((pairing) => `${pairing.sourceFileId}::${pairing.destinationFileId}`));
+    const retained = pairings.filter((pairing) => permitted.has(`${pairing.sourceFileId}::${pairing.destinationFileId}`));
+    setPairings(retained);
+    setPairConfigs((current) => Object.fromEntries(Object.entries(current).filter(([id]) => retained.some((pairing) => pairId(pairing) === id))));
+  }
+
+  function handleWorkbookSheetPairings(workbookPairing: FilePairing, nextSheets: SheetPairing[]) {
+    const enriched = nextSheets.map((pairing) => ({ ...pairing, sourceFileId: workbookPairing.sourceFileId, destinationFileId: workbookPairing.destinationFileId }));
+    const retained = pairings.filter((pairing) => pairing.sourceFileId !== workbookPairing.sourceFileId || pairing.destinationFileId !== workbookPairing.destinationFileId);
+    handlePairingsChange([...retained, ...enriched]);
+  }
+
+  function removeAdditionalWorkbook(side: "source" | "destination", fileId: string) {
+    if (side === "source") {
+      setAdditionalSourceFiles((current) => current.filter((workbook) => workbook.file.id !== fileId));
+    } else {
+      setAdditionalDestinationFiles((current) => current.filter((workbook) => workbook.file.id !== fileId));
+    }
+    handleWorkbookPairingsChange(filePairings.filter((pairing) => (
+      side === "source" ? pairing.sourceFileId !== fileId : pairing.destinationFileId !== fileId
+    )));
+  }
+
   async function upload(which: 1 | 2, file: File) {
     setUploading(which);
     setUploadProgress((current) => ({ ...current, [which]: 0 }));
@@ -168,10 +195,8 @@ export function UploadPage({ onJobCreated }: Props) {
         const columns = await api.getColumns(stored.id, orientation, sheetIds[0]);
         if (which === 1) {
           setFile1Columns(columns);
-          setKey1(columns[0] ?? "");
         } else {
           setFile2Columns(columns);
-          setKey2(columns[0] ?? "");
         }
       }
     } catch (error) {
@@ -179,6 +204,31 @@ export function UploadPage({ onJobCreated }: Props) {
     } finally {
       setUploading(null);
     }
+  }
+
+  async function uploadAdditional(side: "source" | "destination", file: File) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const stored = await api.uploadFile(file);
+      const metadata = await api.getFileMetadata(stored.id);
+      const workbook = { file: stored, sheets: metadata.sheets };
+      if (side === "source") setAdditionalSourceFiles((current) => [...current, workbook]);
+      else setAdditionalDestinationFiles((current) => [...current, workbook]);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Upload failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function workbookFor(side: "source" | "destination", fileId: string): WorkbookWithSheets | undefined {
+    return (side === "source" ? sourceWorkbooks : destinationWorkbooks).find((workbook) => workbook.file.id === fileId);
+  }
+
+  function workbookNameForPair(side: "source" | "destination", pairing: SheetPairing) {
+    const fileId = side === "source" ? pairing.sourceFileId : pairing.destinationFileId;
+    return workbookFor(side, fileId ?? "")?.file.original_filename ?? (side === "source" ? "File 1" : "File 2");
   }
 
   async function refreshColumns(activePairings?: SheetPairing[]) {
@@ -193,36 +243,11 @@ export function UploadPage({ onJobCreated }: Props) {
       if (file1) {
         const columns = await api.getColumns(file1.id, orientation, sheet1Id);
         setFile1Columns(columns);
-        setKey1((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
       if (file2) {
         const columns = await api.getColumns(file2.id, orientation, sheet2Id);
         setFile2Columns(columns);
-        setKey2((current) => columns.includes(current) ? current : columns[0] ?? "");
       }
-
-      if (jobType === "generic" && file1 && file2) {
-        const source_files_1 = sheet1Id ? [{ file_id: file1.id, sheet_id: sheet1Id }] : [{ file_id: file1.id }];
-        const source_files_2 = sheet2Id ? [{ file_id: file2.id, sheet_id: sheet2Id }] : [{ file_id: file2.id }];
-        const analysisData = await api.analyzeFiles({ source_files_1, source_files_2, orientation });
-        setAnalysis(analysisData);
-
-        if (analysisData.recommended_keys_1.length > 0) setKey1(analysisData.recommended_keys_1[0]);
-        if (analysisData.recommended_keys_2.length > 0) setKey2(analysisData.recommended_keys_2[0]);
-
-        const suggestedRules = analysisData.recommended_mappings
-          .filter(m => m.target && (m.confidence === "High" || m.confidence === "Medium"))
-          .map(m => ({
-            file_1_fields: [m.source],
-            file_2_fields: [m.target as string]
-          }));
-        setRules(suggestedRules);
-      } else {
-        setRules([]);
-      }
-
-      setInclude1([]);
-      setInclude2([]);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not analyze the files");
     } finally {
@@ -244,8 +269,18 @@ export function UploadPage({ onJobCreated }: Props) {
   }, []);
 
   async function start() {
-    if (!file1 || !file2) {
+    if (!hasBothFiles) {
       setMessage("Upload both Excel files first.");
+      return;
+    }
+    const primarySource = file1 ?? sourceWorkbooks[0]?.file;
+    const primaryDestination = file2 ?? destinationWorkbooks[0]?.file;
+    if (!primarySource || !primaryDestination) {
+      setMessage("Upload a source and destination workbook first.");
+      return;
+    }
+    if (jobType === "gst" && (!file1 || !file2)) {
+      setMessage("GST reconciliation uses the first source and destination workbook.");
       return;
     }
     if (jobType === "gst" && !gstReady) {
@@ -257,30 +292,39 @@ export function UploadPage({ onJobCreated }: Props) {
     try {
       const s1 = selectedSheets1.length > 0 ? selectedSheets1 : (file1Sheets.length > 0 ? [file1Sheets[0].id] : []);
       const s2 = selectedSheets2.length > 0 ? selectedSheets2 : (file2Sheets.length > 0 ? [file2Sheets[0].id] : []);
-      const source_files_1 = s1.length > 0 ? s1.map(id => ({ file_id: file1.id, sheet_id: id })) : [{ file_id: file1.id }];
-      const source_files_2 = s2.length > 0 ? s2.map(id => ({ file_id: file2.id, sheet_id: id })) : [{ file_id: file2.id }];
+      const source_files_1 = s1.length > 0 ? s1.map(id => ({ file_id: primarySource.id, sheet_id: id })) : [{ file_id: primarySource.id }];
+      const source_files_2 = s2.length > 0 ? s2.map(id => ({ file_id: primaryDestination.id, sheet_id: id })) : [{ file_id: primaryDestination.id }];
 
       const job = jobType === "gst"
         ? await api.startGst({
-            file_1_id: file1.id,
-            file_2_id: file2.id,
+            file_1_id: primarySource.id,
+            file_2_id: primaryDestination.id,
             source_files_1,
             source_files_2,
             orientation,
             text_threshold: gstTextThreshold
           })
         : await api.startGeneric({
-            file_1_id: file1.id,
-            file_2_id: file2.id,
+            file_1_id: primarySource.id,
+            file_2_id: primaryDestination.id,
             orientation,
-            file_pairs: pairings.map((pairing, index) => {
-              const config = pairConfigs[pairId(pairing)];
-              return {
-                file_pair_id: `pair-${index + 1}-${pairId(pairing)}`,
-                source_files: [{ file_id: file1.id, sheet_id: pairing.sheet1.id }],
-                destination_files: [{ file_id: file2.id, sheet_id: pairing.sheet2.id }],
-                sheet_rules: [{
-                  sheet_rule_id: `rule-${index + 1}-${pairId(pairing)}`,
+            file_pairs: Array.from(pairings.reduce((groups, pairing) => {
+              const sourceFileId = pairing.sourceFileId ?? file1?.id;
+              const destinationFileId = pairing.destinationFileId ?? file2?.id;
+              if (!sourceFileId || !destinationFileId) return groups;
+              const groupId = `${sourceFileId}::${destinationFileId}`;
+              const group = groups.get(groupId) ?? { sourceFileId, destinationFileId, pairings: [] as SheetPairing[] };
+              group.pairings.push(pairing);
+              groups.set(groupId, group);
+              return groups;
+            }, new Map<string, { sourceFileId: string; destinationFileId: string; pairings: SheetPairing[] }>()).values()).map((group, index) => ({
+              file_pair_id: `pair-${index + 1}-${group.sourceFileId}-${group.destinationFileId}`,
+              source_files: [{ file_id: group.sourceFileId }],
+              destination_files: [{ file_id: group.destinationFileId }],
+              sheet_rules: group.pairings.map((pairing, ruleIndex) => {
+                const config = pairConfigs[pairId(pairing)];
+                return {
+                  sheet_rule_id: `rule-${index + 1}-${ruleIndex + 1}-${pairId(pairing)}`,
                   source_sheets: [pairing.sheet1.id],
                   destination_sheets: [pairing.sheet2.id],
                   matching_strategy: {
@@ -294,9 +338,9 @@ export function UploadPage({ onJobCreated }: Props) {
                   include_columns_file_1: config.includeFile1,
                   include_columns_file_2: config.includeFile2,
                   report_label: `${pairing.sheet1.name} -> ${pairing.sheet2.name}`,
-                }],
-              };
-            }),
+                };
+              }),
+            })),
           });
       onJobCreated(job);
     } catch (error) {
@@ -331,17 +375,12 @@ export function UploadPage({ onJobCreated }: Props) {
             <SheetSelector sheets={file2Sheets} selectedSheets={selectedSheets2} onChange={setSelectedSheets2} fileName={file2Name} />
           </div>
         </div>
+        {jobType === "generic" && <div className="upload-grid mt-4"><AdditionalWorkbookUpload label="Add another source workbook" onFile={(file) => uploadAdditional("source", file)} disabled={busy} /><AdditionalWorkbookUpload label="Add another destination workbook" onFile={(file) => uploadAdditional("destination", file)} disabled={busy} /></div>}
+        {(additionalSourceFiles.length > 0 || additionalDestinationFiles.length > 0) && <><div className="info-callout"><Sparkles size={18} /><span>{sourceWorkbooks.length} source and {destinationWorkbooks.length} destination workbooks are ready for explicit pairing.</span></div><WorkbookList label="Additional source workbooks" workbooks={additionalSourceFiles} onRemove={(fileId) => removeAdditionalWorkbook("source", fileId)} /><WorkbookList label="Additional destination workbooks" workbooks={additionalDestinationFiles} onRemove={(fileId) => removeAdditionalWorkbook("destination", fileId)} /></>}
       </div>}
       {step === 2 && <div className="step-content">
-        <div className="section-heading"><div><h2>Pair your sheets</h2><p>Map each sheet from {file1Name} to its counterpart in {file2Name}. Each pair is reconciled independently.</p></div></div>
-        <SheetPairingStep
-          file1Sheets={selectedFile1Sheets}
-          file2Sheets={selectedFile2Sheets}
-          file1Name={file1Name}
-          file2Name={file2Name}
-          pairings={pairings}
-          onChange={handlePairingsChange}
-        />
+        <div className="section-heading"><div><h2>Pair your sheets</h2><p>Map each source sheet to its destination counterpart. Each pair is reconciled independently.</p></div></div>
+        {sourceWorkbooks.length === 1 && destinationWorkbooks.length === 1 ? <SheetPairingStep file1Sheets={selectedFile1Sheets} file2Sheets={selectedFile2Sheets} file1Name={file1Name} file2Name={file2Name} pairings={pairings} onChange={(next) => handleWorkbookSheetPairings({ sourceFileId: sourceWorkbooks[0].file.id, destinationFileId: destinationWorkbooks[0].file.id }, next)} /> : <><FilePairingStep sourceFiles={sourceWorkbooks} destinationFiles={destinationWorkbooks} pairings={filePairings} onChange={handleWorkbookPairingsChange} />{filePairings.map((workbookPairing) => { const source = workbookFor("source", workbookPairing.sourceFileId); const destination = workbookFor("destination", workbookPairing.destinationFileId); if (!source || !destination) return null; const scoped = pairings.filter((pairing) => pairing.sourceFileId === source.file.id && pairing.destinationFileId === destination.file.id); return <section className="mapping-workspace" key={`${source.file.id}-${destination.file.id}`}><h3>{source.file.original_filename} <ArrowRight size={16} /> {destination.file.original_filename}</h3><SheetPairingStep file1Sheets={source.sheets} file2Sheets={destination.sheets} file1Name={source.file.original_filename} file2Name={destination.file.original_filename} pairings={scoped} onChange={(next) => handleWorkbookSheetPairings(workbookPairing, next)} /></section>; })}</>}
       </div>}
       {step === 3 && <div className="step-content">
         {jobType === "generic" ? <>
@@ -353,13 +392,23 @@ export function UploadPage({ onJobCreated }: Props) {
           })}
         </> : <GstMatchingKeyStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} error={gstConfigError} file1Name={file1Name} file2Name={file2Name} />}
       </div>}
-      {step === 4 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <MappingBuilder key={pairId(pairing)} file1Columns={config.file1Columns} file2Columns={config.file2Columns} rules={config.rules} onRulesChange={(nextRules) => updatePairConfig(pairing, (current) => ({ ...current, rules: nextRules }))} primaryFile1={config.primaryKeySource} primaryFile2={config.primaryKeyDestination} file1Name={`${file1Name} - ${pairing.sheet1.name}`} file2Name={`${file2Name} - ${pairing.sheet2.name}`} /> : null; }) : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
-      {step === 5 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <ReportColumnPicker key={pairId(pairing)} file1Columns={config.file1Columns.filter((column) => !config.primaryKeySource.includes(column))} file2Columns={config.file2Columns.filter((column) => !config.primaryKeyDestination.includes(column))} selectedFile1={config.includeFile1} selectedFile2={config.includeFile2} onChangeFile1={(includeFile1) => updatePairConfig(pairing, (current) => ({ ...current, includeFile1 }))} onChangeFile2={(includeFile2) => updatePairConfig(pairing, (current) => ({ ...current, includeFile2 }))} file1Name={`${file1Name} - ${pairing.sheet1.name}`} file2Name={`${file2Name} - ${pairing.sheet2.name}`} /> : null; }) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}
+      {step === 4 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <MappingBuilder key={pairId(pairing)} file1Columns={config.file1Columns} file2Columns={config.file2Columns} rules={config.rules} onRulesChange={(nextRules) => updatePairConfig(pairing, (current) => ({ ...current, rules: nextRules }))} primaryFile1={config.primaryKeySource} primaryFile2={config.primaryKeyDestination} file1Name={`${workbookNameForPair("source", pairing)} - ${pairing.sheet1.name}`} file2Name={`${workbookNameForPair("destination", pairing)} - ${pairing.sheet2.name}`} /> : null; }) : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
+      {step === 5 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return config ? <ReportColumnPicker key={pairId(pairing)} file1Columns={config.file1Columns.filter((column) => !config.primaryKeySource.includes(column))} file2Columns={config.file2Columns.filter((column) => !config.primaryKeyDestination.includes(column))} selectedFile1={config.includeFile1} selectedFile2={config.includeFile2} onChangeFile1={(includeFile1) => updatePairConfig(pairing, (current) => ({ ...current, includeFile1 }))} onChangeFile2={(includeFile2) => updatePairConfig(pairing, (current) => ({ ...current, includeFile2 }))} file1Name={`${workbookNameForPair("source", pairing)} - ${pairing.sheet1.name}`} file2Name={`${workbookNameForPair("destination", pairing)} - ${pairing.sheet2.name}`} /> : null; }) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}
       {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div><div><dt>Sheet pairs</dt><dd>{pairings.length > 0 ? `${pairings.length} pair${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Matching key</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : pairings.map((pairing) => { const config = pairConfigs[pairId(pairing)]; return `${pairing.sheet1.name}: ${config?.primaryKeySource.join(" + ")} -> ${config?.primaryKeyDestination.join(" + ")}`; }).join("; ")}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : pairings.reduce((count, pairing) => count + (pairConfigs[pairId(pairing)]?.rules.length ?? 0), 0)}</dd></div><div><dt>Report columns</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0); }, 0)}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl><button type="button" className="primary run-button" onClick={start} disabled={busy || (jobType === "gst" && !gstReady) || (jobType === "generic" && !genericConfigurationsReady)}><Play size={18} />{busy ? "Starting reconciliation..." : "Run reconciliation"}</button></div>}
     </div>
     {message && <p className="error-text">{message}</p>}
     <div className="workflow-actions"><button type="button" className="secondary" onClick={() => setStep((current) => Math.max(1, current - 1))} disabled={step === 1 || busy}><ArrowLeft size={16} />Back</button>{step < 6 ? <button type="button" className="primary" onClick={() => setStep((current) => current + 1)} disabled={!canContinue || busy}>Continue<ArrowRight size={16} /></button> : null}</div>
   </section>;
+}
+
+function AdditionalWorkbookUpload({ label, onFile, disabled }: { label: string; onFile: (file: File) => void; disabled: boolean }) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return <div className="info-callout"><Sparkles size={18} /><span>{label}</span><button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={disabled}>Choose workbook</button><input ref={inputRef} className="visually-hidden" type="file" accept=".xlsx,.xls,.csv" onChange={(event) => { const file = event.target.files?.item(0); if (file) onFile(file); event.currentTarget.value = ""; }} /></div>;
+}
+
+function WorkbookList({ label, workbooks, onRemove }: { label: string; workbooks: WorkbookWithSheets[]; onRemove: (fileId: string) => void }) {
+  if (!workbooks.length) return null;
+  return <section className="uploaded-workbook-list" aria-label={label}><h3>{label}</h3>{workbooks.map((workbook) => <div key={workbook.file.id}><span>{workbook.file.original_filename}</span><small>{workbook.sheets.length} sheet{workbook.sheets.length === 1 ? "" : "s"}</small><button type="button" className="icon-button" title={`Remove ${workbook.file.original_filename}`} aria-label={`Remove ${workbook.file.original_filename}`} onClick={() => onRemove(workbook.file.id)}><X size={16} /></button></div>)}</section>;
 }
 
 interface GstStepProps {

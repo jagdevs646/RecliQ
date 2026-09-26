@@ -223,8 +223,6 @@ def process_reconciliation_job(job_id: str) -> None:
     db = SessionLocal()
     settings = get_settings()
     storage = get_storage()
-    file_1_path: Path | None = None
-    file_2_path: Path | None = None
     output_path: Path | None = None
     try:
         job = db.get(ReconciliationJob, job_id)
@@ -276,8 +274,6 @@ def process_reconciliation_job(job_id: str) -> None:
         if not file_1 or not file_2:
             raise RuntimeError("One or both source files are missing")
 
-        file_1_path = storage.resolve_path(file_1.storage_path)
-        file_2_path = storage.resolve_path(file_2.storage_path)
         work_dir = Path(settings.local_storage_path) / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
         output_name = "GST_Reconciliation.xlsx" if job.job_type == "gst" else "Reconciliation.xlsx"
@@ -323,95 +319,79 @@ def process_reconciliation_job(job_id: str) -> None:
             "confidence_review": 0, "source_records": 0, "destination_records": 0,
             "matched_records": 0, "fully_matched_records": 0
         }
+        rule_errors: list[dict] = []
 
         # Every canonical sheet rule runs in isolation. Aggregation happens only
         # after this loop, preserving independent configuration and audit data.
         for idx, pair in enumerate(execution_items, start=1):
-            source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
-            source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
-            sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
-            sources_2 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_2]
-            s1 = sources_1[0]
-            s2 = sources_2[0]
-            
-            df1 = _load_and_consolidate(db, job.session_id, sources_1)
-            df2 = _load_and_consolidate(db, job.session_id, sources_2)
-            
-            sheet_name_1 = s1.sheet_id or "default"
-            sheet_name_2 = s2.sheet_id or "default"
             file_pair_id = pair.get("file_pair_id", f"file-pair-{idx}")
             sheet_rule_id = pair.get("sheet_rule_id", f"rule-{idx}")
-            report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
-            pair_label = f"[{report_label}]"
+            report_label = pair.get("report_label") or sheet_rule_id
+            try:
+                source_entries_1 = pair.get("source_files_1") or [pair["source_file_1"]]
+                source_entries_2 = pair.get("source_files_2") or [pair["source_file_2"]]
+                sources_1 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_1]
+                sources_2 = [FileSource(**entry) if isinstance(entry, dict) else entry for entry in source_entries_2]
+                s1, s2 = sources_1[0], sources_2[0]
+                source_record = _file_record(db, s1.file_id, job.session_id)
+                destination_record = _file_record(db, s2.file_id, job.session_id)
+                df1 = _load_and_consolidate(db, job.session_id, sources_1)
+                df2 = _load_and_consolidate(db, job.session_id, sources_2)
+                sheet_name_1, sheet_name_2 = s1.sheet_id or "default", s2.sheet_id or "default"
+                report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
+                pair_label = f"[{report_label}]"
 
-            if job.job_type == "gst":
-                res = run_gst_reconciliation(
-                    file_1_df=df1,
-                    file_2_df=df2,
-                    output_path=output_path,
-                    orientation=payload.get("orientation", job.orientation),
-                    text_threshold=int(payload.get("text_threshold", 85)),
-                    progress_callback=on_progress,
-                    file_1_name=f"{file_1.original_filename} ({sheet_name_1})",
-                    file_2_name=f"{file_2.original_filename} ({sheet_name_2})",
-                    is_cancelled=is_cancelled,
-                    write_report=False,
-                )
-            else:
-                key_f1 = pair.get("key_file_1", payload.get("key_file_1"))
-                key_f2 = pair.get("key_file_2", payload.get("key_file_2"))
-                if isinstance(key_f1, str): key_f1 = [key_f1]
-                if isinstance(key_f2, str): key_f2 = [key_f2]
+                if job.job_type == "gst":
+                    res = run_gst_reconciliation(
+                        file_1_df=df1,
+                        file_2_df=df2,
+                        output_path=output_path,
+                        orientation=payload.get("orientation", job.orientation),
+                        text_threshold=int(payload.get("text_threshold", 85)),
+                        progress_callback=on_progress,
+                        file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
+                        file_2_name=f"{destination_record.original_filename} ({sheet_name_2})",
+                        is_cancelled=is_cancelled,
+                        write_report=False,
+                    )
+                else:
+                    key_f1, key_f2 = pair.get("key_file_1", payload.get("key_file_1")), pair.get("key_file_2", payload.get("key_file_2"))
+                    res = run_generic_reconciliation(
+                        file_1_df=df1, file_2_df=df2, output_path=output_path,
+                        key_file_1=[key_f1] if isinstance(key_f1, str) else key_f1,
+                        key_file_2=[key_f2] if isinstance(key_f2, str) else key_f2,
+                        rules=pair.get("rules", payload.get("rules", [])), orientation=payload.get("orientation", job.orientation),
+                        include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
+                        include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
+                        progress_callback=on_progress, file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
+                        file_2_name=f"{destination_record.original_filename} ({sheet_name_2})", is_cancelled=is_cancelled,
+                        write_report=False, secondary_conditions=pair.get("secondary_conditions", []),
+                        similarity_policy=pair.get("similarity_policy", {}), date_only_override=bool(pair.get("date_only_override", False)),
+                    )
 
-                res = run_generic_reconciliation(
-                    file_1_df=df1,
-                    file_2_df=df2,
-                    output_path=output_path,
-                    key_file_1=key_f1,
-                    key_file_2=key_f2,
-                    rules=pair.get("rules", payload.get("rules", [])),
-                    orientation=payload.get("orientation", job.orientation),
-                    include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
-                    include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
-                    progress_callback=on_progress,
-                    file_1_name=f"{file_1.original_filename if file_1 else 'File 1'} ({sheet_name_1})",
-                    file_2_name=f"{file_2.original_filename if file_2 else 'File 2'} ({sheet_name_2})",
-                    is_cancelled=is_cancelled,
-                    write_report=False,
-                    secondary_conditions=pair.get("secondary_conditions", []),
-                    similarity_policy=pair.get("similarity_policy", {}),
-                    date_only_override=bool(pair.get("date_only_override", False)),
-                )
-            
-            for k, v in res["summary"].items():
-                overall_summary[k] = overall_summary.get(k, 0) + v
-                
-            ud = res["universal_data"]
-            # Tags stay with the isolated result and later let reports/previews
-            # address a precise file pair and sheet rule.
-            for category in _UNIVERSAL_RECORD_CATEGORIES:
-                for record in ud.get(category, []):
-                    record["Sheet Pair"] = pair_label
-                    record["File Pair ID"] = file_pair_id
-                    record["Sheet Rule ID"] = sheet_rule_id
-            
-            rule_results.append(
-                {
-                    "file_pair_id": file_pair_id,
-                    "sheet_rule_id": sheet_rule_id,
-                    "report_label": report_label,
-                    "source_sheets": [source.sheet_id or "default" for source in sources_1],
-                    "destination_sheets": [source.sheet_id or "default" for source in sources_2],
-                    "summary": res["summary"],
-                    "status": "completed",
-                    "universal_data": ud,
-                }
-            )
+                for k, v in res["summary"].items():
+                    overall_summary[k] = overall_summary.get(k, 0) + v
+                ud = res["universal_data"]
+                for category in _UNIVERSAL_RECORD_CATEGORIES:
+                    for record in ud.get(category, []):
+                        record["Sheet Pair"], record["File Pair ID"], record["Sheet Rule ID"] = pair_label, file_pair_id, sheet_rule_id
+                rule_results.append({"file_pair_id": file_pair_id, "sheet_rule_id": sheet_rule_id, "report_label": report_label, "source_sheets": [source.sheet_id or "default" for source in sources_1], "destination_sheets": [source.sheet_id or "default" for source in sources_2], "summary": res["summary"], "status": "completed", "universal_data": ud})
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                error = {"file_pair_id": file_pair_id, "sheet_rule_id": sheet_rule_id, "report_label": report_label, "status": "failed", "error": str(exc)}
+                rule_errors.append(error)
+                append_history(db, job, "processing", f"{report_label} failed: {exc}")
+                db.commit()
 
         if not rule_results:
-            raise ValueError("No data processed for any sheet pair.")
+            details = "; ".join(error["error"] for error in rule_errors) or "No data processed for any sheet pair."
+            raise ValueError(details)
 
         merged_ud = _merge_rule_universal_data(rule_results)
+        merged_ud["execution_errors"] = rule_errors
+        overall_summary["failed_rules"] = len(rule_errors)
+        overall_summary["completed_rules"] = len(rule_results)
 
         from app.utils.json_encoder import safe_json_dump
         from app.reconciliation_engine.universal_reporter import generate_enterprise_report
@@ -478,10 +458,12 @@ def process_reconciliation_job(job_id: str) -> None:
         db.flush()
 
         job.report_id = report.id
-        job.status = "completed"
+        job.status = "completed_with_errors" if rule_errors else "completed"
         job.progress = 100
         job.completed_at = datetime.now(timezone.utc)
-        append_history(db, job, "completed", "Reconciliation completed", safe_json_dumps(summary))
+        job.error_message = safe_json_dumps(rule_errors) if rule_errors else None
+        completion_message = "Reconciliation completed with sheet-rule errors" if rule_errors else "Reconciliation completed"
+        append_history(db, job, job.status, completion_message, safe_json_dumps(summary))
         db.commit()
 
         # Enforce maximum 20 stored records per session
@@ -525,10 +507,8 @@ def process_reconciliation_job(job_id: str) -> None:
     finally:
         db.close()
         try:
-            if file_1_path and file_1_path.exists():
-                file_1_path.unlink(missing_ok=True)
-            if file_2_path and file_2_path.exists():
-                file_2_path.unlink(missing_ok=True)
+            # Input paths point at durable session-owned uploads. Only transient
+            # work artifacts are removed after their copies have been saved.
             if output_path and output_path.exists():
                 output_path.unlink(missing_ok=True)
                 raw_path = output_path.with_name(f"{output_path.stem}_data.json")

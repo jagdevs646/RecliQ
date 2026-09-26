@@ -4,6 +4,8 @@ import type { SheetMetadata } from "../types";
 export interface SheetPairing {
   sheet1: SheetMetadata;
   sheet2: SheetMetadata;
+  sourceFileId?: string;
+  destinationFileId?: string;
 }
 
 interface Props {
@@ -57,7 +59,7 @@ export function SheetPairingStep({
       <div className="pairing-auto-notice">
         <CheckCircle2 size={16} />
         <span>
-          Single sheet detected — automatically paired: <strong>{autoSheet1.name}</strong> ? <strong>{autoSheet2.name}</strong>
+          Single sheet detected and automatically paired: <strong>{autoSheet1.name}</strong> to <strong>{autoSheet2.name}</strong>
         </span>
       </div>
     );
@@ -84,7 +86,7 @@ export function SheetPairingStep({
                     else handlePair(sheet1, e.target.value);
                   }}
                 >
-                  <option value="">— Select sheet from {file2Name} —</option>
+                  <option value="">Select sheet from {file2Name}</option>
                   {file2Sheets.map((sheet2) => (
                     <option
                       key={sheet2.id}

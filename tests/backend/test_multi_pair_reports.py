@@ -86,3 +86,51 @@ def test_multiple_file_pairs_download_as_zip_with_independent_workbooks():
         assert len(report.content) > 100
         with zipfile.ZipFile(io.BytesIO(report.content)) as archive:
             assert archive.namelist() == ["North_report.xlsx", "South_report.xlsx"]
+
+
+def test_one_failed_sheet_rule_keeps_successful_results_available():
+    with TestClient(app) as client:
+        source = _workbook_bytes({
+            "Good": [{"Invoice": "G-001", "Amount": 10}],
+            "Bad": [{"Reference": "B-001", "Amount": 20}],
+        })
+        destination = _workbook_bytes({
+            "Good ledger": [{"Document": "G001", "Net": 10}],
+            "Bad ledger": [{"Bank Ref": "B001", "Credit": 20}],
+        })
+        source_response = client.post("/api/files/upload", files={"file": ("Source.xlsx", source, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        destination_response = client.post("/api/files/upload", files={"file": ("Destination.xlsx", destination, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+        source_id = source_response.json()["id"]
+        destination_id = destination_response.json()["id"]
+        pairs = [
+            ("good", "Good", "Good ledger", "Invoice", "Document", "Amount", "Net"),
+            ("bad", "Bad", "Bad ledger", "Missing Key", "Bank Ref", "Amount", "Credit"),
+        ]
+        payload = {
+            "file_pairs": [{
+                "file_pair_id": pair_id,
+                "source_files": [{"file_id": source_id, "sheet_id": source_sheet}],
+                "destination_files": [{"file_id": destination_id, "sheet_id": destination_sheet}],
+                "sheet_rules": [{
+                    "sheet_rule_id": f"{pair_id}-rule",
+                    "source_sheets": [source_sheet],
+                    "destination_sheets": [destination_sheet],
+                    "matching_strategy": {"primary_key_source": [source_key], "primary_key_destination": [destination_key]},
+                    "reconciliation_mapping": [{"file_1_fields": [source_amount], "file_2_fields": [destination_amount]}],
+                    "report_label": pair_id,
+                }],
+            } for pair_id, source_sheet, destination_sheet, source_key, destination_key, source_amount, destination_amount in pairs],
+        }
+        started = client.post("/api/reconciliation/generic", json=payload)
+        assert started.status_code == 200
+        job = started.json()
+        for _ in range(40):
+            job = client.get(f"/api/jobs/{job['id']}").json()
+            if job["status"] in {"completed", "completed_with_errors", "failed"}:
+                break
+            time.sleep(0.1)
+
+        assert job["status"] == "completed_with_errors"
+        assert "missing columns MISSING KEY" in (job["error_message"] or "")
+        preview = client.get(f"/api/reports/job/{job['id']}/preview?category=review")
+        assert preview.status_code == 200

@@ -23,7 +23,7 @@ export default function App() {
 
   function openJob(job: Job) {
     setActiveJob(job);
-    setPage(job.status === "completed" ? "results" : "status");
+    setPage(["completed", "completed_with_errors"].includes(job.status) ? "results" : "status");
   }
 
   return (

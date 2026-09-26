@@ -712,10 +712,11 @@ class UniversalReporter:
             cell.border = border
 
         matched_list = self.data.get("matched_records", [])
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
 
+        # Table styling supplies the same alternating-row presentation without
+        # assigning Font, Fill, Alignment and Border objects to every cell.
+        # This keeps large, fully-matched reconciliations responsive.
         for row_idx, row in enumerate(matched_list, start=5):
-            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
             r1 = row.get("ROW (FILE 1)", row.get("ROW (File 1)", row_idx - 3))
             r2 = row.get("ROW (FILE 2)", row.get("ROW (File 2)", row_idx - 3))
             k1 = row.get(
@@ -737,12 +738,7 @@ class UniversalReporter:
                 (row.get("MATCH STATUS", "Exact Match"), "center"),
             ]
 
-            for col_idx, (val, align_h) in enumerate(row_data, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name=self.font_family, size=9)
-                cell.fill = fill
-                cell.alignment = Alignment(horizontal=align_h, vertical="center")
-                cell.border = border
+            ws.append([value for value, _ in row_data])
 
         last_row = max(4, len(matched_list) + 4)
         ws.freeze_panes = "A5"
@@ -961,7 +957,6 @@ class UniversalReporter:
         ws["A2"].font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
 
         navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
         border = self._thin_border()
         for col_idx, column in enumerate(columns, start=1):
             cell = ws.cell(row=4, column=col_idx, value=column)
@@ -971,14 +966,10 @@ class UniversalReporter:
             cell.border = border
             ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(column) + 3, 14), 42)
 
-        for row_idx, record in enumerate(records, start=5):
-            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
-            for col_idx, column in enumerate(columns, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=record.get(column))
-                cell.font = Font(name=self.font_family, size=9)
-                cell.fill = fill
-                cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=column == "MATCH EXPLANATION")
-                cell.border = border
+        # Keep the audit trail complete, but let the Excel table apply its row
+        # styling. Per-cell style assignment dominates runtime for large jobs.
+        for record in records:
+            ws.append([record.get(column) for column in columns])
 
         ws.freeze_panes = "A5"
         last_row = len(records) + 4
