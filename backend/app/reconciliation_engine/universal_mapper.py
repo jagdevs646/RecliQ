@@ -14,32 +14,39 @@ def build_universal_data_model(
     total_file_1: int,
     total_file_2: int,
     identity_resolution: list[dict] | None = None,
+    secondary_keys: list[str] | None = None,
+    compared_fields: list[str] | None = None,
 ) -> dict:
-    
-    # 1. exceptions and field_differences
+
+    # 1. One difference row per mismatched field. Records are identified by
+    # their primary (and secondary) key values, so no synthetic IDs are added.
     exceptions = []
-    field_differences = []
-    
+
     exc_type_counts = {}
     field_mismatch_counts = {}
     field_match_counts = {}
-    
+    has_critical = False
+
     # Analyze reconciliation_results (which contains mismatches)
-    for idx, row in enumerate(reconciliation_results, start=1):
-        exc_id = f"EX-{str(idx).zfill(6)}"
+    for row in reconciliation_results:
         match_key = str(
             row.get(
                 "COMPOSITE MATCH KEY",
                 row.get("MATCH KEY", row.get(matching_keys[0], "") if matching_keys else ""),
             )
         )
+        matched_key = row.get("MATCHED COMPOSITE KEY", row.get("MATCHED KEY"))
+        record_context = {"Primary Key": match_key}
+        if matched_key is not None:
+            record_context["Matched Key"] = str(matched_key)
+        if row.get("SECONDARY KEY"):
+            record_context["Secondary Key"] = row["SECONDARY KEY"]
+        trailing_context = {"Grouped Rows": row["GROUPED ROWS"]} if row.get("GROUPED ROWS") else {}
         
         # Determine specific field differences
         # Keys typically look like "FIELD (FILE 1)", "FIELD (FILE 2)", "FIELD DIFF", "FIELD STATUS"
         fields_processed = set()
-        
-        has_critical = False
-        
+
         for k in row.keys():
             if k.endswith(" (FILE 1)"):
                 base_field = k.replace(" (FILE 1)", "")
@@ -58,9 +65,7 @@ def build_universal_data_model(
                     field_mismatch_counts[base_field] = field_mismatch_counts.get(base_field, 0) + 1
                     
                     exc_type = "Value Difference" if diff is not None else "Text Difference"
-                    severity = "High" if diff is not None and abs(float(diff)) > 100 else "Medium"
                     if diff is not None and abs(float(diff)) > 1000:
-                        severity = "Critical"
                         has_critical = True
                         
                     exc_type_counts[exc_type] = exc_type_counts.get(exc_type, 0) + 1
@@ -75,27 +80,13 @@ def build_universal_data_model(
                             diff_pct = None
                         
                     exceptions.append({
-                        "Exception ID": exc_id,
-                        "Match Key": match_key,
+                        **record_context,
                         "Field": base_field,
                         "File 1 Value": f1_val,
                         "File 2 Value": f2_val,
                         "Difference": diff,
                         "Difference %": diff_pct,
-                        "Exception Type": exc_type,
-                        "Severity": severity,
-                        "Status": "Open",
-                        "Action": ""
-                    })
-                    
-                    field_differences.append({
-                        "Match Key": match_key,
-                        "Field": base_field,
-                        "File 1 Value": f1_val,
-                        "File 2 Value": f2_val,
-                        "Difference": diff,
-                        "Difference %": diff_pct,
-                        "Result": status
+                        **trailing_context,
                     })
                 else:
                     field_match_counts[base_field] = field_match_counts.get(base_field, 0) + 1
@@ -133,7 +124,7 @@ def build_universal_data_model(
     overall_status = "PASSED"
     if exceptions or file_1_not_found or file_2_not_found:
         overall_status = "EXCEPTIONS FOUND"
-        if any(e.get("Severity") == "Critical" for e in exceptions):
+        if has_critical:
             overall_status = "CRITICAL EXCEPTIONS"
             
     # 3. Control Checks
@@ -174,6 +165,8 @@ def build_universal_data_model(
             "file_1_name": file_1_name,
             "file_2_name": file_2_name,
             "matching_keys": matching_keys,
+            "secondary_keys": secondary_keys or [],
+            "compared_fields": compared_fields or [],
         },
         "statistics": {
             "total_file_1": total_file_1,
@@ -191,7 +184,6 @@ def build_universal_data_model(
         "matched_records": matched_records,
         "missing_in_file_1": file_2_not_found,  # Items in file 2 not in file 1
         "missing_in_file_2": file_1_not_found,  # Items in file 1 not in file 2
-        "field_differences": field_differences,
         "identity_resolution": identity_resolution,
         "control_checks": control_checks,
     }

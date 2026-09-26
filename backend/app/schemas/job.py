@@ -23,6 +23,7 @@ class ReconciliationJobOut(BaseModel):
     input_file_2_id: str | None
     input_file_1_name: str | None = None
     input_file_2_name: str | None = None
+    file_pair_count: int = 1
     report_id: str | None
     created_at: datetime
     started_at: datetime | None

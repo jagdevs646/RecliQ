@@ -14,193 +14,68 @@ from app.reconciliation_engine.universal_mapper import build_universal_data_mode
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 
-def test_generated_excel_structure_matches_sample(tmp_path: Path):
+def _sample_report_data() -> dict:
+    return build_universal_data_model(
+        job_type="generic",
+        file_1_name="Books.xlsx",
+        file_2_name="Portal.xlsx",
+        matching_keys=["EMP#"],
+        reconciliation_results=[
+            {
+                "MATCH KEY": "IGS0523", "MATCHED KEY": "IGS-0523",
+                "TOTAL ST (FILE 1)": 33, "TOTAL ST (FILE 2)": 32, "TOTAL ST DIFF": 1.0, "TOTAL ST STATUS": "Mismatch",
+            },
+        ],
+        file_1_not_found=[{"EMP#": "IGS090945", "NORM_EMP#": "IGS090945", "Total ST": 40, "ROW (FILE 1)": 9,
+                           "IDENTITY CLASSIFICATION": "NOT_FOUND", "MATCH EXPLANATION": "No record in the other file has this key."}],
+        file_2_not_found=[{"EMP#": "IGS09091", "Total ST": 72, "ROW (FILE 2)": 7}],
+        matched_records=[{"ROW (FILE 1)": 2, "ROW (FILE 2)": 2, "MATCH KEY": "IGS1344", "MATCHED KEY": "IGS1344",
+                          "GROUP CLASSIFICATION": "One-to-One Match"}],
+        total_file_1=3,
+        total_file_2=3,
+        compared_fields=["TOTAL ST ↔ TOTAL ST"],
+    )
+
+
+def test_report_is_plain_and_self_explanatory(tmp_path: Path):
     output_path = tmp_path / "generated_report.xlsx"
+    generate_enterprise_report(_sample_report_data(), {}, output_path)
+    wb = openpyxl.load_workbook(output_path)
 
-    # Sample reconciliation data model
-    data = {
-        "metadata": {
-            "reconciliation_name": "Generic Reconciliation",
-            "file_1_name": "Books.xlsx",
-            "file_2_name": "Portal.xlsx",
-            "matching_keys": ["EMP#"],
-        },
-        "statistics": {
-            "total_file_1": 551,
-            "total_file_2": 551,
-            "matched": 542,
-            "mismatched": 9,
-            "missing_in_file_1": 10,
-            "missing_in_file_2": 10,
-        },
-        "overall_status": "EXCEPTIONS FOUND",
-        "exceptions": [
-            {
-                "Exception ID": "EX-000001",
-                "Match Key": "IGS0523",
-                "Field": "TOTAL ST",
-                "File 1 Value": 33,
-                "File 2 Value": 32,
-                "Difference": 1.0,
-                "Difference %": 0.03125,
-                "Exception Type": "Value Difference",
-                "Severity": "Medium",
-                "Status": "Open",
-                "Action Notes": "",
-            },
-            {
-                "Exception ID": "EX-000002",
-                "Match Key": "IGS0259",
-                "Field": "TOTAL OT",
-                "File 1 Value": 3,
-                "File 2 Value": 2.2,
-                "Difference": 0.8,
-                "Difference %": 0.3636,
-                "Exception Type": "Value Difference",
-                "Severity": "Medium",
-                "Status": "Open",
-                "Action Notes": "",
-            },
-            {
-                "Exception ID": "EX-000003",
-                "Match Key": "IGS1324",
-                "Field": "EMPLOYEE - FIRST",
-                "File 1 Value": "Deborah",
-                "File 2 Value": "geller",
-                "Difference": None,
-                "Difference %": None,
-                "Exception Type": "Text Difference",
-                "Severity": "Medium",
-                "Status": "Open",
-                "Action Notes": "",
-            },
-        ],
-        "matched_records": [
-            {
-                "ROW (FILE 1)": 11,
-                "ROW (FILE 2)": 11,
-                "EMP#": "IGS1344",
-                "MATCHED EMP#": "IGS1344",
-                "MATCH TYPE": "numeric",
-                "MATCH CONFIDENCE": "100%",
-                "MATCH STATUS": "Exact numeric match",
-            }
-        ],
-        "missing_in_file_1": [
-            {
-                "EMP#": "IGS09091",
-                "Client": "Facebook",
-                "Employee - Last": "Saransh",
-                "Employee - First": "Khajuria",
-                "Total ST": 72,
-                "portal.xlsx Row": 586,
-            }
-        ],
-        "missing_in_file_2": [
-            {
-                "EMP#": "IGS090945",
-                "Client": "Google",
-                "Employee - Last": "Jagdev",
-                "Employee - First": "Singh",
-                "Total ST": 40,
-                "Books.xlsx Row": 586,
-            }
-        ],
-        "field_differences": [
-            {
-                "Match Key": "IGS0523",
-                "Field": "TOTAL ST",
-                "File 1 Value": 33,
-                "File 2 Value": 32,
-                "Difference": 1.0,
-                "Difference %": 0.03125,
-                "Result": "Mismatch",
-            }
-        ],
-        "field_exception_summary": [
-            {"Field": "TOTAL ST", "Matched": 542, "Mismatch": 6, "Match %": 0.989},
-            {"Field": "EMPLOYEE - FIRST", "Matched": 542, "Mismatch": 4, "Match %": 0.993},
-            {"Field": "TOTAL OT", "Matched": 542, "Mismatch": 1, "Match %": 0.998},
-        ],
-        "control_checks": [],
-    }
-
-    generate_enterprise_report(data, {}, output_path)
-
-    assert output_path.exists()
-    wb = openpyxl.load_workbook(output_path, data_only=False)
-
-    # 1. Verify sheet names and count
-    expected_sheets = [
-        "01 Executive Summary",
-        "02 Exceptions",
-        "03 Matched Records",
-        "04 Missing - Books",
-        "05 Missing - Portal",
-        "06 Field Differences",
-        "07 Control Checks",
+    assert wb.sheetnames == [
+        "01 Summary", "02 Differences", "03 Only in Books", "04 Only in Portal", "06 Matched", "07 Checks",
     ]
-    assert wb.sheetnames == expected_sheets
-
-    # 2. Verify Tab Colors
-    assert wb["01 Executive Summary"].sheet_properties.tabColor.rgb in ["FF1F3864", "001F3864", "1F3864"]
-    assert wb["02 Exceptions"].sheet_properties.tabColor.rgb in ["FFC0392B", "00C0392B", "C0392B"]
-    assert wb["03 Matched Records"].sheet_properties.tabColor.rgb in ["FF1E7B34", "001E7B34", "1E7B34"]
-    assert wb["04 Missing - Books"].sheet_properties.tabColor.rgb in ["FFA6192E", "00A6192E", "A6192E"]
-    assert wb["05 Missing - Portal"].sheet_properties.tabColor.rgb in ["FFA6192E", "00A6192E", "A6192E"]
-    assert wb["06 Field Differences"].sheet_properties.tabColor.rgb in ["FFB36A00", "00B36A00", "B36A00"]
-    assert wb["07 Control Checks"].sheet_properties.tabColor.rgb in ["FF1F3864", "001F3864", "1F3864"]
-
-    # 3. Verify showGridLines = False on all sheets
-    for name in expected_sheets:
-        ws = wb[name]
+    for ws in wb.worksheets:
         assert ws.views.sheetView[0].showGridLines is False
 
-    # 4. Verify 01 Executive Summary Content & Formulas
-    ws1 = wb["01 Executive Summary"]
-    assert ws1["B1"].value == "RECLIQ  |  RECONCILIATION EXECUTIVE SUMMARY"
-    assert "Books.xlsx" in ws1["B2"].value
-    assert "Portal.xlsx" in ws1["B2"].value
-    assert "EMP#" in ws1["B2"].value
+    summary = wb["01 Summary"]
+    assert summary["B1"].value == "Reconciliation Report"
+    assert "Books.xlsx" in summary["B2"].value and "Portal.xlsx" in summary["B2"].value
+    # Stored values only: removing a tab can never break a summary figure.
+    assert not any(isinstance(cell.value, str) and cell.value.startswith("=") for row in summary.iter_rows() for cell in row)
+    results = {row[1].value: row[2].value for row in summary.iter_rows(min_row=11, max_row=14)}
+    assert results == {"Matched – all fields agree": 1, "Matched – values differ": 1,
+                       "Only in Books.xlsx": 1, "Only in Portal.xlsx": 1}
+    assert summary["H12"].hyperlink.location == "'02 Differences'!A1"
+    # One chart, anchored right of the content columns (B:H), so it covers nothing.
+    assert len(summary._charts) == 1
+    assert summary._charts[0].anchor._from.col >= 9
 
-    # KPI formula checks
-    assert "03 Matched Records" in ws1["B6"].value
-    assert "02 Exceptions" in ws1["B6"].value
-    assert ws1["J6"].value == "=IF($B$6>0,$D$6/$B$6,0)"
-    assert ws1["L6"].value == "=IF($B$6>0,$F$6/$B$6,0)"
+    differences = wb["02 Differences"]
+    headers = [cell.value for cell in differences[4]]
+    assert "Exception ID" not in headers
+    assert headers[:3] == ["Key in Books.xlsx", "Key in Portal.xlsx", "Field"]
+    assert [cell.value for cell in differences[5]][:6] == ["IGS0523", "IGS-0523", "TOTAL ST", 33, 32, 1]
 
-    # Charts on 01 Executive Summary
-    assert len(ws1._charts) == 2
-    chart_titles = []
-    for c in ws1._charts:
-        if isinstance(c.title, str):
-            chart_titles.append(c.title)
-        elif hasattr(c.title, "tx") and c.title.tx and hasattr(c.title.tx, "rich") and c.title.tx.rich:
-            paragraphs = c.title.tx.rich.p
-            text = "".join(r.t for p in paragraphs for r in p.r if hasattr(r, "t") and r.t)
-            chart_titles.append(text)
-        else:
-            chart_titles.append(str(c.title))
-    assert "Reconciliation Outcome" in chart_titles
-    assert "Field-Level Mismatches" in chart_titles
+    only_books = [cell.value for cell in wb["03 Only in Books"][4]]
+    assert only_books == ["EMP#", "Total ST", "Result", "Why it was not matched", "Row in Books.xlsx"]
 
-    # 5. Verify 02 Exceptions Distinct Record formula
-    ws2 = wb["02 Exceptions"]
-    assert ws2["M4"].value == "Distinct Record"
-    assert ws2["M5"].value == "=IF(COUNTIF($C$5:C5,C5)=1,1,0)"
-    assert ws2.freeze_panes == "A5"
-
-    # 6. Verify 03 Matched Records Table
-    ws3 = wb["03 Matched Records"]
-    assert "MatchedRecordsTbl" in [t.displayName for t in ws3.tables.values()]
-
-    # 7. Verify 07 Control Checks formulas and conditional formatting
-    ws7 = wb["07 Control Checks"]
-    assert ws7["D5"].value == '=IF(B5=C5,"Pass","Review")'
-    assert len(ws7.conditional_formatting) > 0
+    checks = wb["07 Checks"]
+    assert checks["A9"].value.startswith("Records accounted for")
+    assert (checks["B9"].value, checks["C9"].value, checks["D9"].value) == (3, 3, "Pass")
 
 
-def test_identity_resolution_is_written_as_auditable_excel_section(tmp_path: Path):
+def test_match_review_lists_only_records_to_confirm(tmp_path: Path):
     output_path = tmp_path / "identity_report.xlsx"
     data = build_universal_data_model(
         job_type="generic",
@@ -211,35 +86,24 @@ def test_identity_resolution_is_written_as_auditable_excel_section(tmp_path: Pat
         file_1_not_found=[],
         file_2_not_found=[],
         matched_records=[],
-        total_file_1=2,
-        total_file_2=2,
+        total_file_1=3,
+        total_file_2=3,
         identity_resolution=[
-            {
-                "ROW (FILE 1)": 2,
-                "IDENTITY CLASSIFICATION": "EXCEPTION_MATCH",
-                "MATCH EXPLANATION": "Primary key comparison used company_name: Minor spelling variation (91% vs required 75%).",
-                "MATCH TYPE": "company_name",
-                "MATCH CONFIDENCE": "91%",
-                "MATCH THRESHOLD": "75%",
-            },
-            {
-                "ROW (FILE 1)": 3,
-                "IDENTITY CLASSIFICATION": "AMBIGUOUS_MATCH",
-                "MATCH EXPLANATION": "More than one unused destination record passed every secondary condition.",
-                "MATCH TYPE": "",
-                "MATCH CONFIDENCE": "0%",
-                "MATCH THRESHOLD": "",
-            },
+            {"ROW (FILE 1)": 2, "IDENTITY CLASSIFICATION": "EXCEPTION_MATCH", "MATCH KEY": "Alpah Ltd", "CANDIDATE KEY": "Alpha Ltd",
+             "MATCH EXPLANATION": "Key differs slightly, but every secondary key matched.", "MATCH CONFIDENCE": "91%"},
+            {"ROW (FILE 1)": 3, "IDENTITY CLASSIFICATION": "AMBIGUOUS_MATCH", "MATCH KEY": "Beta", "CANDIDATE KEY": "",
+             "MATCH EXPLANATION": "Several records in the other file have a similar key.", "MATCH CONFIDENCE": "0%"},
+            {"ROW (FILE 1)": 4, "IDENTITY CLASSIFICATION": "EXACT_MATCH", "MATCH KEY": "Gamma", "CANDIDATE KEY": "Gamma",
+             "MATCH EXPLANATION": "Key matched.", "MATCH CONFIDENCE": "100%"},
         ],
     )
 
     generate_enterprise_report(data, {}, output_path)
-    workbook = openpyxl.load_workbook(output_path, data_only=False)
-    worksheet = workbook["07 Identity Resolution"]
-    assert worksheet["A4"].value == "ROW (FILE 1)"
-    assert worksheet["B5"].value == "EXCEPTION_MATCH"
-    assert "Primary key comparison" in worksheet["C5"].value
-    assert "IdentityResolutionTbl" in [table.displayName for table in worksheet.tables.values()]
+    worksheet = openpyxl.load_workbook(output_path)["05 Match Review"]
+    rows = list(worksheet.iter_rows(min_row=5, values_only=True))
+    assert [row[0] for row in rows] == ["Matched by secondary keys", "Several possible matches"]
+    assert rows[0][1:3] == ("Alpah Ltd", "Alpha Ltd")
+    assert "MatchReviewTbl" in [table.displayName for table in worksheet.tables.values()]
 
 
 def test_generic_reconciliation_end_to_end(tmp_path: Path):
@@ -275,10 +139,9 @@ def test_generic_reconciliation_end_to_end(tmp_path: Path):
 
     assert output.exists()
     wb = openpyxl.load_workbook(output)
-    assert "01 Executive Summary" in wb.sheetnames
-    assert "02 Exceptions" in wb.sheetnames
-    assert "03 Matched Records" in wb.sheetnames
-    assert "04 Missing - ledger" in wb.sheetnames
-    assert "05 Missing - bank" in wb.sheetnames
-    assert "06 Field Differences" in wb.sheetnames
-    assert "07 Control Checks" in wb.sheetnames
+    assert "01 Summary" in wb.sheetnames
+    assert "02 Differences" in wb.sheetnames
+    assert "06 Matched" in wb.sheetnames
+    assert "03 Only in ledger" in wb.sheetnames
+    assert "04 Only in bank" in wb.sheetnames
+    assert "07 Checks" in wb.sheetnames

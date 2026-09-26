@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
@@ -33,3 +34,11 @@ class ReconciliationJob(IdMixin, TimestampMixin, Base):
     @property
     def input_file_2_name(self) -> str | None:
         return self.input_file_2.original_filename if self.input_file_2 else None
+
+    @property
+    def file_pair_count(self) -> int:
+        """Independent file pairs in a generic job's plan (history shows "+N")."""
+        try:
+            return max(1, len(json.loads(self.settings_json or "{}").get("file_pairs") or []))
+        except (ValueError, AttributeError):
+            return 1

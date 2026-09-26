@@ -92,8 +92,14 @@ def non_empty_values(values: Iterable[object], limit: int = 100) -> list[object]
 
 
 def _name_has_hint(column_name: str, hints: Sequence[str]) -> bool:
+    """Short hints ("id", "pan", "po", "dt") must be whole words, so "Paid",
+    "Company" or "Report" are not mistaken for IDs, PANs or POs."""
     name = normalize_text(column_name)
-    return any(hint in name for hint in hints)
+    words = set(name.split())
+    return any(
+        (hint in words) if len(hint) <= 4 and " " not in hint else (hint in name)
+        for hint in hints
+    )
 
 
 def _looks_like_gstin(value: object) -> bool:
@@ -120,6 +126,9 @@ def detect_matcher_type(
 
     if _name_has_hint(combined_name, ("gstin", "gst no", "gstn")):
         return "gstin"
+    # "Invoice Date" is a date, not an invoice identifier.
+    if re.search(r"\bdate\b", normalize_text(combined_name)):
+        return "date"
     if _name_has_hint(combined_name, ("pan",)):
         return "pan"
     if _name_has_hint(combined_name, ("invoice", "inv")):
@@ -475,6 +484,18 @@ class IndexedCandidateMatcher:
             for position in positions
             if self.indices[position] not in used_indices
         ]
+
+    def token_candidate_indices(self, target_value: object | Sequence[object]) -> Set[object]:
+        """Rows sharing a primary-key token with the target (bounded fuzzy scope).
+
+        Composite identities have no token index: they only match exactly.
+        """
+        if self.is_composite or is_blank(target_value):
+            return set()
+        positions: Set[int] = set(self.compact_map.get(compact_identifier(target_value), []))
+        for token in tokens(target_value, use_synonyms=True):
+            positions.update(self.token_blocks.get(token, []))
+        return {self.indices[position] for position in positions}
 
     def _condition_exact_map(self, column: str) -> Dict[str, List[int]]:
         if column not in self.condition_exact_maps:

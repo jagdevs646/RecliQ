@@ -58,6 +58,9 @@ class LocalStorage:
         try:
             path = self.base_path / storage_path
             if path.exists():
+                from app.reconciliation_engine.ingestion import clear_table_cache
+
+                clear_table_cache(path)  # Parsed-sheet pickles beside the upload.
                 path.unlink(missing_ok=True)
                 # Cleanup parent dir if empty
                 parent = path.parent

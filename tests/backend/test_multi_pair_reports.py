@@ -307,5 +307,21 @@ def test_three_file_pairs_zip_with_sanitized_unique_names_and_per_pair_download(
         feb = client.get(f"/api/reports/job/{job['id']}/download", params={"file_pair_id": "feb"})
         assert feb.status_code == 200
         assert 'filename="Q1_Report_2.xlsx"' in feb.headers["content-disposition"]
-        assert "01 Executive Summary" in openpyxl.load_workbook(io.BytesIO(feb.content)).sheetnames
+        assert "01 Summary" in openpyxl.load_workbook(io.BytesIO(feb.content)).sheetnames
         assert client.get(f"/api/reports/job/{job['id']}/download", params={"file_pair_id": "nope"}).status_code == 404
+
+        # History shows every pair, and each pair's workbook can be customized.
+        assert job["file_pair_count"] == 3
+        assert client.post(f"/api/reports/job/{job['id']}/download_custom", json={}).status_code == 422
+        custom = client.post(
+            f"/api/reports/job/{job['id']}/download_custom",
+            params={"file_pair_id": "mar"},
+            json={"include_matched": False},
+        )
+        assert custom.status_code == 200
+        assert 'filename="Custom_Mar_ledger.xlsx"' in custom.headers["content-disposition"]
+        custom_workbook = openpyxl.load_workbook(io.BytesIO(custom.content))
+        assert "06 Matched" not in custom_workbook.sheetnames
+        # Mar's own figures (1 record), not the job-wide total of 3.
+        assert custom_workbook["01 Summary"]["B7"].value == 1
+        assert custom_workbook["01 Summary"]["C11"].value == 1

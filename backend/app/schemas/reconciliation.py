@@ -331,6 +331,10 @@ class AnalysisResponse(BaseModel):
     recommended_keys_2: list[str]
     key_confidence: int
     is_composite_key: bool
+    key_reason: str = ""
+    # Columns whose values are dates; drives the date-only key guard.
+    date_columns_1: list[str] = Field(default_factory=list)
+    date_columns_2: list[str] = Field(default_factory=list)
     recommended_mappings: list[dict]
 
 

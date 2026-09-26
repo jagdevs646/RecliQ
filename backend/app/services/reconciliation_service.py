@@ -140,8 +140,10 @@ def _label_multi_rule_report(universal_data: dict, rules: list[dict]) -> None:
     metadata = universal_data.setdefault("metadata", {})
     metadata["file_1_name"] = rules[0].get("source_file") or metadata.get("file_1_name")
     metadata["file_2_name"] = rules[0].get("destination_file") or metadata.get("file_2_name")
-    # Keys differ per rule; tab '08 Sheet Rules' lists each rule's own key.
+    # Keys differ per rule; tab '08 Sheet Rules' lists each rule's own setup.
     metadata["matching_keys"] = ["Match Key"]
+    metadata["secondary_keys"] = []
+    metadata["compared_fields"] = []
 
 
 def enqueue_generic_job(
@@ -240,7 +242,7 @@ def enqueue_gst_job(
     return job
 
 
-from app.reconciliation_engine.ingestion import extract_file_metadata, read_table_data
+from app.reconciliation_engine.ingestion import extract_file_metadata, read_table_columns, read_table_data
 from app.reconciliation_engine.preprocessing import prepare_dataframe
 from app.reconciliation_engine.cache import normalize_header
 
@@ -260,15 +262,15 @@ def get_file_columns(db: Session, file_id: str, session_id: str, sheet_id: str |
         metadata = extract_file_metadata(path, record.original_filename)
         sheet_id = metadata[0]["id"] if metadata else "default"
         
+    if not str(orientation).lower().startswith("horizontal"):
+        # Column headers only: never parse 50k data rows just to list fields.
+        return [normalize_header(col) for col in read_table_columns(path, record.original_filename, sheet_id)]
+
     df = read_table_data(path, record.original_filename, sheet_id)
     if df.empty:
         return []
-        
-    if str(orientation).lower().startswith("horizontal"):
-        from app.reconciliation_engine.preprocessing import transform_horizontal_dataframe
-        df = transform_horizontal_dataframe(df)
-        
-    return [normalize_header(col) for col in df.columns]
+    from app.reconciliation_engine.preprocessing import transform_horizontal_dataframe
+    return [normalize_header(col) for col in transform_horizontal_dataframe(df).columns]
 
 
 def process_reconciliation_job_async(job_id: str) -> None:
@@ -522,6 +524,12 @@ def process_reconciliation_job(job_id: str) -> None:
                         pair_data = _merge_rule_universal_data(pair_rules)
                         pair_data["sheet_rules"] = [rule for rule in rule_manifest if rule["file_pair_id"] == pair_entry["file_pair_id"]]
                         _label_multi_rule_report(pair_data, pair_data["sheet_rules"])
+                        # Keep each pair's own figures so its workbook can be
+                        # rebuilt (customized) later from the merged data.
+                        merged_ud.setdefault("file_pair_reports", {})[pair_entry["file_pair_id"]] = {
+                            key: pair_data.get(key)
+                            for key in ("metadata", "statistics", "overall_status", "control_checks", "sheet_rules")
+                        }
                         stem = _safe_report_stem(pair_entry["label"], f"Reconciliation_{number}")
                         filename = f"{stem}.xlsx"
                         suffix = 2
@@ -530,6 +538,7 @@ def process_reconciliation_job(job_id: str) -> None:
                             suffix += 1
                         used_names.add(filename.lower())
                         pair_entry["report_filename"] = filename
+                        merged_ud["file_pair_reports"][pair_entry["file_pair_id"]]["report_filename"] = filename
                         pair_path = work_dir / f"{job.id}-{number}-{filename}"
                         generate_enterprise_report(pair_data, {}, pair_path)
                         archive.write(pair_path, filename)

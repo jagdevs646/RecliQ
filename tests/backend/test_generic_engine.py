@@ -174,7 +174,7 @@ def test_secondary_conditions_create_exception_identity_match(tmp_path: Path):
     assert result["matched_records"] == 1
     audit = result["universal_data"]["identity_resolution"][0]
     assert audit["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"
-    assert "Primary key comparison" in audit["MATCH EXPLANATION"]
+    assert "every secondary key matched" in audit["MATCH EXPLANATION"]
 
 
 def test_secondary_condition_mismatch_is_not_found(tmp_path: Path):
@@ -186,7 +186,7 @@ def test_secondary_condition_mismatch_is_not_found(tmp_path: Path):
     assert result["not_found_matches"] == 1
     missing = result["universal_data"]["missing_in_file_2"][0]
     assert missing["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "No unused destination record" in missing["MATCH EXPLANATION"]
+    assert "No record in the other file has this key" in missing["MATCH EXPLANATION"]
 
 
 def test_multiple_secondary_candidates_are_ambiguous(tmp_path: Path):
@@ -202,7 +202,7 @@ def test_multiple_secondary_candidates_are_ambiguous(tmp_path: Path):
     assert result["matched_records"] == 0
     missing = result["universal_data"]["missing_in_file_2"][0]
     assert missing["IDENTITY CLASSIFICATION"] == "AMBIGUOUS_MATCH"
-    assert "More than one" in missing["MATCH EXPLANATION"]
+    assert "Several records in the other file" in missing["MATCH EXPLANATION"]
 
 
 def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Path):
@@ -214,7 +214,7 @@ def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Pat
     assert result["not_found_matches"] == 1
     audit = result["universal_data"]["identity_resolution"][0]
     assert audit["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "required 75%" in audit["MATCH EXPLANATION"]
+    assert "75% required" in audit["MATCH EXPLANATION"]
 
 
 def test_date_only_primary_key_requires_explicit_override(tmp_path: Path):
@@ -246,7 +246,7 @@ def test_date_only_primary_key_requires_explicit_override(tmp_path: Path):
     assert result["exact_matches"] == 1
 
 
-def test_report_sheets_show_raw_keys_and_keep_every_missing_row_column(tmp_path: Path):
+def test_report_sheets_show_raw_keys_and_hide_engine_columns(tmp_path: Path):
     file1 = tmp_path / "source.xlsx"
     file2 = tmp_path / "destination.xlsx"
     output = tmp_path / "report.xlsx"
@@ -273,12 +273,77 @@ def test_report_sheets_show_raw_keys_and_keep_every_missing_row_column(tmp_path:
     assert audit[0]["CANDIDATE KEY"] == "INV1"
     # Without secondary conditions the explanation must not mention them.
     not_found = next(row for row in audit if row["IDENTITY CLASSIFICATION"] == "NOT_FOUND")
-    assert not_found["MATCH EXPLANATION"] == "No destination record has this primary key after deterministic normalization."
+    assert not_found["MATCH EXPLANATION"] == "No record in the other file has this key."
 
     workbook = openpyxl.load_workbook(output)
-    matched = workbook["03 Matched Records"]
-    assert (matched["C5"].value, matched["D5"].value) == ("INV-1", "INV1")
-    # Duplicate rows carry a CLASSIFICATION column the first missing row lacks.
-    missing_sheet = next(name for name in workbook.sheetnames if name.startswith("05 Missing"))
-    missing_headers = [cell.value for cell in workbook[missing_sheet][4]]
-    assert "CLASSIFICATION" in missing_headers
+    matched = workbook["06 Matched"]
+    assert (matched["A5"].value, matched["B5"].value) == ("INV-1", "INV1")
+    only_in_source = workbook[next(name for name in workbook.sheetnames if name.startswith("03 Only in"))]
+    headers = [cell.value for cell in only_in_source[4]]
+    # The two INV-3 rows are one combined record, and engine columns stay hidden.
+    assert only_in_source.max_row == 5
+    assert "Combined rows" in headers and "Why it was not matched" in headers
+    assert not any(str(header).startswith("NORM_") for header in headers)
+
+
+def test_secondary_key_is_mandatory_and_duplicate_keys_are_combined(tmp_path: Path):
+    """ID + Name must both match; same ID + Name rows are summed first."""
+    file1 = tmp_path / "online.xlsx"
+    file2 = tmp_path / "books.xlsx"
+    pd.DataFrame(
+        {
+            "ID": ["INV005", "INV006", "INV007", "INV008"],
+            "Name": ["Vendor A", "Vendor A", "Vendor B", "Vendor C"],
+            "Amount": [1000, 2000, 3000, 400],
+        }
+    ).to_excel(file1, index=False)
+    pd.DataFrame(
+        {
+            "ID": ["INV/005", "INV-006", "INV-007", "INV-007", "INV-008"],
+            "Name": ["Vendor A", "Vendor A", "Vendor B", "Vendor B", "Vendor D"],
+            "Amount": [1000, 2000, 1500, 1500, 400],
+        }
+    ).to_excel(file2, index=False)
+
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        tmp_path / "report.xlsx",
+        key_file_1="ID",
+        key_file_2="ID",
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+        secondary_conditions=[{"source_column": "Name", "destination_column": "Name", "comparison_method": "exact_text"}],
+    )
+
+    assert result["exact_matches"] == 3
+    assert result["field_discrepancies"] == 0  # 1500 + 1500 reconciles against 3000.
+    consolidated = next(row for row in result["universal_data"]["matched_records"] if row["MATCH KEY"] == "INV007")
+    assert consolidated["GROUP CLASSIFICATION"] == "One-to-Many Match"
+    assert consolidated["GROUPED ROWS"] == "File 2: 2 rows combined (rows 4, 5)"
+    # INV008 exists in both files, but the vendor differs: never paired.
+    rejected = result["universal_data"]["missing_in_file_2"][0]
+    assert rejected["ID"] == "INV008"
+    assert "NAME differs ('Vendor C' vs 'Vendor D')" in rejected["MATCH EXPLANATION"]
+    assert [row["ID"] for row in result["universal_data"]["missing_in_file_1"]] == ["INV-008"]
+
+
+def test_secondary_key_alone_never_pairs_records_with_unrelated_keys(tmp_path: Path):
+    """A missing invoice is 'not found', not 'ambiguous', when vendors repeat."""
+    file1 = tmp_path / "online.xlsx"
+    file2 = tmp_path / "books.xlsx"
+    pd.DataFrame({"ID": ["INV001", "INV002"], "Name": ["Vendor A", "Vendor A"], "Amount": [10, 20]}).to_excel(file1, index=False)
+    pd.DataFrame({"ID": ["INV-001", "INV-777", "INV-888"], "Name": ["Vendor A"] * 3, "Amount": [10, 5, 6]}).to_excel(file2, index=False)
+
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        tmp_path / "report.xlsx",
+        key_file_1="ID",
+        key_file_2="ID",
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+        secondary_conditions=[{"source_column": "Name", "destination_column": "Name", "comparison_method": "exact_text"}],
+    )
+
+    assert result["exact_matches"] == 1
+    assert result["ambiguous_matches"] == 0
+    assert result["not_found_matches"] == 1

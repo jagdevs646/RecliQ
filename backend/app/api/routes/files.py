@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session_id
 from app.database.session import get_db
 from app.models.file import UploadedFile
+from app.reconciliation_engine.ingestion import warm_table_cache
 from app.schemas.file import FileColumnsResponse, UploadedFileOut, FileMetadataResponse, SheetMetadata
 from app.services.reconciliation_service import get_file_columns, get_file_metadata
 from app.storage import get_storage
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/files", tags=["files"])
 
 @router.post("/upload", response_model=UploadedFileOut, status_code=status.HTTP_201_CREATED)
 def upload_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
@@ -34,6 +36,13 @@ def upload_file(
     db.add(record)
     db.commit()
     db.refresh(record)
+    if stored.storage_backend == "local":
+        # Parse every sheet after responding, so analysis and the run reuse it.
+        background_tasks.add_task(
+            warm_table_cache,
+            get_storage().resolve_path(record.storage_path),
+            record.original_filename,
+        )
     return record
 
 

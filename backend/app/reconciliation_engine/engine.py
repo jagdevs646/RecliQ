@@ -8,6 +8,8 @@ import pandas as pd
 from app.reconciliation_engine.cache import (
     is_blank,
     normalize_header,
+    normalize_text,
+    parse_date_value,
     to_number,
 )
 from app.reconciliation_engine.matching import (
@@ -28,7 +30,7 @@ from app.reconciliation_engine.preprocessing import (
     read_excel_columns,
 )
 from app.reconciliation_engine.normalization import normalize_dataframe
-from app.reconciliation_engine.matching.advanced_matcher import find_duplicates, group_for_many_to_one
+from app.reconciliation_engine.matching.advanced_matcher import consolidate_duplicate_keys
 from app.reconciliation_engine.progress_tracker import ProgressTracker
 from app.reconciliation_engine.report_generator import (
     write_generic_report,
@@ -36,6 +38,7 @@ from app.reconciliation_engine.report_generator import (
 )
 from app.reconciliation_engine.utilities import (
     collect_rule_value,
+    is_numeric_column,
     validate_columns,
     validate_combined_numeric_rules,
 )
@@ -132,6 +135,61 @@ def _normalize_secondary_conditions(conditions: list[dict] | None) -> list[dict]
     return normalized
 
 
+# Up to this many secondary-key candidates are scored directly on primary-key
+# similarity; larger sets are pre-filtered through the primary-key token index.
+_MAX_DIRECT_SIMILARITY_CANDIDATES = 25
+
+
+def _secondary_group_value(method: str):
+    """Deterministic normal form of a secondary key, or None if not groupable."""
+    if method == "exact_text":
+        return lambda value: None if is_blank(value) else (normalize_text(value) or None)
+    if method == "normalized_date":
+        return lambda value: parsed.isoformat() if (parsed := parse_date_value(value)) else None
+    return None  # Tolerance and fuzzy conditions do not define an identity.
+
+
+def _add_secondary_group_keys(file_1_df: pd.DataFrame, file_2_df: pd.DataFrame, conditions: list[dict]) -> tuple[list[str], list[str]]:
+    """Add normalized secondary-key columns used to consolidate duplicate rows."""
+    group_keys: list[str] = []
+    for index, condition in enumerate(conditions):
+        normalize = _secondary_group_value(str(condition.get("comparison_method", "")))
+        if normalize is None:
+            continue
+        column = f"__SECONDARY_KEY_{index}__"
+        file_1_df[column] = file_1_df[condition["source_column"]].map(normalize)
+        file_2_df[column] = file_2_df[condition["destination_column"]].map(normalize)
+        group_keys.append(column)
+    return group_keys, list(group_keys)
+
+
+def _numeric_rule_columns(df: pd.DataFrame, field_lists: list[list[str]]) -> list[str]:
+    """Mapped columns whose values are all numeric: these are summed when grouped."""
+    fields = dict.fromkeys(field for fields in field_lists for field in fields)
+    return [field for field in fields if field in df.columns and is_numeric_column(df[field])]
+
+
+def _secondary_mismatches(file_1_row: dict, file_2_row: dict, conditions: list[dict]) -> list[str]:
+    """Describe which secondary keys differ for a row whose primary key matched."""
+    mismatches = []
+    for condition in conditions:
+        source_value = file_1_row.get(condition["source_column"])
+        destination_value = file_2_row.get(condition["destination_column"])
+        method = condition.get("comparison_method")
+        if method == "exact_text":
+            passed = normalize_text(source_value) == normalize_text(destination_value) and not is_blank(source_value)
+        elif method == "normalized_date":
+            passed = parse_date_value(source_value) is not None and parse_date_value(source_value) == parse_date_value(destination_value)
+        elif method == "numeric_tolerance":
+            left, right = to_number(source_value), to_number(destination_value)
+            passed = left is not None and right is not None and abs(left - right) <= float(condition.get("numeric_tolerance") or 0)
+        else:
+            passed = compare_values(source_value, destination_value, condition["source_column"], condition["destination_column"]).matched
+        if not passed:
+            mismatches.append(f"{condition['source_column']} differs ('{source_value}' vs '{destination_value}')")
+    return mismatches
+
+
 def _primary_similarity_result(
     file_1_row: dict,
     file_2_row: dict,
@@ -194,32 +252,31 @@ def _identity_explanation(
     classification: MatchClassification,
     result: MatchResult | None = None,
     threshold: int | None = None,
-    secondary_details: list[str] | None = None,
+    secondary_names: str | None = None,
+    secondary_mismatch: list[str] | None = None,
 ) -> str:
-    # ``secondary_details is None`` means secondary matching never ran.
-    conditions = ", ".join(secondary_details or [])
+    """Plain-language reason shown in the report and the dashboard.
+
+    ``secondary_names`` lists the configured secondary keys, or is None when
+    none are configured.
+    """
+    if secondary_mismatch:
+        return f"The key exists in the other file, but {'; '.join(secondary_mismatch)}."
     if classification is MatchClassification.EXACT_MATCH:
-        return "Primary key matched exactly after deterministic normalization."
-    if classification is MatchClassification.AMBIGUOUS_MATCH and secondary_details is None:
-        return "More than one unused destination record shares this primary key; no record was selected."
+        return "Key and secondary keys matched." if secondary_names else "Key matched."
     if classification is MatchClassification.AMBIGUOUS_MATCH:
-        return (
-            "More than one unused destination record passed every secondary condition"
-            f" ({conditions or 'configured conditions'}); no record was selected."
-        )
-    if classification is MatchClassification.NOT_FOUND and result is None and secondary_details is None:
-        return "No destination record has this primary key after deterministic normalization."
+        if secondary_names is None:
+            return "Several records in the other file have this key, so none was chosen."
+        return f"Several records in the other file have a similar key and the same {secondary_names}, so none was chosen."
     if classification is MatchClassification.NOT_FOUND and result is None:
-        return (
-            "No unused destination record passed every secondary condition"
-            f" ({conditions or 'no deterministic candidate'})."
-        )
+        if secondary_names is None:
+            return "No record in the other file has this key."
+        return f"No record in the other file has this key (or a close variant) with the same {secondary_names}."
     assert result is not None
-    return (
-        f"Primary key comparison used {result.matcher_type}: {result.status} "
-        f"({result.confidence}% vs required {threshold}%). "
-        f"{result.detail or 'The candidate was narrowed by configured secondary conditions.'}"
-    ).strip()
+    closeness = f"{result.confidence}% similar, {threshold}% required"
+    if classification is MatchClassification.EXCEPTION_MATCH:
+        return f"Key differs slightly ({result.status.lower()}, {closeness}), but every secondary key matched. Please confirm."
+    return f"The closest record with the same {secondary_names or 'secondary keys'} has a different key ({closeness})."
 
 
 def run_generic_reconciliation(
@@ -307,13 +364,17 @@ def run_generic_reconciliation(
     file_1_match_keys = [f"NORM_{k}" if f"NORM_{k}" in file_1_df.columns else k for k in file_1_id_col]
     file_2_match_keys = [f"NORM_{k}" if f"NORM_{k}" in file_2_df.columns else k for k in file_2_id_col]
 
-    # Handle duplicates & Grouping (One-to-many / Many-to-one)
-    file_1_df, f1_dupes = find_duplicates(file_1_df, file_1_match_keys)
-    file_2_df, f2_dupes = find_duplicates(file_2_df, file_2_match_keys)
-    
-    file_1_df = group_for_many_to_one(file_1_df, file_1_match_keys, num_cols)
-    file_2_df = group_for_many_to_one(file_2_df, file_2_match_keys, f2_norm_config["number_columns"])
-    
+    # Consolidate rows sharing the full identity (primary key + deterministic
+    # secondary keys) on each side, so e.g. two INV-007 / Vendor A invoices of
+    # 1500 reconcile as one 3000 record instead of being dropped as duplicates.
+    group_keys_1, group_keys_2 = _add_secondary_group_keys(file_1_df, file_2_df, normalized_secondary_conditions)
+    file_1_df = consolidate_duplicate_keys(
+        file_1_df, file_1_match_keys + group_keys_1, _numeric_rule_columns(file_1_df, [left for left, _ in normalized_rules])
+    )
+    file_2_df = consolidate_duplicate_keys(
+        file_2_df, file_2_match_keys + group_keys_2, _numeric_rule_columns(file_2_df, [right for _, right in normalized_rules])
+    )
+
     if is_cancelled and is_cancelled():
         raise InterruptedError("Reconciliation cancelled by user")
 
@@ -351,8 +412,15 @@ def run_generic_reconciliation(
 
     tracker.matching_records()
 
-    allowed_f1_cols = set(file_1_match_keys + file_1_id_col + [r[0][i] for r in normalized_rules for i in range(len(r[0]))] + file_1_extra)
-    allowed_f2_cols = set(file_2_match_keys + file_2_id_col + [r[1][i] for r in normalized_rules for i in range(len(r[1]))] + file_2_extra)
+    secondary_names = ", ".join(condition["source_column"] for condition in normalized_secondary_conditions)
+    secondary_columns_1 = [condition["source_column"] for condition in normalized_secondary_conditions]
+    secondary_columns_2 = [condition["destination_column"] for condition in normalized_secondary_conditions]
+    allowed_f1_cols = set(file_1_match_keys + file_1_id_col + secondary_columns_1 + [r[0][i] for r in normalized_rules for i in range(len(r[0]))] + file_1_extra)
+    allowed_f2_cols = set(file_2_match_keys + file_2_id_col + secondary_columns_2 + [r[1][i] for r in normalized_rules for i in range(len(r[1]))] + file_2_extra)
+
+    def grouped_rows_note(row: dict) -> str:
+        count = row.get("__GROUP_COUNT__", 1)
+        return f"{count} rows combined (rows {row.get('__GROUPED_ROWS__', '')})" if count and count > 1 else ""
 
     file_1_records = file_1_df.to_dict('records')
     for row_idx, file_1_row in enumerate(file_1_records):
@@ -373,6 +441,22 @@ def run_generic_reconciliation(
         best_idx = None
         file_2_row = None
         candidate_row = None
+        secondary_mismatch: list[str] = []
+
+        # Secondary keys are mandatory: a primary-key hit only counts when every
+        # configured secondary key matches too (e.g. ID *and* vendor name).
+        if exact_candidates and normalized_secondary_conditions:
+            passing, secondary_details = indexed_matcher.find_secondary_candidates(
+                file_1_row,
+                normalized_secondary_conditions,
+                matched_file_2_indices,
+            )
+            passing_indices = {index for index, _ in passing}
+            rejected = exact_candidates
+            exact_candidates = [candidate for candidate in exact_candidates if candidate[0] in passing_indices]
+            if not exact_candidates:
+                candidate_row = rejected[0][1]
+                secondary_mismatch = _secondary_mismatches(file_1_row, candidate_row, normalized_secondary_conditions)
 
         if len(exact_candidates) == 1:
             best_idx, file_2_row, key_result = exact_candidates[0]
@@ -380,34 +464,49 @@ def run_generic_reconciliation(
             classification = MatchClassification.EXACT_MATCH
         elif len(exact_candidates) > 1:
             classification = MatchClassification.AMBIGUOUS_MATCH
+        elif secondary_mismatch:
+            pass  # The primary key exists but its secondary keys differ: not a match.
         elif normalized_secondary_conditions:
             secondary_candidates, secondary_details = indexed_matcher.find_secondary_candidates(
                 file_1_row,
                 normalized_secondary_conditions,
                 matched_file_2_indices,
             )
-            if len(secondary_candidates) > 1:
-                classification = MatchClassification.AMBIGUOUS_MATCH
-            elif len(secondary_candidates) == 1:
-                candidate_idx, candidate_row = secondary_candidates[0]
+            # Secondary keys alone never identify a record: a candidate must also
+            # have a similar primary key. Large candidate sets (e.g. every row
+            # of one vendor) are first cut down through the primary-key token
+            # index, so the similarity check stays bounded.
+            if len(secondary_candidates) > _MAX_DIRECT_SIMILARITY_CANDIDATES:
+                similar_positions = indexed_matcher.token_candidate_indices(file_1_id)
+                secondary_candidates = [candidate for candidate in secondary_candidates if candidate[0] in similar_positions]
+            scored = []
+            for candidate_idx, secondary_row in secondary_candidates:
                 similarity_result, required_threshold = _primary_similarity_result(
                     file_1_row,
-                    candidate_row,
+                    secondary_row,
                     file_1_id_col,
                     file_2_id_col,
                     key_matcher_types,
                     similarity_policy,
                 )
-                key_result = similarity_result
-                if similarity_result.confidence >= required_threshold:
-                    best_idx, file_2_row = candidate_idx, candidate_row
-                    classification = MatchClassification.EXCEPTION_MATCH
+                scored.append((candidate_idx, secondary_row, similarity_result))
+            qualifying = [item for item in scored if item[2].confidence >= (required_threshold or 0)]
+            if len(qualifying) > 1:
+                classification = MatchClassification.AMBIGUOUS_MATCH
+            elif len(qualifying) == 1:
+                best_idx, file_2_row, key_result = qualifying[0]
+                candidate_row = file_2_row
+                classification = MatchClassification.EXCEPTION_MATCH
+            elif len(scored) == 1:
+                # One secondary candidate whose key is too different: explain why.
+                _, candidate_row, key_result = scored[0]
 
         explanation = _identity_explanation(
             classification,
             key_result,
             required_threshold,
-            secondary_details,
+            secondary_names if normalized_secondary_conditions else None,
+            secondary_mismatch,
         )
         identity_resolution.append(
             {
@@ -432,18 +531,23 @@ def run_generic_reconciliation(
             clean_f1_row["ROW (FILE 1)"] = file_1_row.get("_ROW_NO", row_idx + 2)
             clean_f1_row["IDENTITY CLASSIFICATION"] = classification.value
             clean_f1_row["MATCH EXPLANATION"] = explanation
+            if note := grouped_rows_note(file_1_row):
+                clean_f1_row["GROUPED ROWS"] = note
             file_1_not_found.append(clean_f1_row)
             continue
 
         matched_file_2_indices.add(best_idx)
-        
-        # Check if this was a many-to-one or one-to-many match
-        group_status = "One-to-One Match"
-        if file_1_row.get("__GROUP_COUNT__", 1) > 1 and file_2_row.get("__GROUP_COUNT__", 1) == 1:
-            group_status = "Many-to-One Match"
-        elif file_1_row.get("__GROUP_COUNT__", 1) == 1 and file_2_row.get("__GROUP_COUNT__", 1) > 1:
-            group_status = "One-to-Many Match"
-            
+
+        # Consolidated rows on either side: many-to-one / one-to-many / many-to-many.
+        grouped_1 = file_1_row.get("__GROUP_COUNT__", 1) > 1
+        grouped_2 = file_2_row.get("__GROUP_COUNT__", 1) > 1
+        group_status = {
+            (False, False): "One-to-One Match",
+            (True, False): "Many-to-One Match",
+            (False, True): "One-to-Many Match",
+            (True, True): "Many-to-Many Match",
+        }[(grouped_1, grouped_2)]
+
         reconciliation_result = {
             "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
             "ROW (FILE 2)": file_2_row.get("_ROW_NO", best_idx + 2),
@@ -470,6 +574,16 @@ def run_generic_reconciliation(
             # Raw (display) key values; the NORM_ columns above hold match forms.
             reconciliation_result["MATCH KEY"] = file_1_row.get(file_1_id_col[0])
             reconciliation_result["MATCHED KEY"] = file_2_row.get(file_2_id_col[0])
+        if secondary_columns_1:
+            reconciliation_result["SECONDARY KEY"] = " | ".join(str(file_1_row.get(column, "")) for column in secondary_columns_1)
+            reconciliation_result["MATCHED SECONDARY KEY"] = " | ".join(str(file_2_row.get(column, "")) for column in secondary_columns_2)
+        grouped_notes = [
+            f"{label}: {note}"
+            for label, row in (("File 1", file_1_row), ("File 2", file_2_row))
+            if (note := grouped_rows_note(row))
+        ]
+        if grouped_notes:
+            reconciliation_result["GROUPED ROWS"] = "; ".join(grouped_notes)
 
         for col in file_1_extra:
             if col != "_ROW_NO":
@@ -505,18 +619,9 @@ def run_generic_reconciliation(
         if idx in unmatched_indices:
             clean_f2_row = {k: v for k, v in file_2_records[i].items() if k in allowed_f2_cols}
             clean_f2_row["ROW (FILE 2)"] = file_2_records[i].get("_ROW_NO", idx + 2)
+            if note := grouped_rows_note(file_2_records[i]):
+                clean_f2_row["GROUPED ROWS"] = note
             file_2_not_found.append(clean_f2_row)
-            
-    # Add duplicates to results as separate classification
-    for _, row in f1_dupes.iterrows():
-        clean_row = {k: v for k, v in row.items() if k in allowed_f1_cols}
-        clean_row["CLASSIFICATION"] = "Duplicate"
-        file_1_not_found.append(clean_row)
-        
-    for _, row in f2_dupes.iterrows():
-        clean_row = {k: v for k, v in row.items() if k in allowed_f2_cols}
-        clean_row["CLASSIFICATION"] = "Duplicate"
-        file_2_not_found.append(clean_row)
 
     tracker.generating_report()
     
@@ -532,6 +637,11 @@ def run_generic_reconciliation(
         total_file_1=len(file_1_df),
         total_file_2=len(file_2_df),
         identity_resolution=identity_resolution,
+        secondary_keys=[
+            f"{condition['source_column']} ↔ {condition['destination_column']} ({str(condition.get('comparison_method', '')).replace('_', ' ')})"
+            for condition in normalized_secondary_conditions
+        ],
+        compared_fields=[f"{fields_label(left)} ↔ {fields_label(right)}" for left, right in normalized_rules],
     )
 
     if write_report:

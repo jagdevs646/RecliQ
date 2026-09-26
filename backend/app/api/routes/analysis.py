@@ -7,7 +7,8 @@ from app.database.session import get_db
 from app.schemas.reconciliation import AnalysisRequest, AnalysisResponse, PairAnalysisResult
 from app.models.file import UploadedFile
 from app.storage import get_storage
-from app.reconciliation_engine.ingestion import read_table_data
+from app.reconciliation_engine.ingestion import read_table_data, read_table_sample
+from app.reconciliation_engine.matching.key_analyzer import SAMPLE_ROWS
 from app.reconciliation_engine.preprocessing import prepare_dataframe
 from app.reconciliation_engine.schema import consolidate_dataframes, semantic_map_columns
 from app.reconciliation_engine.matching.key_analyzer import analyze_keys
@@ -31,7 +32,8 @@ def _load_single_sheet(db: Session, session_id: str, file_source) -> 'pd.DataFra
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"File not found: {fid}")
     path = storage.resolve_path(record.storage_path)
     sheet_id = getattr(file_source, "sheet_id", None) or (file_source.get("sheet_id") if isinstance(file_source, dict) else None) or "default"
-    df = read_table_data(path, record.original_filename, sheet_id)
+    # Key and mapping suggestions only need a sample; never wait for a full parse.
+    df = read_table_sample(path, record.original_filename, sheet_id, SAMPLE_ROWS)
     if not df.empty:
         df = prepare_dataframe(df)
     return df
@@ -76,20 +78,15 @@ def _analyze_pair(df1, df2) -> dict:
     cols1 = [c for c in df1.columns if not c.startswith("__")]
     cols2 = [c for c in df2.columns if not c.startswith("__")]
     mappings = semantic_map_columns(cols1, cols2)
-    key_analysis = analyze_keys(df1, df2)
-    recommended_keys_1 = []
-    recommended_keys_2 = []
-    if key_analysis.get("recommended_key"):
-        keys = key_analysis["recommended_key"]
-        if isinstance(keys, str):
-            keys = [keys]
-        recommended_keys_1 = keys
-        recommended_keys_2 = keys
+    key_analysis = analyze_keys(df1, df2, mappings)
     return {
-        "recommended_keys_1": recommended_keys_1,
-        "recommended_keys_2": recommended_keys_2,
+        "recommended_keys_1": key_analysis["recommended_key"],
+        "recommended_keys_2": key_analysis["recommended_key_destination"],
         "key_confidence": key_analysis.get("confidence", 0),
         "is_composite_key": key_analysis.get("is_composite", False),
+        "key_reason": key_analysis.get("reason", ""),
+        "date_columns_1": key_analysis.get("date_columns_1", []),
+        "date_columns_2": key_analysis.get("date_columns_2", []),
         "recommended_mappings": mappings,
     }
 

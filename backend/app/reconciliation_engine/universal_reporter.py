@@ -1,17 +1,37 @@
+"""Excel reconciliation report.
+
+The workbook is written for someone who has never seen RecliQ: the summary
+states what happened in plain words, every number is a stored value (so
+removing a tab never breaks a figure), and each detail tab answers one
+question. Internal matching columns (normalized keys, IDs, scores used only by
+the engine) are never shown.
+
+Tabs (each only when included):
+    01 Summary          status, key figures, results table with links, setup
+    02 Differences      one row per field that differs on a matched record
+    03 Only in <file 1> records with no partner in file 2, with the reason
+    04 Only in <file 2> records with no partner in file 1
+    05 Match Review     secondary-key and ambiguous matches to confirm
+    06 Matched          records that agree on every compared field
+    07 Checks           do the counts balance, and how matching was done
+    08 Sheet Rules      per-rule configuration (multi-rule jobs)
+"""
 from __future__ import annotations
 
+import math
 import re
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import openpyxl
 import pandas as pd
-from openpyxl.chart import BarChart, DoughnutChart, PieChart, Reference
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.series import DataPoint
-from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.hyperlink import Hyperlink
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
 
@@ -27,6 +47,7 @@ class ReportConfig:
         include_matched: bool = True,
         include_missing_file_1: bool = True,
         include_missing_file_2: bool = True,
+        # Historical name: now controls the "Match Review" tab.
         include_field_differences: bool = True,
         include_controls: bool = True,
         date_format: str = "YYYY-MM-DD",
@@ -43,7 +64,23 @@ class ReportConfig:
         self.number_format = number_format
 
 
-_INTERNAL_RECORD_COLUMNS = {"File Pair ID", "Sheet Rule ID"}
+# Engine columns that mean nothing to a reader of the report.
+_HIDDEN_COLUMNS = {
+    "File Pair ID", "Sheet Rule ID", "Sheet Pair", "MATCH TYPE", "MATCH CONFIDENCE", "MATCH STATUS",
+    "MATCH THRESHOLD", "IDENTITY CLASSIFICATION", "MATCH EXPLANATION", "GROUPED ROWS",
+    "COMPOSITE MATCH KEY", "MATCHED COMPOSITE KEY", "MATCH KEY", "MATCHED KEY",
+    "SECONDARY KEY", "MATCHED SECONDARY KEY", "GROUP CLASSIFICATION", "CANDIDATE KEY",
+}
+_HIDDEN_PREFIXES = ("NORM_", "MATCHED NORM_", "__")
+
+_RESULT_LABELS = {
+    "EXACT_MATCH": "Matched",
+    "EXCEPTION_MATCH": "Matched by secondary keys",
+    "AMBIGUOUS_MATCH": "Several possible matches",
+    "NOT_FOUND": "Not found",
+}
+
+_INVALID_SHEET_CHARS = re.compile(r"[\[\]:*?/\\]")
 
 
 def _clean_table_name(name: str) -> str:
@@ -54,12 +91,41 @@ def _clean_table_name(name: str) -> str:
 
 
 def _clean_file_label(name: str) -> str:
-    stem = Path(name).name
-    if stem.lower().endswith(".xlsx"):
-        return stem[:-5]
-    if stem.lower().endswith(".xls"):
-        return stem[:-4]
-    return stem
+    """'January.xlsx (Sales)' -> 'January (Sales)'."""
+    return re.sub(r"\.(xlsx|xls|csv)\b", "", str(name).strip(), flags=re.IGNORECASE)
+
+
+def _cell_value(value: Any) -> Any:
+    """Excel-safe value: blanks for NaN, plain dates for midnight timestamps."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
+        value = value.to_pydatetime()
+    if isinstance(value, datetime):
+        value = value.replace(tzinfo=None)
+        return value.date() if value.time() == time(0) else value
+    if isinstance(value, (list, dict, set, tuple)):
+        return str(value)
+    return value
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _row_number(record: dict, file_number: int) -> Any:
+    for key in (f"ROW (FILE {file_number})", f"ROW (File {file_number})"):
+        if key in record:
+            return record[key]
+    return next((value for key, value in record.items() if str(key).upper().startswith("ROW")), None)
+
+
+def _visible(column: str) -> bool:
+    return column not in _HIDDEN_COLUMNS and not str(column).startswith(_HIDDEN_PREFIXES) and not str(column).upper().startswith("ROW")
 
 
 class UniversalReporter:
@@ -69,930 +135,711 @@ class UniversalReporter:
         self.output_path = output_path
         self.font_family = "Arial"
         self.colors = {
-            "primary": "1F3864",       # Deep Navy Blue
-            "accent": "2E5395",        # Slate Blue
-            "header_fg": "FFFFFF",     # White
-            "pass": "1E7B34",          # Forest Green
-            "warning": "B36A00",       # Amber / Orange
-            "exception": "C0392B",     # Crimson Red
-            "critical": "A6192E",      # Dark Crimson
-            "portal_slice": "7A0C1E",  # Dark Maroon
-            "field_tab": "B36A00",     # Amber / Orange
-            "neutral_bg": "F2F2F2",    # Metric cards & zebra
+            "primary": "1F3864",       # Deep navy
+            "accent": "2E5395",        # Slate blue
+            "header_fg": "FFFFFF",
+            "pass": "1E7B34",          # Green
+            "warning": "B36A00",       # Amber
+            "exception": "C0392B",     # Red
+            "critical": "A6192E",
+            "review": "6C4AA0",        # Violet
+            "neutral_bg": "F2F2F2",
             "text_dark": "000000",
             "text_muted": "595959",
             "border": "D9D9D9",
-            "pass_bg": "D5F5E3",
+            "pass_bg": "E3F4E8",
+            "warn_bg": "FFF3D6",
             "fail_bg": "FADBD8",
+            "link": "1F5FBF",
+        }
+        meta = data.get("metadata", {})
+        self.file1 = meta.get("file_1_name", "File 1") or "File 1"
+        self.file2 = meta.get("file_2_name", "File 2") or "File 2"
+        self.multi_rule = len(data.get("sheet_rules") or []) > 1
+        self.sheet_names = self._plan_sheet_names()
+        self._table_names: set[str] = set()
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+    def _thin_border(self, color: str | None = None) -> Border:
+        side = Side(style="thin", color=color or self.colors["border"])
+        return Border(left=side, right=side, top=side, bottom=side)
+
+    def _font(self, size: float = 10, bold: bool = False, color: str | None = None, underline: str | None = None) -> Font:
+        return Font(name=self.font_family, size=size, bold=bold, color=color or self.colors["text_dark"], underline=underline)
+
+    def _plan_sheet_names(self) -> dict[str, str]:
+        def only_in(prefix: str, name: str, fallback: str) -> str:
+            label = _INVALID_SHEET_CHARS.sub("", _clean_file_label(name)).strip() or fallback
+            return f"{prefix} Only in {label}"[:31].rstrip()
+
+        only_1 = only_in("03", self.file1, "File 1")
+        only_2 = only_in("04", self.file2, "File 2")
+        if only_1[3:] == only_2[3:]:  # Same label on both sides (e.g. two sheets of one workbook).
+            only_1, only_2 = "03 Only in File 1", "04 Only in File 2"
+        return {
+            "summary": "01 Summary",
+            "differences": "02 Differences",
+            "only_1": only_1,
+            "only_2": only_2,
+            "review": "05 Match Review",
+            "matched": "06 Matched",
+            "checks": "07 Checks",
+            "rules": "08 Sheet Rules",
         }
 
-    def _thin_border(self, color: str | None = None) -> Border:
-        c = color or self.colors["border"]
-        s = Side(style="thin", color=c)
-        return Border(left=s, right=s, top=s, bottom=s)
+    def _counts(self) -> dict[str, int]:
+        stats = self.data.get("statistics", {})
+        exceptions = self.data.get("exceptions", [])
+        identity = stats.get("identity") or {}
+        review_rows = self._review_records()
+        differ = stats.get("mismatched")
+        if differ is None:
+            differ = len({row.get("Primary Key", row.get("Match Key")) for row in exceptions})
+        return {
+            "total_1": int(stats.get("total_file_1", 0) or 0),
+            "total_2": int(stats.get("total_file_2", 0) or 0),
+            "matched": len(self.data.get("matched_records", [])),
+            "differ": int(differ or 0),
+            "only_1": len(self.data.get("missing_in_file_2", [])),
+            "only_2": len(self.data.get("missing_in_file_1", [])),
+            "review": (identity.get("EXCEPTION_MATCH", 0) + identity.get("AMBIGUOUS_MATCH", 0)) if identity else len(review_rows),
+        }
 
-    def _sheet_name_missing(self, file_num: int) -> str:
-        meta = self.data.get("metadata", {})
-        fname = meta.get(f"file_{file_num}_name", f"Source {file_num}")
-        clean_name = _clean_file_label(fname)
-        num_prefix = "04" if file_num == 1 else "05"
-        full = f"{num_prefix} Missing - {clean_name}"
-        return full[:31]
+    def _review_records(self) -> list[dict]:
+        return [
+            record
+            for record in self.data.get("identity_resolution", [])
+            if record.get("IDENTITY CLASSIFICATION") in {"EXCEPTION_MATCH", "AMBIGUOUS_MATCH"}
+        ]
 
+    def _sheet_label(self, record: dict) -> str:
+        return str(record.get("Sheet Pair", "")).strip("[]")
+
+    def _title(self, ws, title: str, subtitle: str, width: int) -> None:
+        last = get_column_letter(max(width, 1))
+        ws.merge_cells(f"A1:{last}1")
+        ws["A1"] = title
+        ws["A1"].font = self._font(14, True, self.colors["primary"])
+        ws.row_dimensions[1].height = 22
+        ws.merge_cells(f"A2:{last}2")
+        ws["A2"] = subtitle
+        ws["A2"].font = self._font(9.5, color=self.colors["text_muted"])
+        ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[2].height = 30
+
+    def _write_table(
+        self,
+        ws,
+        headers: list[str],
+        rows: Iterable[list[Any]],
+        table_name: str,
+        empty_message: str,
+        number_columns: Iterable[int] = (),
+        percent_columns: Iterable[int] = (),
+    ) -> int:
+        """Write a filterable table at row 4; return the number of data rows.
+
+        Rows are appended in bulk and styled by the Excel table, which keeps
+        large reports fast (no per-cell style objects).
+        """
+        headers = self._unique_headers(headers)
+        ws.append([])  # Row 3 spacer (rows 1-2 hold the title).
+        ws.append(headers)
+        count = 0
+        for row in rows:
+            ws.append([_cell_value(value) for value in row])
+            count += 1
+        ws.freeze_panes = "A5"
+        if count == 0:
+            ws.cell(row=5, column=1, value=empty_message).font = self._font(10, color=self.colors["text_muted"])
+            for col_idx in range(1, len(headers) + 1):
+                cell = ws.cell(row=4, column=col_idx)
+                cell.font = self._font(10, True, self.colors["header_fg"])
+                cell.fill = PatternFill("solid", fgColor=self.colors["primary"])
+        else:
+            last = get_column_letter(len(headers))
+            name = _clean_table_name(table_name)
+            while name in self._table_names:
+                name = f"{name[:27]}{len(self._table_names)}"
+            self._table_names.add(name)
+            table = Table(displayName=name, ref=f"A4:{last}{count + 4}")
+            table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+            ws.add_table(table)
+            for col_idx in number_columns:
+                for (cell,) in ws.iter_rows(min_row=5, max_row=count + 4, min_col=col_idx, max_col=col_idx):
+                    if _is_number(cell.value):
+                        cell.number_format = self.config.number_format
+            for col_idx in percent_columns:
+                for (cell,) in ws.iter_rows(min_row=5, max_row=count + 4, min_col=col_idx, max_col=col_idx):
+                    if _is_number(cell.value):
+                        cell.number_format = "0.0%"
+        self._fit_columns(ws, headers, count)
+        return count
+
+    @staticmethod
+    def _unique_headers(headers: list[str]) -> list[str]:
+        seen: dict[str, int] = {}
+        unique = []
+        for header in headers:
+            text = str(header) if header not in (None, "") else "Column"
+            key = text.lower()
+            if key in seen:
+                seen[key] += 1
+                text = f"{text} ({seen[key]})"
+            else:
+                seen[key] = 1
+            unique.append(text)
+        return unique
+
+    @staticmethod
+    def _display_length(value: Any) -> int:
+        if _is_number(value):
+            return len(f"{value:,.2f}")  # As displayed, not the raw float repr.
+        return len(str(value))
+
+    def _fit_columns(self, ws, headers: list[str], count: int) -> None:
+        sample_rows = list(ws.iter_rows(min_row=5, max_row=min(count, 200) + 4, values_only=True)) if count else []
+        for col_idx, header in enumerate(headers, start=1):
+            longest = max(
+                [len(str(header)) + 2]  # Room for the filter button.
+                + [self._display_length(row[col_idx - 1]) for row in sample_rows if col_idx - 1 < len(row) and row[col_idx - 1] is not None]
+            )
+            limit = 90 if header in {"Why it was not matched", "Explanation"} else 50
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(longest + 2, 11), limit)
+
+    # ── Workbook ───────────────────────────────────────────────────────────
     def generate(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
         wb = openpyxl.Workbook()
-        # Track initial active sheet to remove later
         default_sheet = wb.active
 
-        sheet_missing_1 = self._sheet_name_missing(1)
-        sheet_missing_2 = self._sheet_name_missing(2)
-
+        included = {
+            "differences": self.config.include_exceptions,
+            "only_1": self.config.include_missing_file_1,
+            "only_2": self.config.include_missing_file_2,
+            "review": self.config.include_field_differences and bool(self._review_records()),
+            "matched": self.config.include_matched,
+            "checks": self.config.include_controls,
+            "rules": self._has_rule_breakdown(),
+        }
         if self.config.include_summary:
-            self._generate_summary(wb, sheet_missing_1, sheet_missing_2)
-        if self.config.include_exceptions:
-            self._generate_exceptions(wb)
-        if self.config.include_matched:
+            self._generate_summary(wb, included)
+        if included["differences"]:
+            self._generate_differences(wb)
+        if included["only_1"]:
+            self._generate_only_in(wb, 1)
+        if included["only_2"]:
+            self._generate_only_in(wb, 2)
+        if included["review"]:
+            self._generate_review(wb)
+        if included["matched"]:
             self._generate_matched(wb)
-        if self.config.include_missing_file_1:
-            self._generate_missing(wb, 1, sheet_missing_1)
-        if self.config.include_missing_file_2:
-            self._generate_missing(wb, 2, sheet_missing_2)
-        if self.config.include_field_differences:
-            self._generate_field_differences(wb)
-        if self.data.get("identity_resolution"):
-            self._generate_identity_resolution(wb)
-        if self.config.include_controls:
-            self._generate_controls(wb, sheet_missing_1, sheet_missing_2)
-        if self._has_rule_breakdown():
+        if included["checks"]:
+            self._generate_checks(wb)
+        if included["rules"]:
             self._generate_sheet_rules(wb)
 
-        if default_sheet and default_sheet in wb.worksheets:
+        if default_sheet in wb.worksheets:
             wb.remove(default_sheet)
-
-        if len(wb.worksheets) == 0:
-            ws = wb.create_sheet("Empty")
-            ws.cell(row=1, column=1, value="No sections selected")
-
-        # Set active sheet to summary if present
-        if "01 Executive Summary" in wb.sheetnames:
-            wb.active = wb["01 Executive Summary"]
-
+        if not wb.worksheets:
+            wb.create_sheet("Empty").cell(row=1, column=1, value="No sections selected")
+        if self.sheet_names["summary"] in wb.sheetnames:
+            wb.active = wb[self.sheet_names["summary"]]
         wb.save(self.output_path)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 1: 01 Executive Summary
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_summary(self, wb: openpyxl.Workbook, sheet_missing_1: str, sheet_missing_2: str) -> None:  # noqa: C901
-        ws = wb.create_sheet("01 Executive Summary")
+    # ── 01 Summary ─────────────────────────────────────────────────────────
+    def _generate_summary(self, wb: openpyxl.Workbook, included: dict[str, bool]) -> None:
+        ws = wb.create_sheet(self.sheet_names["summary"])
         ws.sheet_properties.tabColor = self.colors["primary"]
         ws.views.sheetView[0].showGridLines = False
-
-        meta = self.data.get("metadata", {})
-        file1_name = meta.get("file_1_name", "File 1")
-        file2_name = meta.get("file_2_name", "File 2")
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
-
-        # Format generated date
-        gen_time_str = datetime.now(timezone.utc).strftime("%B %d, %Y")
-
-        # Row counts in detail tabs
-        exceptions_list = self.data.get("exceptions", [])
-        matched_list = self.data.get("matched_records", [])
-        missing_1_list = self.data.get("missing_in_file_1", [])
-        missing_2_list = self.data.get("missing_in_file_2", [])
-        field_exc = self.data.get("field_exception_summary", [])
-
-        max_exc_row = max(5, len(exceptions_list) + 4)
-        max_matched_row = max(5, len(matched_list) + 4)
-        max_m1_row = max(5, len(missing_1_list) + 4)
-        max_m2_row = max(5, len(missing_2_list) + 4)
-
+        counts = self._counts()
         border = self._thin_border()
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        slate_fill = PatternFill("solid", fgColor=self.colors["accent"])
         card_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
+        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
 
-        # ── Row 1: Main Header Banner ──────────────────────────────────────
-        ws.merge_cells("B1:N1")
-        b1 = ws["B1"]
-        b1.value = "RECLIQ  |  RECONCILIATION EXECUTIVE SUMMARY"
-        b1.font = Font(name=self.font_family, size=18, bold=True, color=self.colors["header_fg"])
-        b1.fill = navy_fill
-        b1.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        ws.row_dimensions[1].height = 33.75
+        # Content lives in columns B:H; the chart sits alone from column J.
+        ws.column_dimensions["A"].width = 2
+        ws.column_dimensions["B"].width = 32
+        for column in "CDEFG":
+            ws.column_dimensions[column].width = 13
+        ws.column_dimensions["H"].width = 22
+        ws.column_dimensions["I"].width = 3
 
-        # ── Row 2: Subtitle Metadata ───────────────────────────────────────
-        ws.merge_cells("B2:N2")
-        b2 = ws["B2"]
-        b2.value = f"{file1_name}  vs.  {file2_name}     •     Matching Key: {key_label}     •     Report Generated: {gen_time_str}"
-        b2.font = Font(name=self.font_family, size=10, color=self.colors["header_fg"])
-        b2.fill = slate_fill
-        b2.alignment = Alignment(horizontal="left", vertical="center", indent=1)
-        ws.row_dimensions[2].height = 19.5
+        ws.merge_cells("B1:H1")
+        ws["B1"] = "Reconciliation Report"
+        ws["B1"].font = self._font(18, True, self.colors["header_fg"])
+        ws["B1"].fill = navy_fill
+        ws["B1"].alignment = Alignment(vertical="center", indent=1)
+        ws.row_dimensions[1].height = 34
+        ws.merge_cells("B2:H2")
+        ws["B2"] = f"{self.file1}  compared with  {self.file2}   ·   Generated {datetime.now(timezone.utc).strftime('%d %b %Y')}"
+        ws["B2"].font = self._font(10, color=self.colors["header_fg"])
+        ws["B2"].fill = PatternFill("solid", fgColor=self.colors["accent"])
+        ws["B2"].alignment = Alignment(vertical="center", indent=1)
+        ws.row_dimensions[2].height = 20
 
-        # ── Row 4: KEY METRICS Section ─────────────────────────────────────
-        ws.merge_cells("B4:N4")
-        b4 = ws["B4"]
-        b4.value = "KEY METRICS"
-        b4.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b4.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[4].height = 21.75
+        attention = counts["differ"] + counts["only_1"] + counts["only_2"]
+        ws.merge_cells("B4:H4")
+        if attention == 0 and counts["review"] == 0:
+            status, fill, color = f"✔  All {counts['total_1']:,} records match. No action needed.", self.colors["pass_bg"], self.colors["pass"]
+        else:
+            status = f"⚠  {attention:,} item{'s' if attention != 1 else ''} need your attention — see the Results table below."
+            fill, color = self.colors["warn_bg"], self.colors["warning"]
+        ws["B4"] = status
+        ws["B4"].font = self._font(12, True, color)
+        ws["B4"].fill = PatternFill("solid", fgColor=fill)
+        ws["B4"].alignment = Alignment(vertical="center", indent=1)
+        ws.row_dimensions[4].height = 26
 
-        # ── Row 5: KPI Headers ─────────────────────────────────────────────
-        kpi_headers = [
-            ("B5:C5", "TOTAL RECORDS IN SCOPE"),
-            ("D5:E5", "MATCHED"),
-            ("F5:G5", "EXCEPTIONS"),
-            ("H5:I5", "MISSING"),
-            ("J5:K5", "MATCH RATE"),
-            ("L5:M5", "EXCEPTION RATE"),
+        compared = counts["matched"] + counts["differ"]
+        rate = counts["matched"] / counts["total_1"] if counts["total_1"] else 0
+        cards = [
+            ("B6:B6", "B7:B7", f"Records in {self.file1}", counts["total_1"], "#,##0", self.colors["primary"]),
+            ("C6:D6", "C7:D7", f"Records in {self.file2}", counts["total_2"], "#,##0", self.colors["primary"]),
+            ("E6:F6", "E7:F7", "Matched, no differences", counts["matched"], "#,##0", self.colors["pass"]),
+            ("G6:H6", "G7:H7", "Match rate", rate, "0.0%", self.colors["pass"] if rate >= 0.99 else self.colors["warning"]),
         ]
-        for rng, label in kpi_headers:
-            ws.merge_cells(rng)
-            c = ws[rng.split(":")[0]]
-            c.value = label
-            c.font = Font(name=self.font_family, size=8, bold=True, color=self.colors["text_muted"])
-            c.fill = card_fill
-            c.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[5].height = 15.75
+        for label_range, value_range, label, value, number_format, color in cards:
+            ws.merge_cells(label_range)
+            ws.merge_cells(value_range)
+            label_cell = ws[label_range.split(":")[0]]
+            label_cell.value = label
+            label_cell.font = self._font(9, True, self.colors["text_muted"])
+            value_cell = ws[value_range.split(":")[0]]
+            value_cell.value = value
+            value_cell.number_format = number_format
+            value_cell.font = self._font(20, True, color)
+            for cell_range in (label_range, value_range):
+                for row in ws[cell_range]:
+                    for cell in row:
+                        cell.fill = card_fill
+                        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        ws.row_dimensions[6].height = 28
+        ws.row_dimensions[7].height = 34
 
-        # ── Row 6: KPI Values with dynamic formulas ────────────────────────
-        kpi_values = [
-            (
-                "B6:C6",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})"
-                f"+COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
-                self.colors["primary"],
-                "#,##0",
-            ),
-            ("D6:E6", f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})", self.colors["pass"], "#,##0"),
-            ("F6:G6", f"=SUM('02 Exceptions'!M5:M{max_exc_row})", self.colors["warning"], "#,##0"),
-            (
-                "H6:I6",
-                f"=COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
-                self.colors["critical"],
-                "#,##0",
-            ),
-            ("J6:K6", "=IF($B$6>0,$D$6/$B$6,0)", self.colors["pass"], "0.0%"),
-            ("L6:M6", "=IF($B$6>0,$F$6/$B$6,0)", self.colors["warning"], "0.0%"),
-        ]
-        for rng, form, color, num_fmt in kpi_values:
-            ws.merge_cells(rng)
-            c = ws[rng.split(":")[0]]
-            c.value = form
-            c.font = Font(name=self.font_family, size=20, bold=True, color=color)
-            c.fill = card_fill
-            c.alignment = Alignment(horizontal="center", vertical="center")
-            c.number_format = num_fmt
-        ws.row_dimensions[6].height = 30
-
-        # Apply borders around KPI cards
-        for col_idx in range(2, 14):
-            for row_idx in (5, 6, 7):
-                ws.cell(row=row_idx, column=col_idx).border = border
-
-        # ── Row 7: KPI Subtext / dynamic text formulas ─────────────────────
-        kpi_subtext = [
-            ("B7:C7", f'="Unique {key_label} across both files"'),
-            ("D7:E7", '="of "&$B$6&" records reviewed"'),
-            ("F7:G7", f'=(COUNTA(\'02 Exceptions\'!B5:B{max_exc_row}))&" field-level mismatch(es)"'),
-            ("H7:I7", f'=(COUNTA(\'{sheet_missing_1}\'!A5:A{max_m1_row}))&" + "&(COUNTA(\'{sheet_missing_2}\'!A5:A{max_m2_row}))&" by source"'),
-            ("J7:K7", '="records matched cleanly"'),
-            ("L7:M7", '="records need review"'),
-        ]
-        for rng, form in kpi_subtext:
-            ws.merge_cells(rng)
-            c = ws[rng.split(":")[0]]
-            c.value = form
-            c.font = Font(name=self.font_family, size=8, color=self.colors["text_muted"])
-            c.fill = card_fill
-            c.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[7].height = 15.75
-
-        # ── Row 9: RECONCILIATION OUTCOME ──────────────────────────────────
-        ws.merge_cells("B9:F9")
-        b9 = ws["B9"]
-        b9.value = "RECONCILIATION OUTCOME"
-        b9.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b9.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[9].height = 21.75
-
-        # Outcome Table Header (Row 10)
-        ws.row_dimensions[10].height = 15.75
-        for col_idx, h_text in enumerate(["Category", "Count", "% of Total"], start=2):
-            cell = ws.cell(row=10, column=col_idx, value=h_text)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
+        # Results: one line per outcome, each linked to the tab that lists it.
+        row = 9
+        row = self._section(ws, row, "RESULTS")
+        headers = [("B", "Result"), ("C", "Records"), ("D", "What it means"), ("H", "Where to look")]
+        ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=7)
+        for column, text in headers:
+            cell = ws[f"{column}{row}"]
+            cell.value = text
+            cell.font = self._font(10, True, self.colors["header_fg"])
             cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-
-        # Outcome Data Rows (Rows 11-14)
-        outcome_rows = [
-            ("Matched", "=$D$6"),
-            ("Exceptions", "=$F$6"),
-            (f"Missing — {file1_name}", f"=COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})"),
-            (f"Missing — {file2_name}", f"=COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})"),
+            cell.alignment = Alignment(horizontal="left" if column in "BD" else "center", vertical="center")
+        results = [
+            ("Matched – all fields agree", counts["matched"], "Found in both files and every compared field is the same.", "matched", self.colors["pass"]),
+            ("Matched – values differ", counts["differ"], "Found in both files, but at least one compared field is different.", "differences", self.colors["exception"]),
+            (f"Only in {self.file1}", counts["only_1"], f"In {self.file1} but no matching record was found in {self.file2}.", "only_1", self.colors["critical"]),
+            (f"Only in {self.file2}", counts["only_2"], f"In {self.file2} but no matching record was found in {self.file1}.", "only_2", self.colors["critical"]),
         ]
-        for idx, (cat_name, count_form) in enumerate(outcome_rows, start=11):
-            fill = card_fill if idx % 2 == 0 else PatternFill(fill_type=None)
-            c_cat = ws.cell(row=idx, column=2, value=cat_name)
-            c_cat.font = Font(name=self.font_family, size=9)
-            c_cat.fill = fill
-            c_cat.alignment = Alignment(horizontal="left", vertical="center")
-            c_cat.border = border
+        if self.data.get("identity_resolution"):
+            results.append(("Needs review", counts["review"], "Matched through secondary keys with a slightly different primary key, or several possible matches were found.", "review", self.colors["review"]))
+        first_result_row = row + 1
+        for label, count, meaning, sheet_key, color in results:
+            row += 1
+            label_cell = ws.cell(row=row, column=2, value=label)
+            label_cell.font = self._font(10, True, color)
+            label_cell.alignment = Alignment(vertical="center", wrap_text=True)
+            count_cell = ws.cell(row=row, column=3, value=count)
+            count_cell.number_format = "#,##0"
+            count_cell.font = self._font(11, True)
+            count_cell.alignment = Alignment(horizontal="center", vertical="center")
+            ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=7)
+            meaning_cell = ws.cell(row=row, column=4, value=meaning)
+            meaning_cell.font = self._font(9, color=self.colors["text_muted"])
+            meaning_cell.alignment = Alignment(wrap_text=True, vertical="center")
+            link_cell = ws.cell(row=row, column=8)
+            if included.get(sheet_key):
+                sheet = self.sheet_names[sheet_key]
+                link_cell.value = f"Open '{sheet}'"
+                link_cell.hyperlink = Hyperlink(ref=link_cell.coordinate, location=f"'{sheet}'!A1")  # In-workbook link.
+                link_cell.font = self._font(9, color=self.colors["link"], underline="single")
+            else:
+                link_cell.value = "—"
+                link_cell.font = self._font(9, color=self.colors["text_muted"])
+            link_cell.alignment = Alignment(horizontal="center", vertical="center")
+            for col_idx in range(2, 9):
+                ws.cell(row=row, column=col_idx).border = border
+            ws.row_dimensions[row].height = 30
+        last_result_row = row
 
-            c_count = ws.cell(row=idx, column=3, value=count_form)
-            c_count.font = Font(name=self.font_family, size=9)
-            c_count.fill = fill
-            c_count.alignment = Alignment(horizontal="center", vertical="center")
-            c_count.number_format = "#,##0"
-            c_count.border = border
+        # How matching was done, in words.
+        row = self._section(ws, row + 2, "HOW RECORDS WERE MATCHED")
+        for label, value in self._matching_description(counts):
+            label_cell = ws.cell(row=row, column=2, value=label)
+            label_cell.font = self._font(10, True)
+            label_cell.alignment = Alignment(vertical="center")
+            ws.merge_cells(start_row=row, start_column=3, end_row=row, end_column=8)
+            value_cell = ws.cell(row=row, column=3, value=value)
+            value_cell.font = self._font(10)
+            value_cell.alignment = Alignment(wrap_text=True, vertical="center")
+            ws.row_dimensions[row].height = 30 if len(str(value)) > 80 else 18
+            row += 1
 
-            c_pct = ws.cell(row=idx, column=4, value=f"=C{idx}/$B$6")
-            c_pct.font = Font(name=self.font_family, size=9)
-            c_pct.fill = fill
-            c_pct.alignment = Alignment(horizontal="center", vertical="center")
-            c_pct.number_format = "0.0%"
-            c_pct.border = border
+        # Which fields differ most.
+        row = self._section(ws, row + 1, "FIELDS WITH DIFFERENCES")
+        field_counts = self._field_difference_counts()
+        if not field_counts:
+            ws.cell(row=row, column=2, value="No field differences were found.").font = self._font(10, color=self.colors["pass"])
+            row += 1
+        else:
+            for column, text in (("B", "Field"), ("C", "Records"), ("D", "Share of matched records")):
+                cell = ws[f"{column}{row}"]
+                cell.value = text
+                cell.font = self._font(10, True, self.colors["header_fg"])
+                cell.fill = navy_fill
+            ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=5)
+            for field, count in field_counts[:15]:
+                row += 1
+                ws.cell(row=row, column=2, value=field).font = self._font(10)
+                ws.cell(row=row, column=3, value=count).alignment = Alignment(horizontal="center")
+                ws.merge_cells(start_row=row, start_column=4, end_row=row, end_column=5)
+                share = ws.cell(row=row, column=4, value=count / compared if compared else 0)
+                share.number_format = "0.0%"
+                share.alignment = Alignment(horizontal="center")
+                for col_idx in range(2, 6):
+                    ws.cell(row=row, column=col_idx).border = border
+            row += 1
 
-        # Outcome Total Row (Row 15)
-        ws.cell(row=15, column=2, value="Total").font = Font(name=self.font_family, size=9, bold=True)
-        ws.cell(row=15, column=2).border = border
-
-        c15 = ws.cell(row=15, column=3, value="=SUM(C11:C14)")
-        c15.font = Font(name=self.font_family, size=9, bold=True)
-        c15.alignment = Alignment(horizontal="center", vertical="center")
-        c15.number_format = "#,##0"
-        c15.border = border
-
-        d15 = ws.cell(row=15, column=4, value="=SUM(D11:D14)")
-        d15.font = Font(name=self.font_family, size=9, bold=True)
-        d15.alignment = Alignment(horizontal="center", vertical="center")
-        d15.number_format = "0.0%"
-        d15.border = border
-
-        # ── Outcome Doughnut / Pie Chart (Position: G8 to M22) ─────────────
-        pie = DoughnutChart()
-        pie.title = "Reconciliation Outcome"
-        pie.holeSize = 50
-        labels_ref = Reference(ws, min_col=2, min_row=11, max_row=14)
-        data_ref = Reference(ws, min_col=3, min_row=10, max_row=14)
-        pie.add_data(data_ref, titles_from_data=True)
-        pie.set_categories(labels_ref)
-        pie.legend.legendPos = "b"
-        pie.width = 17
-        pie.height = 10.5
-
-        pie_colors = [self.colors["pass"], self.colors["warning"], self.colors["critical"], self.colors["portal_slice"]]
-        for i, color in enumerate(pie_colors):
-            dp = DataPoint(idx=i)
-            dp.graphicalProperties.solidFill = color
-            pie.series[0].data_points.append(dp)
-
-        ws.add_chart(pie, "G8")
-
-        # ── Row 17: EXCEPTION BREAKDOWN BY TYPE ────────────────────────────
-        ws.merge_cells("B17:F17")
-        b17 = ws["B17"]
-        b17.value = "EXCEPTION BREAKDOWN BY TYPE"
-        b17.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b17.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[17].height = 21.75
-
-        # Table Header (Row 18)
-        ws.row_dimensions[18].height = 15.75
-        for col_idx, h_text in enumerate(["Exception Type", "Count", "% of Total"], start=2):
-            cell = ws.cell(row=18, column=col_idx, value=h_text)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-
-        # Breakdown Data Rows (Rows 19-22)
-        exc_breakdown = [
-            ("Value Difference", f"=COUNTIFS('02 Exceptions'!$H$5:$H${max_exc_row},\"Value Difference\")"),
-            ("Text Difference", f"=COUNTIFS('02 Exceptions'!$H$5:$H${max_exc_row},\"Text Difference\")"),
-            (f"Missing — {file1_name}", f"=COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})"),
-            (f"Missing — {file2_name}", f"=COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})"),
+        # A short reading guide.
+        row = self._section(ws, row + 1, "HOW TO READ THIS REPORT")
+        guide = [
+            f"{self.sheet_names['differences']}: one row per field that differs on a matched record, with both values side by side.",
+            f"{self.sheet_names['only_1']} / {self.sheet_names['only_2']}: records without a partner in the other file, and why.",
+            f"{self.sheet_names['review']}: matches made through secondary keys, or records with several possible matches. Confirm them.",
+            f"{self.sheet_names['matched']}: records that agree on every compared field.",
+            f"{self.sheet_names['checks']}: confirms every record is accounted for.",
         ]
-        for idx, (exc_type, count_form) in enumerate(exc_breakdown, start=19):
-            fill = card_fill if idx % 2 == 0 else PatternFill(fill_type=None)
-            c_type = ws.cell(row=idx, column=2, value=exc_type)
-            c_type.font = Font(name=self.font_family, size=9)
-            c_type.fill = fill
-            c_type.alignment = Alignment(horizontal="left", vertical="center")
-            c_type.border = border
+        for line in guide:
+            ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
+            cell = ws.cell(row=row, column=2, value=f"•  {line}")
+            cell.font = self._font(9.5, color=self.colors["text_muted"])
+            row += 1
 
-            c_count = ws.cell(row=idx, column=3, value=count_form)
-            c_count.font = Font(name=self.font_family, size=9)
-            c_count.fill = fill
-            c_count.alignment = Alignment(horizontal="center", vertical="center")
-            c_count.number_format = "#,##0"
-            c_count.border = border
+        # One chart, in its own columns (J onwards) so it never covers a cell.
+        chart = BarChart()
+        chart.type = "bar"
+        chart.title = "Records by result"
+        chart.legend = None
+        chart.y_axis.majorGridlines = None
+        chart.y_axis.delete = True
+        chart.x_axis.scaling.orientation = "maxMin"  # Same order as the table.
+        chart.width, chart.height = 15, 8
+        chart.add_data(Reference(ws, min_col=3, min_row=first_result_row, max_row=last_result_row), titles_from_data=False)
+        chart.set_categories(Reference(ws, min_col=2, min_row=first_result_row, max_row=last_result_row))
+        chart.x_axis.delete = False  # Category names on the axis, counts on the bars.
+        series = chart.series[0]
+        series.dLbls = DataLabelList()
+        series.dLbls.showVal = True
+        series.dLbls.showSerName = False
+        series.dLbls.showCatName = False
+        series.dLbls.showLegendKey = False
+        for index, (_, _, _, _, color) in enumerate(results):
+            point = DataPoint(idx=index)
+            point.graphicalProperties.solidFill = color
+            point.graphicalProperties.line.solidFill = color
+            series.data_points.append(point)
+        ws.add_chart(chart, "J6")
 
-            c_pct = ws.cell(row=idx, column=4, value=f"=C{idx}/SUM($C$19:$C$22)")
-            c_pct.font = Font(name=self.font_family, size=9)
-            c_pct.fill = fill
-            c_pct.alignment = Alignment(horizontal="center", vertical="center")
-            c_pct.number_format = "0.0%"
-            c_pct.border = border
+    def _section(self, ws, row: int, title: str) -> int:
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
+        cell = ws.cell(row=row, column=2, value=title)
+        cell.font = self._font(11, True, self.colors["primary"])
+        cell.border = Border(bottom=Side(style="medium", color=self.colors["primary"]))
+        ws.row_dimensions[row].height = 22
+        return row + 1
 
-        # ── Row 24: FIELD-LEVEL PERFORMANCE ────────────────────────────────
-        ws.merge_cells("B24:F24")
-        b24 = ws["B24"]
-        b24.value = "FIELD-LEVEL PERFORMANCE"
-        b24.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b24.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[24].height = 21.75
+    def _matching_description(self, counts: dict[str, int]) -> list[tuple[str, str]]:
+        meta = self.data.get("metadata", {})
+        rules = self.data.get("sheet_rules") or []
+        if len(rules) > 1:
+            description = [("Primary key", f"Each sheet rule uses its own keys — see '{self.sheet_names['rules']}'.")]
+        else:
+            rule = rules[0] if rules else {}
+            source = rule.get("primary_key_source") or meta.get("matching_keys") or []
+            destination = rule.get("primary_key_destination") or []
+            key = " + ".join(source) + (f"  ↔  {' + '.join(destination)}" if destination else "")
+            description = [("Primary key", f"{key or 'Key'} (spacing, case and punctuation differences are ignored)")]
+            secondary = meta.get("secondary_keys") or [
+                f"{condition.get('source_column')} ↔ {condition.get('destination_column')}"
+                for condition in rule.get("secondary_conditions") or []
+            ]
+            description.append(
+                ("Secondary keys", f"{'; '.join(secondary)} — must also match for records to be paired" if secondary else "None")
+            )
+        if meta.get("compared_fields"):
+            description.append(("Compared fields", ", ".join(meta["compared_fields"])))
+        combined = sum(
+            1
+            for category in ("matched_records", "missing_in_file_1", "missing_in_file_2")
+            for record in self.data.get(category, [])
+            if record.get("GROUPED ROWS")
+        ) + len({row.get("Primary Key") for row in self.data.get("exceptions", []) if row.get("Grouped Rows")})
+        if combined:
+            description.append(
+                ("Combined rows", f"{combined:,} record(s) were built by adding up rows that share the same key (see the 'Combined rows' column).")
+            )
+        return description
 
-        # Table Header (Row 25)
-        ws.row_dimensions[25].height = 15.75
-        for col_idx, h_text in enumerate(["Field", "Matched", "Mismatches", "Match Rate"], start=2):
-            cell = ws.cell(row=25, column=col_idx, value=h_text)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
+    def _field_difference_counts(self) -> list[tuple[str, int]]:
+        records_by_field: dict[str, set] = {}
+        for row in self.data.get("exceptions", []):
+            identity = (row.get("Sheet Pair"), row.get("Primary Key", row.get("Match Key")))
+            records_by_field.setdefault(str(row.get("Field", "")), set()).add(identity)
+        return sorted(((field, len(keys)) for field, keys in records_by_field.items()), key=lambda item: -item[1])
 
-        fields = [f.get("Field", "") for f in field_exc if f.get("Field")] or ["Sample Field"]
-        fld_start_row = 26
-        fld_end_row = fld_start_row + len(fields) - 1
-
-        for idx, f_name in enumerate(fields, start=fld_start_row):
-            fill = card_fill if idx % 2 == 1 else PatternFill(fill_type=None)
-            c_f = ws.cell(row=idx, column=2, value=f_name)
-            c_f.font = Font(name=self.font_family, size=9)
-            c_f.fill = fill
-            c_f.alignment = Alignment(horizontal="left", vertical="center")
-            c_f.border = border
-
-            c_m = ws.cell(row=idx, column=3, value="=$D$6")
-            c_m.font = Font(name=self.font_family, size=9)
-            c_m.fill = fill
-            c_m.alignment = Alignment(horizontal="center", vertical="center")
-            c_m.number_format = "#,##0"
-            c_m.border = border
-
-            c_mm = ws.cell(row=idx, column=4, value=f"=COUNTIFS('02 Exceptions'!$C$5:$C${max_exc_row},B{idx})")
-            c_mm.font = Font(name=self.font_family, size=9)
-            c_mm.fill = fill
-            c_mm.alignment = Alignment(horizontal="center", vertical="center")
-            c_mm.number_format = "#,##0"
-            c_mm.border = border
-
-            c_rate = ws.cell(row=idx, column=5, value=f"=IF((C{idx}+D{idx})>0,C{idx}/(C{idx}+D{idx}),0)")
-            c_rate.font = Font(name=self.font_family, size=9)
-            c_rate.fill = fill
-            c_rate.alignment = Alignment(horizontal="center", vertical="center")
-            c_rate.number_format = "0.0%"
-            c_rate.border = border
-
-        # ── Column Bar Chart: Field-Level Mismatches (Position: G23 to M36) ─
-        bar = BarChart()
-        bar.type = "col"
-        bar.style = 10
-        bar.title = "Field-Level Mismatches"
-        bar.y_axis.title = None
-        bar.x_axis.title = None
-        bar.legend = None
-        bar.width = 17
-        bar.height = 10.5
-
-        bar_cats = Reference(ws, min_col=2, min_row=fld_start_row, max_row=fld_end_row)
-        bar_data = Reference(ws, min_col=4, min_row=25, max_row=fld_end_row)
-        bar.add_data(bar_data, titles_from_data=True)
-        bar.set_categories(bar_cats)
-        if bar.series:
-            bar.series[0].graphicalProperties.solidFill = self.colors["primary"]
-
-        ws.add_chart(bar, "G23")
-
-        # ── Row 30: KEY INSIGHTS ───────────────────────────────────────────
-        ins_start_row = max(30, fld_end_row + 2)
-        ws.merge_cells(start_row=ins_start_row, start_column=2, end_row=ins_start_row, end_column=13)
-        b_ins = ws.cell(row=ins_start_row, column=2, value="KEY INSIGHTS")
-        b_ins.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b_ins.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[ins_start_row].height = 21.75
-
-        # Dynamic Formula Bullets
-        bullets = [
-            '="•  "&TEXT($J$6,"0.0%")&" of records matched perfectly ("&$D$6&" of "&$B$6&")."',
-            f'="•  "&$F$6&" discrepant record(s) identified ("&(COUNTA(\'02 Exceptions\'!B5:B{max_exc_row}))&" field mismatches) — review required."',
-            f'="•  "&(COUNTA(\'{sheet_missing_1}\'!A5:A{max_m1_row})+COUNTA(\'{sheet_missing_2}\'!A5:A{max_m2_row}))&" record(s) missing from one or both sources ("&(COUNTA(\'{sheet_missing_1}\'!A5:A{max_m1_row}))&" {file1_name}, "&(COUNTA(\'{sheet_missing_2}\'!A5:A{max_m2_row}))&" {file2_name})."',
-            f'="•  Field \'"&INDEX($B${fld_start_row}:$B${fld_end_row},MATCH(MAX($D${fld_start_row}:$D${fld_end_row}),$D${fld_start_row}:$D${fld_end_row},0))&"\' has the highest exception count ("&MAX($D${fld_start_row}:$D${fld_end_row})&")."',
-        ]
-        for i, b_form in enumerate(bullets, start=ins_start_row + 1):
-            ws.merge_cells(start_row=i, start_column=2, end_row=i, end_column=14)
-            c = ws.cell(row=i, column=2, value=b_form)
-            c.font = Font(name=self.font_family, size=9.5)
-            c.alignment = Alignment(horizontal="left", vertical="center")
-            ws.row_dimensions[i].height = 15.75
-
-        # ── CONTROL SUMMARY Section ────────────────────────────────────────
-        ctrl_start = ins_start_row + 5 + 1
-        ws.merge_cells(start_row=ctrl_start, start_column=2, end_row=ctrl_start, end_column=13)
-        b_ctrl = ws.cell(row=ctrl_start, column=2, value="CONTROL SUMMARY")
-        b_ctrl.font = Font(name=self.font_family, size=12, bold=True, color=self.colors["primary"])
-        b_ctrl.alignment = Alignment(horizontal="left", vertical="center")
-        ws.row_dimensions[ctrl_start].height = 21.75
-
-        ctrl_headers = [
-            (f"B{ctrl_start+1}:D{ctrl_start+1}", "Total Records"),
-            (f"E{ctrl_start+1}:G{ctrl_start+1}", "Outstanding Exceptions"),
-            (f"H{ctrl_start+1}:J{ctrl_start+1}", "Missing Records"),
-            (f"K{ctrl_start+1}:M{ctrl_start+1}", "Full Audit Trail"),
-        ]
-        for rng, lbl in ctrl_headers:
-            ws.merge_cells(rng)
-            c = ws[rng.split(":")[0]]
-            c.value = lbl
-            c.font = Font(name=self.font_family, size=8, bold=True, color=self.colors["text_muted"])
-            c.fill = card_fill
-            c.alignment = Alignment(horizontal="center", vertical="center")
-        ws.row_dimensions[ctrl_start + 1].height = 15.75
-
-        ctrl_values = [
-            (f"B{ctrl_start+2}:D{ctrl_start+2}", "=$B$6", "#,##0"),
-            (f"E{ctrl_start+2}:G{ctrl_start+2}", "=$F$6", "#,##0"),
-            (f"H{ctrl_start+2}:J{ctrl_start+2}", "=$H$6", "#,##0"),
-            (f"K{ctrl_start+2}:M{ctrl_start+2}", "See tab 07", None),
-        ]
-        for rng, val, num_fmt in ctrl_values:
-            ws.merge_cells(rng)
-            c = ws[rng.split(":")[0]]
-            c.value = val
-            c.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-            c.fill = card_fill
-            c.alignment = Alignment(horizontal="center", vertical="center")
-            if num_fmt:
-                c.number_format = num_fmt
-        ws.row_dimensions[ctrl_start + 2].height = 21.75
-
-        for col_idx in range(2, 14):
-            for row_idx in (ctrl_start + 1, ctrl_start + 2):
-                ws.cell(row=row_idx, column=col_idx).border = border
-
-        # Footers
-        f_row1 = ctrl_start + 4
-        ws.merge_cells(start_row=f_row1, start_column=2, end_row=f_row1, end_column=13)
-        c_f1 = ws.cell(
-            row=f_row1,
-            column=2,
-            value="Full detail, formulas, and audit trail for every figure above are available on tabs 02–07 of this workbook.",
-        )
-        c_f1.font = Font(name=self.font_family, size=8, color=self.colors["text_muted"])
-
-        f_row2 = f_row1 + 2
-        ws.merge_cells(start_row=f_row2, start_column=2, end_row=f_row2, end_column=13)
-        c_f2 = ws.cell(
-            row=f_row2,
-            column=2,
-            value="RecliQ Reconciliation Engine  •  Confidential — Internal Use Only",
-        )
-        c_f2.font = Font(name=self.font_family, size=8, color=self.colors["text_muted"])
-        c_f2.alignment = Alignment(horizontal="center", vertical="center")
-
-        # Column widths
-        ws.column_dimensions["A"].width = 2.44
-        ws.column_dimensions["B"].width = 22.0
-        for col_ltr in ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]:
-            ws.column_dimensions[col_ltr].width = 13.0
-        ws.column_dimensions["N"].width = 2.44
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 2: 02 Exceptions
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_exceptions(self, wb: openpyxl.Workbook) -> None:
-        ws = wb.create_sheet("02 Exceptions")
+    # ── 02 Differences ─────────────────────────────────────────────────────
+    def _generate_differences(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet(self.sheet_names["differences"])
         ws.sheet_properties.tabColor = self.colors["exception"]
         ws.views.sheetView[0].showGridLines = False
+        records = self.data.get("exceptions", [])
+        has_matched_key = any("Matched Key" in row for row in records)
+        has_secondary = any(row.get("Secondary Key") for row in records)
+        has_groups = any(row.get("Grouped Rows") for row in records)
 
-        meta = self.data.get("metadata", {})
-        file1_name = meta.get("file_1_name", "File 1")
-        file2_name = meta.get("file_2_name", "File 2")
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
+        headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}"]
+        headers += [f"Key in {self.file2}"] if has_matched_key else []
+        headers += ["Secondary key"] if has_secondary else []
+        headers += ["Field", f"{self.file1} value", f"{self.file2} value", "Difference", "Difference %"]
+        headers += ["Combined rows"] if has_groups else []
+        headers += ["Reviewer notes"]
 
-        # Row 1: Banner Title
-        ws.merge_cells("A1:L1")
-        a1 = ws["A1"]
-        a1.value = "Exception Log — Field-Level Mismatches"
-        a1.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.row_dimensions[1].height = 19.5
+        def rows():
+            for row in records:
+                values = [self._sheet_label(row)] if self.multi_rule else []
+                values.append(row.get("Primary Key", row.get("Match Key")))
+                if has_matched_key:
+                    values.append(row.get("Matched Key"))
+                if has_secondary:
+                    values.append(row.get("Secondary Key"))
+                difference_pct = row.get("Difference %")
+                values += [row.get("Field"), row.get("File 1 Value"), row.get("File 2 Value"), row.get("Difference"),
+                           difference_pct if _is_number(difference_pct) else None]
+                if has_groups:
+                    values.append(row.get("Grouped Rows"))
+                values.append(None)
+                yield values
 
-        # Row 2: Subtitle
-        ws.merge_cells("A2:L2")
-        a2 = ws["A2"]
-        a2.value = "Records present in both files where one or more compared fields did not match. One row per field-level mismatch; a record may appear more than once."
-        a2.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-        ws.row_dimensions[2].height = 15.75
+        self._title(
+            ws,
+            "Differences — matched records whose values disagree",
+            f"Each row is one field that differs. A record with several differing fields appears once per field. "
+            f"Difference = {self.file1} value − {self.file2} value.",
+            len(headers),
+        )
+        value_start = headers.index(f"{self.file1} value") + 1
+        self._write_table(
+            ws, headers, rows(), "DifferencesTbl", "No differences — every matched record agrees on all compared fields.",
+            number_columns=(value_start, value_start + 1, value_start + 2),
+            percent_columns=(value_start + 3,),
+        )
 
-        # Row 4: Header
-        headers = [
-            "Sheet Pair",
-            "Exception ID",
-            f"Match Key ({key_label})",
-            "Field",
-            f"{file1_name} Value",
-            f"{file2_name} Value",
-            "Difference",
-            "Difference %",
-            "Exception Type",
-            "Severity",
-            "Status",
-            "Action Notes",
-            "Distinct Record",
-        ]
-        ws.row_dimensions[4].height = 19.5
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-
-        for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=h)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-
-        exceptions_list = self.data.get("exceptions", [])
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
-
-        for row_idx, exc in enumerate(exceptions_list, start=5):
-            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
-            diff_val = exc.get("Difference")
-            diff_pct = exc.get("Difference %")
-
-            # Convert diff_pct to decimal if numeric percentage
-            diff_pct_val = None
-            if diff_pct is not None:
-                try:
-                    diff_pct_val = float(str(diff_pct).replace("%", "")) / 100.0 if float(str(diff_pct).replace("%", "")) > 1.0 or "%" in str(diff_pct) else float(diff_pct)
-                except Exception:
-                    diff_pct_val = None
-
-            row_data = [
-                (exc.get("Sheet Pair", "Global"), "left", None),
-                (exc.get("Exception ID", f"EX-{str(row_idx-4).zfill(6)}"), "left", None),
-                (str(exc.get("Match Key", "")), "left", None),
-                (str(exc.get("Field", "")), "left", None),
-                (exc.get("File 1 Value"), "right" if isinstance(exc.get("File 1 Value"), (int, float)) else "left", self.config.number_format if isinstance(exc.get("File 1 Value"), (int, float)) else None),
-                (exc.get("File 2 Value"), "right" if isinstance(exc.get("File 2 Value"), (int, float)) else "left", self.config.number_format if isinstance(exc.get("File 2 Value"), (int, float)) else None),
-                (diff_val, "right", self.config.number_format if diff_val is not None else None),
-                (diff_pct_val, "right", "0.0%" if diff_pct_val is not None else None),
-                (exc.get("Exception Type", "Value Difference"), "left", None),
-                (exc.get("Severity", "Medium"), "left", None),
-                (exc.get("Status", "Open"), "left", None),
-                (exc.get("Action Notes", ""), "left", None),
-                (f"=IF(COUNTIF($C$5:C{row_idx},C{row_idx})=1,1,0)", "right", None),
-            ]
-
-            for col_idx, (val, align_h, num_fmt) in enumerate(row_data, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name=self.font_family, size=9)
-                cell.fill = fill
-                cell.alignment = Alignment(horizontal=align_h, vertical="center")
-                cell.border = border
-                if num_fmt:
-                    cell.number_format = num_fmt
-
-        last_row = max(4, len(exceptions_list) + 4)
-        ws.freeze_panes = "A5"
-        if len(exceptions_list) > 0:
-            ws.auto_filter.ref = f"A4:M{last_row}"
-
-        col_widths = [18.0, 16.5, 21.5, 16.0, 20.5, 20.0, 14.5, 16.5, 19.0, 12.5, 11.5, 16.5, 14.5]
-        for col_idx, w in enumerate(col_widths, start=1):
-            ws.column_dimensions[get_column_letter(col_idx)].width = w
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 3: 03 Matched Records
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_matched(self, wb: openpyxl.Workbook) -> None:
-        ws = wb.create_sheet("03 Matched Records")
-        ws.sheet_properties.tabColor = self.colors["pass"]
-        ws.views.sheetView[0].showGridLines = False
-
-        meta = self.data.get("metadata", {})
-        file1_name = meta.get("file_1_name", "File 1")
-        file2_name = meta.get("file_2_name", "File 2")
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
-
-        # Row 1: Banner Title
-        ws.merge_cells("A1:G1")
-        a1 = ws["A1"]
-        a1.value = "Matched Records — Audit Log"
-        a1.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.row_dimensions[1].height = 19.5
-
-        # Row 2: Subtitle
-        ws.merge_cells("A2:G2")
-        a2 = ws["A2"]
-        a2.value = "Records that matched perfectly across all compared fields. Read-only audit log."
-        a2.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-        ws.row_dimensions[2].height = 15.75
-
-        # Row 4: Header
-        headers = [
-            f"{file1_name} Row",
-            f"{file2_name} Row",
-            f"{key_label} ({file1_name})",
-            f"{key_label} ({file2_name})",
-            "Match Type",
-            "Match Confidence",
-            "Match Status",
-        ]
-        ws.row_dimensions[4].height = 19.5
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-
-        for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=h)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-
-        matched_list = self.data.get("matched_records", [])
-
-        # Table styling supplies the same alternating-row presentation without
-        # assigning Font, Fill, Alignment and Border objects to every cell.
-        # This keeps large, fully-matched reconciliations responsive.
-        for row_idx, row in enumerate(matched_list, start=5):
-            r1 = row.get("ROW (FILE 1)", row.get("ROW (File 1)", row_idx - 3))
-            r2 = row.get("ROW (FILE 2)", row.get("ROW (File 2)", row_idx - 3))
-            k1 = row.get("COMPOSITE MATCH KEY", row.get("MATCH KEY"))
-            if k1 is None:
-                k1 = row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)", "")))
-            k2 = row.get("MATCHED COMPOSITE KEY", row.get("MATCHED KEY"))
-            if k2 is None:
-                k2 = row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", k1)))
-
-            row_data = [
-                (r1, "center"),
-                (r2, "center"),
-                (str(k1), "left"),
-                (str(k2), "left"),
-                (row.get("MATCH TYPE", "exact"), "center"),
-                (str(row.get("MATCH CONFIDENCE", "100%")), "center"),
-                (row.get("MATCH STATUS", "Exact Match"), "center"),
-            ]
-
-            ws.append([value for value, _ in row_data])
-
-        last_row = max(4, len(matched_list) + 4)
-        ws.freeze_panes = "A5"
-
-        if len(matched_list) > 0:
-            tab = Table(displayName="MatchedRecordsTbl", ref=f"A4:G{last_row}")
-            tab.tableStyleInfo = TableStyleInfo(
-                name="TableStyleLight1", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False
-            )
-            ws.add_table(tab)
-
-        col_widths = [16.0, 16.0, 22.0, 22.0, 14.0, 16.0, 16.0]
-        for col_idx, w in enumerate(col_widths, start=1):
-            ws.column_dimensions[get_column_letter(col_idx)].width = w
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 4 & 5: 04 Missing - File 1 & 05 Missing - File 2
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_missing(self, wb: openpyxl.Workbook, file_num: int, sheet_name: str) -> None:
-        ws = wb.create_sheet(sheet_name)
+    # ── 03 / 04 Only in … ─────────────────────────────────────────────────
+    def _generate_only_in(self, wb: openpyxl.Workbook, file_number: int) -> None:
+        this_file, other_file = (self.file1, self.file2) if file_number == 1 else (self.file2, self.file1)
+        ws = wb.create_sheet(self.sheet_names[f"only_{file_number}"])
         ws.sheet_properties.tabColor = self.colors["critical"]
         ws.views.sheetView[0].showGridLines = False
+        # missing_in_file_2 holds file-1 records absent from file 2, and vice versa.
+        records = self.data.get("missing_in_file_2" if file_number == 1 else "missing_in_file_1", [])
 
-        meta = self.data.get("metadata", {})
-        f1_name = meta.get("file_1_name", "File 1")
-        f2_name = meta.get("file_2_name", "File 2")
-        this_file = f1_name if file_num == 1 else f2_name
-        other_file = f2_name if file_num == 1 else f1_name
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
+        data_columns = [column for column in dict.fromkeys(key for record in records for key in record) if _visible(column)]
+        has_result = any(record.get("IDENTITY CLASSIFICATION") for record in records)
+        has_reason = any(record.get("MATCH EXPLANATION") for record in records)
+        has_groups = any(record.get("GROUPED ROWS") for record in records)
+        headers = (["Sheet"] if self.multi_rule else []) + data_columns
+        headers += ["Result"] if has_result else []
+        headers += ["Why it was not matched"] if has_reason else []
+        headers += ["Combined rows"] if has_groups else []
+        headers += [f"Row in {this_file}"]
 
-        # Data key: items missing in File 1 come from File 2
-        key = "missing_in_file_1" if file_num == 1 else "missing_in_file_2"
-        missing_rows = self.data.get(key, [])
+        def rows():
+            for record in records:
+                values = [self._sheet_label(record)] if self.multi_rule else []
+                values += [record.get(column) for column in data_columns]
+                if has_result:
+                    values.append(_RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION"), record.get("IDENTITY CLASSIFICATION")))
+                if has_reason:
+                    values.append(record.get("MATCH EXPLANATION"))
+                if has_groups:
+                    values.append(record.get("GROUPED ROWS"))
+                values.append(_row_number(record, file_number))
+                yield values
 
-        # Determine all column names from missing rows
-        cols = []
-        if missing_rows:
-            # Union across rows: sheet rules and duplicate rows carry different
-            # columns, and none may be dropped. Internal IDs stay out of view.
-            raw_cols = [
-                column
-                for column in dict.fromkeys(column for row in missing_rows for column in row)
-                if column not in _INTERNAL_RECORD_COLUMNS
-            ]
-            # Ensure ROW column is at the end
-            cols = [c for c in raw_cols if not c.startswith("ROW")]
-            row_col = next((c for c in raw_cols if c.startswith("ROW")), None)
-            if row_col:
-                cols.append(f"{other_file} Row")
-        else:
-            cols = [key_label, f"{other_file} Row"]
-
-        last_col_ltr = get_column_letter(max(len(cols), 1))
-
-        # Row 1: Banner Title
-        ws.merge_cells(f"A1:{last_col_ltr}1")
-        a1 = ws["A1"]
-        a1.value = f"Missing from {this_file} (File {file_num})"
-        a1.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.row_dimensions[1].height = 19.5
-
-        # Row 2: Subtitle
-        ws.merge_cells(f"A2:{last_col_ltr}2")
-        a2 = ws["A2"]
-        a2.value = f"Records present in {other_file} but with no matching {key_label} found in {this_file}."
-        a2.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-        ws.row_dimensions[2].height = 15.75
-
-        # Row 4: Header
-        ws.row_dimensions[4].height = 27.75
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-
-        for col_idx, h in enumerate(cols, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=h)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = border
-
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
-
-        for row_idx, row_dict in enumerate(missing_rows, start=5):
-            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
-            for col_idx, col_name in enumerate(cols, start=1):
-                raw_key = next((k for k in row_dict if k == col_name or (col_name.endswith("Row") and k.startswith("ROW"))), col_name)
-                val = row_dict.get(raw_key)
-
-                is_num = isinstance(val, (int, float)) and not isinstance(val, bool)
-                align_h = "right" if is_num else "left"
-
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name=self.font_family, size=9)
-                cell.fill = fill
-                cell.alignment = Alignment(horizontal=align_h, vertical="center")
-                cell.border = border
-                if is_num and not col_name.endswith("Row"):
-                    cell.number_format = self.config.number_format
-
-        last_row = max(4, len(missing_rows) + 4)
-        ws.freeze_panes = "A5"
-
-        if len(missing_rows) > 0:
-            tbl_name = _clean_table_name(f"Missing_{sheet_name}")
-            tab = Table(displayName=tbl_name, ref=f"A4:{last_col_ltr}{last_row}")
-            tab.tableStyleInfo = TableStyleInfo(
-                name="TableStyleLight1", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False
-            )
-            ws.add_table(tab)
-
-        for col_idx, col_name in enumerate(cols, start=1):
-            w = max(len(str(col_name)) + 3, 12)
-            ws.column_dimensions[get_column_letter(col_idx)].width = min(w, 35)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 6: 06 Field Differences
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_field_differences(self, wb: openpyxl.Workbook) -> None:
-        ws = wb.create_sheet("06 Field Differences")
-        ws.sheet_properties.tabColor = self.colors["field_tab"]
-        ws.views.sheetView[0].showGridLines = False
-
-        meta = self.data.get("metadata", {})
-        file1_name = meta.get("file_1_name", "File 1")
-        file2_name = meta.get("file_2_name", "File 2")
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
-
-        # Row 1: Banner Title
-        ws.merge_cells("A1:G1")
-        a1 = ws["A1"]
-        a1.value = "Field Differences — Granular Side-by-Side Comparison"
-        a1.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.row_dimensions[1].height = 19.5
-
-        # Row 2: Subtitle
-        ws.merge_cells("A2:G2")
-        a2 = ws["A2"]
-        a2.value = "Detailed breakdown of every field-level difference between matched record pairs."
-        a2.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-        ws.row_dimensions[2].height = 15.75
-
-        # Row 4: Header
-        headers = [
-            f"Match Key ({key_label})",
-            "Field",
-            f"{file1_name} Value",
-            f"{file2_name} Value",
-            "Difference",
-            "Difference %",
-            "Result",
-        ]
-        ws.row_dimensions[4].height = 19.5
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-
-        for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=h)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
-
-        fld_diffs = self.data.get("field_differences", [])
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
-
-        for row_idx, row in enumerate(fld_diffs, start=5):
-            fill = zebra_fill if row_idx % 2 == 0 else PatternFill(fill_type=None)
-            diff_val = row.get("Difference")
-            diff_pct = row.get("Difference %")
-
-            diff_pct_val = None
-            if diff_pct is not None:
-                try:
-                    diff_pct_val = float(str(diff_pct).replace("%", "")) / 100.0 if float(str(diff_pct).replace("%", "")) > 1.0 or "%" in str(diff_pct) else float(diff_pct)
-                except Exception:
-                    diff_pct_val = None
-
-            row_data = [
-                (str(row.get("Match Key", "")), "left", None),
-                (str(row.get("Field", "")), "left", None),
-                (row.get("File 1 Value"), "right" if isinstance(row.get("File 1 Value"), (int, float)) else "left", self.config.number_format if isinstance(row.get("File 1 Value"), (int, float)) else None),
-                (row.get("File 2 Value"), "right" if isinstance(row.get("File 2 Value"), (int, float)) else "left", self.config.number_format if isinstance(row.get("File 2 Value"), (int, float)) else None),
-                (diff_val, "right", self.config.number_format if diff_val is not None else None),
-                (diff_pct_val, "right", "0.0%" if diff_pct_val is not None else None),
-                (str(row.get("Result", "Mismatch")), "left", None),
-            ]
-
-            for col_idx, (val, align_h, num_fmt) in enumerate(row_data, start=1):
-                cell = ws.cell(row=row_idx, column=col_idx, value=val)
-                cell.font = Font(name=self.font_family, size=9)
-                cell.fill = fill
-                cell.alignment = Alignment(horizontal=align_h, vertical="center")
-                cell.border = border
-                if num_fmt:
-                    cell.number_format = num_fmt
-
-        ws.freeze_panes = "A5"
-        col_widths = [18.0, 18.0, 18.0, 18.0, 14.0, 14.0, 14.0]
-        for col_idx, w in enumerate(col_widths, start=1):
-            ws.column_dimensions[get_column_letter(col_idx)].width = w
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # IDENTITY AUDIT: exact, secondary-condition, ambiguous, and missing keys
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_identity_resolution(self, wb: openpyxl.Workbook) -> None:
-        ws = wb.create_sheet("07 Identity Resolution")
-        ws.sheet_properties.tabColor = self.colors["accent"]
-        ws.views.sheetView[0].showGridLines = False
-        records = self.data.get("identity_resolution", [])
-        columns = list(dict.fromkeys(str(column) for record in records for column in record))
-        if not columns:
-            return
-
-        last_col = get_column_letter(len(columns))
-        ws.merge_cells(f"A1:{last_col}1")
-        ws["A1"] = "Identity Resolution Audit Trail"
-        ws["A1"].font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.merge_cells(f"A2:{last_col}2")
-        ws["A2"] = "How each primary key was resolved before mapped fields were compared."
-        ws["A2"].font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-        for col_idx, column in enumerate(columns, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=column)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = border
-            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(len(column) + 3, 14), 42)
-
-        # Keep the audit trail complete, but let the Excel table apply its row
-        # styling. Per-cell style assignment dominates runtime for large jobs.
-        for record in records:
-            ws.append([record.get(column) for column in columns])
-
-        ws.freeze_panes = "A5"
-        last_row = len(records) + 4
-        table = Table(displayName="IdentityResolutionTbl", ref=f"A4:{last_col}{last_row}")
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleLight1", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False
+        self._title(
+            ws,
+            f"Only in {this_file}",
+            f"These records are in {this_file}, but no record in {other_file} has the same key"
+            f"{' and secondary keys' if self.data.get('metadata', {}).get('secondary_keys') else ''}.",
+            len(headers),
         )
-        ws.add_table(table)
+        self._write_table(ws, headers, rows(), f"OnlyInFile{file_number}Tbl", f"Every record in {this_file} was matched.")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET RULES: one block per sheet rule (configuration + outcome counts)
-    # ═══════════════════════════════════════════════════════════════════════
+    # ── 05 Match Review ────────────────────────────────────────────────────
+    def _generate_review(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet(self.sheet_names["review"])
+        ws.sheet_properties.tabColor = self.colors["review"]
+        ws.views.sheetView[0].showGridLines = False
+        records = self._review_records()
+        headers = (["Sheet"] if self.multi_rule else []) + [
+            "Result", f"Key in {self.file1}", f"Closest key in {self.file2}", "Explanation", "Key similarity", f"Row in {self.file1}",
+        ]
+
+        def rows():
+            for record in records:
+                exception = record.get("IDENTITY CLASSIFICATION") == "EXCEPTION_MATCH"
+                values = [self._sheet_label(record)] if self.multi_rule else []
+                values += [
+                    _RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION")),
+                    record.get("MATCH KEY"),
+                    record.get("CANDIDATE KEY") or None,
+                    record.get("MATCH EXPLANATION"),
+                    record.get("MATCH CONFIDENCE") if exception else None,
+                    _row_number(record, 1),
+                ]
+                yield values
+
+        self._title(
+            ws,
+            "Match Review — please confirm these",
+            "'Matched by secondary keys': the primary key differed slightly, but every secondary key matched one record. "
+            "'Several possible matches': more than one record qualified, so none was chosen automatically.",
+            len(headers),
+        )
+        self._write_table(ws, headers, rows(), "MatchReviewTbl", "Nothing to review.")
+
+    # ── 06 Matched ─────────────────────────────────────────────────────────
+    def _record_keys(self, row: dict) -> tuple[Any, Any]:
+        meta = self.data.get("metadata", {})
+        key_label = ", ".join(meta.get("matching_keys") or ["Key"])
+        key_1 = row.get("COMPOSITE MATCH KEY", row.get("MATCH KEY"))
+        if key_1 is None:
+            key_1 = row.get(key_label, row.get(f"{key_label} (File1)", row.get(f"{key_label} (FILE 1)")))
+        key_2 = row.get("MATCHED COMPOSITE KEY", row.get("MATCHED KEY"))
+        if key_2 is None:
+            key_2 = row.get(f"MATCHED {key_label}", row.get(f"{key_label} (File2)", row.get(f"{key_label} (FILE 2)", key_1)))
+        return key_1, key_2
+
+    def _generate_matched(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet(self.sheet_names["matched"])
+        ws.sheet_properties.tabColor = self.colors["pass"]
+        ws.views.sheetView[0].showGridLines = False
+        records = self.data.get("matched_records", [])
+        has_secondary = any(record.get("SECONDARY KEY") for record in records)
+        has_groups = any(record.get("GROUPED ROWS") for record in records)
+        headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}", f"Key in {self.file2}"]
+        headers += ["Secondary key"] if has_secondary else []
+        headers += ["How matched"]
+        headers += ["Combined rows"] if has_groups else []
+        headers += [f"Row in {self.file1}", f"Row in {self.file2}"]
+
+        def rows():
+            for record in records:
+                key_1, key_2 = self._record_keys(record)
+                values = [self._sheet_label(record)] if self.multi_rule else []
+                values += [key_1, key_2]
+                if has_secondary:
+                    values.append(record.get("SECONDARY KEY"))
+                how = record.get("GROUP CLASSIFICATION") or "One-to-One Match"
+                if record.get("IDENTITY CLASSIFICATION") == "EXCEPTION_MATCH":
+                    how = f"{how} (by secondary keys)"
+                values.append(how)
+                if has_groups:
+                    values.append(record.get("GROUPED ROWS"))
+                values += [_row_number(record, 1), _row_number(record, 2)]
+                yield values
+
+        self._title(
+            ws,
+            "Matched — records that agree on every compared field",
+            "No action needed. Listed so every record can be traced back to its row in each file.",
+            len(headers),
+        )
+        self._write_table(ws, headers, rows(), "MatchedRecordsTbl", "No record matched on every compared field.")
+
+    # ── 07 Checks ──────────────────────────────────────────────────────────
+    def _generate_checks(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet(self.sheet_names["checks"])
+        ws.sheet_properties.tabColor = self.colors["primary"]
+        ws.views.sheetView[0].showGridLines = False
+        counts = self._counts()
+        self._title(ws, "Checks — is every record accounted for?", "Each record ends up in exactly one result, so the totals must balance.", 4)
+
+        accounted_1 = counts["matched"] + counts["differ"] + counts["only_1"]
+        accounted_2 = counts["matched"] + counts["differ"] + counts["only_2"]
+        checks = [
+            ("Records compared", counts["total_1"], counts["total_2"], ""),
+            ("Matched – all fields agree", counts["matched"], counts["matched"], ""),
+            ("Matched – values differ", counts["differ"], counts["differ"], "Pass" if counts["differ"] == 0 else "Review"),
+            ("Not found in the other file", counts["only_1"], counts["only_2"], "Pass" if counts["only_1"] + counts["only_2"] == 0 else "Review"),
+            (
+                "Records accounted for (matched + differ + not found)",
+                accounted_1,
+                accounted_2,
+                "Pass" if accounted_1 == counts["total_1"] and accounted_2 == counts["total_2"] else "Check",
+            ),
+        ]
+        headers = ["Check", self.file1, self.file2, "Result"]
+        border = self._thin_border()
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=4, column=col_idx, value=header)
+            cell.font = self._font(10, True, self.colors["header_fg"])
+            cell.fill = PatternFill("solid", fgColor=self.colors["primary"])
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        result_style = {
+            "Pass": (self.colors["pass_bg"], self.colors["pass"]),
+            "Review": (self.colors["warn_bg"], self.colors["warning"]),
+            "Check": (self.colors["fail_bg"], self.colors["exception"]),
+        }
+        for row_idx, (label, value_1, value_2, result) in enumerate(checks, start=5):
+            ws.cell(row=row_idx, column=1, value=label).font = self._font(10)
+            for col_idx, value in ((2, value_1), (3, value_2)):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.number_format = "#,##0"
+                cell.alignment = Alignment(horizontal="center")
+            result_cell = ws.cell(row=row_idx, column=4, value=result or "—")
+            result_cell.alignment = Alignment(horizontal="center")
+            if result in result_style:
+                background, color = result_style[result]
+                result_cell.fill = PatternFill("solid", fgColor=background)
+                result_cell.font = self._font(10, True, color)
+            for col_idx in range(1, 5):
+                ws.cell(row=row_idx, column=col_idx).border = border
+
+        row = 5 + len(checks) + 1
+        ws.cell(row=row, column=1, value="How matching was done").font = self._font(11, True, self.colors["primary"])
+        notes = [f"{label}: {value}" for label, value in self._matching_description(counts)]
+        override_rules = [
+            rule.get("report_label") or rule.get("sheet_rule_id", "")
+            for rule in self.data.get("sheet_rules") or []
+            if rule.get("date_only_override")
+        ]
+        if override_rules:
+            notes.append(
+                "WARNING: date-only matching was explicitly allowed for "
+                f"{', '.join(override_rules)}; transactions on the same day may have been paired incorrectly."
+            )
+        if self.multi_rule:
+            notes.append(f"Multiple sheet rules: each rule's keys and counts are in '{self.sheet_names['rules']}'.")
+        for offset, note in enumerate(notes, start=1):
+            ws.merge_cells(start_row=row + offset, start_column=1, end_row=row + offset, end_column=4)
+            cell = ws.cell(row=row + offset, column=1, value=f"•  {note}")
+            warning = note.startswith("WARNING")
+            cell.font = self._font(9.5, warning, self.colors["exception"] if warning else self.colors["text_muted"])
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.row_dimensions[row + offset].height = 28 if len(note) > 90 else 16
+
+        ws.column_dimensions["A"].width = 52
+        ws.column_dimensions["B"].width = 24
+        ws.column_dimensions["C"].width = 24
+        ws.column_dimensions["D"].width = 14
+
+    # ── 08 Sheet Rules ─────────────────────────────────────────────────────
     def _has_rule_breakdown(self) -> bool:
-        """Legacy single-rule reports keep their original sheet set."""
+        """Single-rule reports without special matching keep the shorter tab set."""
         rules = self.data.get("sheet_rules") or []
         return len(rules) > 1 or any(
             rule.get("status") != "completed"
@@ -1002,18 +849,18 @@ class UniversalReporter:
         )
 
     def _generate_sheet_rules(self, wb: openpyxl.Workbook) -> None:
-        ws = wb.create_sheet("08 Sheet Rules")
+        ws = wb.create_sheet(self.sheet_names["rules"])
         ws.sheet_properties.tabColor = self.colors["accent"]
         ws.views.sheetView[0].showGridLines = False
 
         metric_columns = [
-            ("Source records", "source_records"),
-            ("Destination records", "destination_records"),
-            ("Exact", "exact_matches"),
-            ("Exception", "exception_matches"),
-            ("Ambiguous", "ambiguous_matches"),
+            ("Records in source", "source_records"),
+            ("Records in destination", "destination_records"),
+            ("Matched on key", "exact_matches"),
+            ("Matched by secondary keys", "exception_matches"),
+            ("Several possible matches", "ambiguous_matches"),
             ("Not found", "not_found_matches"),
-            ("Field discrepancies", "field_discrepancies"),
+            ("Values differ", "field_discrepancies"),
             ("Only in source", "only_in_file_1"),
             ("Only in destination", "only_in_file_2"),
         ]
@@ -1023,11 +870,11 @@ class UniversalReporter:
         border = self._thin_border()
 
         ws.merge_cells(f"A1:{last_col}1")
-        ws["A1"] = "Sheet Rules — Independent Configuration and Results"
-        ws["A1"].font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
+        ws["A1"] = "Sheet Rules — how each sheet pair was reconciled"
+        ws["A1"].font = self._font(13, True, self.colors["primary"])
         ws.merge_cells(f"A2:{last_col}2")
         ws["A2"] = "Every sheet rule is matched with its own keys, conditions and mappings. Counts below are per rule, never shared."
-        ws["A2"].font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
+        ws["A2"].font = self._font(9, color=self.colors["text_muted"])
 
         def describe_sources(workbook: str | None, sheets: list[str]) -> str:
             sheet_text = ", ".join(sheets) if sheets else "Default sheet"
@@ -1050,7 +897,7 @@ class UniversalReporter:
             source_sheets = ", ".join(rule.get("source_sheets") or []) or "Default sheet"
             destination_sheets = ", ".join(rule.get("destination_sheets") or []) or "Default sheet"
             header = ws.cell(row=row, column=1, value=f"RULE {number} — {source_sheets} ↔ {destination_sheets}")
-            header.font = Font(name=self.font_family, size=11, bold=True, color=self.colors["header_fg"])
+            header.font = self._font(11, True, self.colors["header_fg"])
             header.fill = navy_fill
             row += 1
 
@@ -1064,7 +911,7 @@ class UniversalReporter:
                     f"{' + '.join(rule.get('primary_key_source') or [])} → {' + '.join(rule.get('primary_key_destination') or [])}",
                 ),
                 (
-                    "Secondary conditions",
+                    "Secondary keys (must also match)",
                     "; ".join(describe_condition(condition) for condition in rule.get("secondary_conditions") or []) or "None",
                 ),
                 ("Primary-key similarity", describe_similarity(rule.get("similarity_policy") or {})),
@@ -1074,21 +921,18 @@ class UniversalReporter:
                     if rule.get("date_only_override")
                     else "No",
                 ),
-                ("Mapped fields", rule.get("mapping_count", 0)),
+                ("Compared fields", rule.get("mapping_count", 0)),
                 ("Status", f"FAILED — {rule.get('error')}" if failed else "Completed"),
             ]
             for label, value in details:
                 label_cell = ws.cell(row=row, column=1, value=label)
-                label_cell.font = Font(name=self.font_family, size=9, bold=True)
+                label_cell.font = self._font(9, True)
                 label_cell.fill = accent_fill
                 label_cell.border = border
                 ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=len(metric_columns))
                 value_cell = ws.cell(row=row, column=2, value=value)
                 warn = (label == "Status" and failed) or (label == "Date-only override" and rule.get("date_only_override"))
-                value_cell.font = Font(
-                    name=self.font_family, size=9, bold=bool(warn),
-                    color=self.colors["exception"] if warn else self.colors["text_dark"],
-                )
+                value_cell.font = self._font(9, bool(warn), self.colors["exception"] if warn else self.colors["text_dark"])
                 value_cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
                 value_cell.border = border
                 row += 1
@@ -1097,178 +941,21 @@ class UniversalReporter:
                 summary = rule.get("summary") or {}
                 for col_idx, (label, key) in enumerate(metric_columns, start=1):
                     head = ws.cell(row=row, column=col_idx, value=label)
-                    head.font = Font(name=self.font_family, size=9, bold=True, color=self.colors["header_fg"])
+                    head.font = self._font(9, True, self.colors["header_fg"])
                     head.fill = PatternFill("solid", fgColor=self.colors["accent"])
                     head.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
                     head.border = border
                     value = ws.cell(row=row + 1, column=col_idx, value=summary.get(key, 0))
-                    value.font = Font(name=self.font_family, size=10)
+                    value.font = self._font(10)
                     value.alignment = Alignment(horizontal="center", vertical="center")
                     value.border = border
+                ws.row_dimensions[row].height = 30
                 row += 2
             row += 1
 
-        ws.column_dimensions["A"].width = 24.0
+        ws.column_dimensions["A"].width = 30.0
         for col_idx in range(2, len(metric_columns) + 1):
             ws.column_dimensions[get_column_letter(col_idx)].width = 16.0
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SHEET 7: 07 Control Checks
-    # ═══════════════════════════════════════════════════════════════════════
-    def _generate_controls(self, wb: openpyxl.Workbook, sheet_missing_1: str, sheet_missing_2: str) -> None:
-        ws = wb.create_sheet("07 Control Checks")
-        ws.sheet_properties.tabColor = self.colors["primary"]
-        ws.views.sheetView[0].showGridLines = False
-
-        meta = self.data.get("metadata", {})
-        file1_name = meta.get("file_1_name", "File 1")
-        file2_name = meta.get("file_2_name", "File 2")
-        matching_keys = meta.get("matching_keys", ["Key"])
-        key_label = ", ".join(matching_keys) if matching_keys else "Key"
-
-        exceptions_list = self.data.get("exceptions", [])
-        matched_list = self.data.get("matched_records", [])
-        missing_1_list = self.data.get("missing_in_file_1", [])
-        missing_2_list = self.data.get("missing_in_file_2", [])
-
-        max_exc_row = max(5, len(exceptions_list) + 4)
-        max_matched_row = max(5, len(matched_list) + 4)
-        max_m1_row = max(5, len(missing_1_list) + 4)
-        max_m2_row = max(5, len(missing_2_list) + 4)
-
-        # Row 1: Banner Title
-        ws.merge_cells("A1:E1")
-        a1 = ws["A1"]
-        a1.value = "Control Checks — Reconciliation Audit Trail"
-        a1.font = Font(name=self.font_family, size=13, bold=True, color=self.colors["primary"])
-        ws.row_dimensions[1].height = 19.5
-
-        # Row 2: Subtitle
-        ws.merge_cells("A2:G2")
-        a2 = ws["A2"]
-        a2.value = "All figures are calculated directly from the detail tabs, so this panel always reflects current data."
-        a2.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-        ws.row_dimensions[2].height = 15.75
-
-        # Row 4: Header
-        headers = ["Control", f"{file1_name} (File 1)", f"{file2_name} (File 2)", "Result"]
-        ws.row_dimensions[4].height = 19.5
-        navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
-        border = self._thin_border()
-
-        for col_idx, h in enumerate(headers, start=1):
-            cell = ws.cell(row=4, column=col_idx, value=h)
-            cell.font = Font(name=self.font_family, size=10, bold=True, color=self.colors["header_fg"])
-            cell.fill = navy_fill
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            cell.border = border
-
-        # Rows 5-9: Control checks with dynamic cross-tab formulas
-        zebra_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
-        ctrl_rows = [
-            (
-                "Total records in scope",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})+COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})+SUM('02 Exceptions'!M5:M{max_exc_row})+COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})",
-                '=IF(B5=C5,"Pass","Review")',
-            ),
-            (
-                "Matched records (no differences)",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})",
-                f"=COUNTA('03 Matched Records'!C5:C{max_matched_row})",
-                '=IF(B6=C6,"Pass","Review")',
-            ),
-            (
-                "Exception records (1+ field mismatch)",
-                f"=SUM('02 Exceptions'!M5:M{max_exc_row})",
-                f"=SUM('02 Exceptions'!M5:M{max_exc_row})",
-                '=IF(B7=0,"Pass","Review Required")',
-            ),
-            (
-                f"Records missing from {file1_name}",
-                f"=COUNTA('{sheet_missing_1}'!A5:A{max_m1_row})",
-                "—",
-                '=IF(B8=0,"Pass","Review Required")',
-            ),
-            (
-                f"Records missing from {file2_name}",
-                "—",
-                f"=COUNTA('{sheet_missing_2}'!A5:A{max_m2_row})",
-                '=IF(C9=0,"Pass","Review Required")',
-            ),
-        ]
-
-        for idx, (label, f1_val, f2_val, res_form) in enumerate(ctrl_rows, start=5):
-            fill = zebra_fill if idx % 2 == 0 else PatternFill(fill_type=None)
-
-            c_lbl = ws.cell(row=idx, column=1, value=label)
-            c_lbl.font = Font(name=self.font_family, size=9)
-            c_lbl.fill = fill
-            c_lbl.alignment = Alignment(horizontal="left", vertical="center")
-            c_lbl.border = border
-
-            c_f1 = ws.cell(row=idx, column=2, value=f1_val)
-            c_f1.font = Font(name=self.font_family, size=9)
-            c_f1.fill = fill
-            c_f1.alignment = Alignment(horizontal="center", vertical="center")
-            c_f1.border = border
-
-            c_f2 = ws.cell(row=idx, column=3, value=f2_val)
-            c_f2.font = Font(name=self.font_family, size=9)
-            c_f2.fill = fill
-            c_f2.alignment = Alignment(horizontal="center", vertical="center")
-            c_f2.border = border
-
-            c_res = ws.cell(row=idx, column=4, value=res_form)
-            c_res.font = Font(name=self.font_family, size=9, bold=True)
-            c_res.fill = fill
-            c_res.alignment = Alignment(horizontal="center", vertical="center")
-            c_res.border = border
-
-        # Methodology section
-        ws.cell(row=11, column=1, value="Methodology").font = Font(
-            name=self.font_family, size=10, bold=True, color=self.colors["primary"]
-        )
-
-        methodology = [
-            f"• Matching key: {key_label} (case-insensitive, numeric-normalized).",
-            "• 'Total records in scope' = Matched + Exception + records missing from the opposite file.",
-            "• An 'Exception record' has 1 or more field-level mismatches — see tab '02 Exceptions' for detail.",
-            f"• Source files: {file1_name} vs {file2_name}.",
-        ]
-        override_rules = [
-            rule.get("report_label") or rule.get("sheet_rule_id", "")
-            for rule in self.data.get("sheet_rules") or []
-            if rule.get("date_only_override")
-        ]
-        if override_rules:
-            methodology.append(
-                "• WARNING: date-only matching override explicitly enabled for "
-                f"{', '.join(override_rules)}; same-day transactions may be ambiguous."
-            )
-        if len(self.data.get("sheet_rules") or []) > 1:
-            methodology.append("• Multiple sheet rules: per-rule keys and counts are listed in tab '08 Sheet Rules'.")
-        for i, m_text in enumerate(methodology, start=12):
-            ws.merge_cells(start_row=i, start_column=1, end_row=i, end_column=4)
-            c = ws.cell(row=i, column=1, value=m_text)
-            c.font = Font(name=self.font_family, size=9, color=self.colors["text_muted"])
-
-        # Conditional Formatting on D5:D9
-        green_fill = PatternFill(start_color=self.colors["pass_bg"], end_color=self.colors["pass_bg"], fill_type="solid")
-        green_font = Font(name=self.font_family, size=9, bold=True, color=self.colors["pass"])
-        red_fill = PatternFill(start_color=self.colors["fail_bg"], end_color=self.colors["fail_bg"], fill_type="solid")
-        red_font = Font(name=self.font_family, size=9, bold=True, color=self.colors["exception"])
-
-        ws.conditional_formatting.add("D5:D9", CellIsRule(operator="equal", formula=['"Pass"'], fill=green_fill, font=green_font))
-        ws.conditional_formatting.add("D5:D9", CellIsRule(operator="equal", formula=['"Review Required"'], fill=red_fill, font=red_font))
-        ws.conditional_formatting.add("D5:D9", CellIsRule(operator="equal", formula=['"Review"'], fill=red_fill, font=red_font))
-
-        # Column widths
-        ws.column_dimensions["A"].width = 34.0
-        ws.column_dimensions["B"].width = 20.0
-        ws.column_dimensions["C"].width = 20.0
-        ws.column_dimensions["D"].width = 16.0
-        ws.column_dimensions["E"].width = 6.0
 
 
 def generate_enterprise_report(data: dict, config: dict, output_path: Path) -> None:

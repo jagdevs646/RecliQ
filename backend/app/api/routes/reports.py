@@ -48,8 +48,13 @@ _PREVIEW_CLASSIFICATIONS = {
     "not_found": {"NOT_FOUND"},
 }
 
-# Scope identifiers are for filtering, not for display.
+# Scope identifiers and normalized match forms are engine internals, not data.
 _HIDDEN_PREVIEW_COLUMNS = {"File Pair ID", "Sheet Rule ID"}
+_HIDDEN_PREVIEW_PREFIXES = ("NORM_", "MATCHED NORM_", "__")
+
+
+def _preview_column_visible(column: str) -> bool:
+    return column not in _HIDDEN_PREVIEW_COLUMNS and not column.startswith(_HIDDEN_PREVIEW_PREFIXES)
 
 
 def _scoped_summary(summary: dict[str, Any], file_pair_id: str | None, sheet_rule_id: str | None) -> dict[str, Any]:
@@ -147,10 +152,28 @@ def download_job_report(
     )
 
 
+_PAIR_RECORD_CATEGORIES = ("exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "identity_resolution")
+
+
+def _file_pair_universal_data(universal_data: dict[str, Any], file_pair_id: str) -> dict[str, Any]:
+    """One file pair's report data, cut from a multi-pair job's merged data."""
+    pair_report = (universal_data.get("file_pair_reports") or {}).get(file_pair_id)
+    if pair_report is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job")
+    return {
+        **pair_report,
+        **{
+            category: [record for record in universal_data.get(category, []) if record.get("File Pair ID") == file_pair_id]
+            for category in _PAIR_RECORD_CATEGORIES
+        },
+    }
+
+
 @router.post("/job/{job_id}/download_custom")
 def download_custom_report(
     job_id: str,
     config: ReportCustomConfig,
+    file_pair_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
 ) -> FileResponse:
@@ -158,20 +181,27 @@ def download_custom_report(
     storage = get_storage()
     path = storage.resolve_path(report.storage_path)
     raw_path = path.with_name(f"{path.stem}_data.json")
+    is_archive = path.suffix.lower() == ".zip"
 
-    if path.suffix.lower() == ".zip":
+    if is_archive and not file_pair_id:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Customized reporting is available for a single file pair. Download the ZIP to access each independent workbook.",
+            detail="Choose a file pair to customize: each file pair has its own workbook.",
         )
-    
+
     if not raw_path.exists():
+        if is_archive:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report data is unavailable for customization")
         # Fallback to existing Excel file if raw data is lost
         return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
-        
-    with open(raw_path, "r") as f:
+
+    with open(raw_path, "r", encoding="utf-8") as f:
         universal_data = json.load(f)
-        
+    download_name = report.filename
+    if is_archive:
+        universal_data = _file_pair_universal_data(universal_data, file_pair_id)
+        download_name = universal_data.get("report_filename") or "Reconciliation.xlsx"
+
     # Generate new temp file
     import tempfile
     
@@ -192,7 +222,7 @@ def download_custom_report(
     from starlette.background import BackgroundTask
     return FileResponse(
         temp_path, 
-        filename=f"Custom_{report.filename}", 
+        filename=f"Custom_{download_name}",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         background=BackgroundTask(lambda: temp_path.unlink(missing_ok=True) if temp_path.exists() else None)
     )
@@ -243,7 +273,7 @@ def job_report_preview(
     columns = [
         column
         for column in dict.fromkeys(str(column) for record in records for column in record)
-        if column not in _HIDDEN_PREVIEW_COLUMNS
+        if _preview_column_visible(column)
     ]
     total_rows = len(records)
     page = records[offset:offset + limit]
@@ -252,7 +282,7 @@ def job_report_preview(
         "sheet_name": section,
         "columns": columns,
         "rows": [
-            {str(column): _json_value(value) for column, value in record.items() if column not in _HIDDEN_PREVIEW_COLUMNS}
+            {str(column): _json_value(value) for column, value in record.items() if _preview_column_visible(str(column))}
             for record in page
         ],
         "total_rows": total_rows,
