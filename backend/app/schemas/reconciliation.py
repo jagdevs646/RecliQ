@@ -34,12 +34,117 @@ class SimilarityPolicy(BaseModel):
     threshold: int | None = Field(default=None, ge=0, le=100)
 
 
+TransformationOperation = Literal[
+    "trim", "uppercase", "lowercase", "remove_characters", "replace_text", "remove_prefix", "remove_suffix",
+    "strip_leading_zeros", "keep_alphanumeric", "invert_sign", "absolute_value", "multiply", "round",
+    "debit_credit_to_signed",
+]
+
+
+class TransformationStep(BaseModel):
+    """One safe, pre-match value transformation (applied before matching;
+    original values are kept for the report)."""
+
+    operation: TransformationOperation
+    side: Literal["source", "destination", "both"] = "both"
+    columns: list[str] = Field(default_factory=list)
+    params: dict[str, Any] = Field(default_factory=dict)
+    output_column: str | None = None
+
+    @model_validator(mode="after")
+    def check_parameters(self) -> "TransformationStep":
+        if self.operation == "debit_credit_to_signed":
+            if not self.params.get("debit_column") or not self.params.get("credit_column"):
+                raise ValueError("Debit/Credit to signed amount needs a debit column and a credit column.")
+            if self.side == "both":
+                raise ValueError("Choose which file the Debit/Credit columns belong to (source or destination).")
+            return self
+        if not self.columns:
+            raise ValueError(f"The '{self.operation}' transformation needs at least one column.")
+        required = {
+            "replace_text": "find",
+            "remove_prefix": "text",
+            "remove_suffix": "text",
+            "remove_characters": "characters",
+            "multiply": "factor",
+        }
+        if self.operation in required and self.params.get(required[self.operation]) in (None, ""):
+            raise ValueError(f"The '{self.operation}' transformation needs '{required[self.operation]}'.")
+        return self
+
+
+class MatchingPass(BaseModel):
+    """A keyless pass run after the key pass, on records still unmatched."""
+
+    type: Literal["amount_date", "amount_tolerance"]
+    name: str = ""
+    enabled: bool = True
+    amount_source: str
+    amount_destination: str
+    date_source: str | None = None
+    date_destination: str | None = None
+    date_window_days: int = Field(default=0, ge=0, le=366)
+    amount_tolerance: float = Field(default=0, ge=0)
+    amount_tolerance_percent: float = Field(default=0, ge=0, le=100)
+    narrative_source: str | None = None
+    narrative_destination: str | None = None
+    narrative_threshold: int = Field(default=85, ge=50, le=100)
+    # Configured secondary keys must still agree (e.g. the same vendor).
+    respect_secondary_keys: bool = True
+
+    @model_validator(mode="after")
+    def check_columns(self) -> "MatchingPass":
+        if self.type == "amount_date" and not (self.date_source and self.date_destination):
+            raise ValueError("An amount + date pass needs a date column in each file.")
+        if bool(self.date_source) != bool(self.date_destination):
+            raise ValueError("Choose a date column in both files, or in neither.")
+        if bool(self.narrative_source) != bool(self.narrative_destination):
+            raise ValueError("Choose a reference column in both files, or in neither.")
+        return self
+
+
+class AliasEntry(BaseModel):
+    canonical: str
+    variants: list[str] = Field(default_factory=list)
+
+
+class SynonymEntry(BaseModel):
+    term: str
+    replacement: str
+
+
+class NormalizationSettings(BaseModel):
+    """Business-name normalization used by exact matching of name/text keys,
+    exact secondary keys and text field comparisons."""
+
+    legal_forms: bool = True
+    abbreviations: bool = True
+    ignore_prefixes: bool = True
+    join_initials: bool = True
+    word_order: bool = True
+    synonyms: list[SynonymEntry] = Field(default_factory=list)
+    aliases: list[AliasEntry] = Field(default_factory=list)
+    # Aliases approved for this organization (see /api/aliases).
+    use_saved_aliases: bool = True
+
+
 class MatchingStrategy(BaseModel):
     primary_key_source: list[str] = Field(default_factory=list)
     primary_key_destination: list[str] = Field(default_factory=list)
     secondary_conditions: list[SecondaryMatchCondition] = Field(default_factory=list)
     similarity_policy: SimilarityPolicy = Field(default_factory=SimilarityPolicy)
     date_only_override: bool = False
+    # Ordered keyless passes after the primary-key pass.
+    matching_passes: list[MatchingPass] = Field(default_factory=list)
+    normalization: NormalizationSettings = Field(default_factory=NormalizationSettings)
+
+    @model_validator(mode="after")
+    def keys_or_passes(self) -> "MatchingStrategy":
+        if len(self.primary_key_source) != len(self.primary_key_destination):
+            raise ValueError("Choose the same number of key columns in both files.")
+        if not self.primary_key_source and not any(item.enabled for item in self.matching_passes):
+            raise ValueError("Choose at least one key column, or add an amount/date matching pass.")
+        return self
 
 
 class SheetRuleConfig(BaseModel):
@@ -54,6 +159,9 @@ class SheetRuleConfig(BaseModel):
     include_columns_file_2: list[str] = Field(default_factory=list)
     report_label: str = ""
     report_metadata: dict[str, Any] = Field(default_factory=dict)
+    transformations: list[TransformationStep] = Field(default_factory=list)
+    # How ambiguous numeric dates such as 03/04/2026 are read.
+    date_format: Literal["day_first", "month_first"] = "day_first"
 
 
 class FilePairConfig(BaseModel):
@@ -75,6 +183,9 @@ class ReconciliationPlan(BaseModel):
     # Preserves the submitted contract for audit/debugging without making it an
     # execution path. All runtime code consumes ``file_pairs``.
     legacy: dict[str, Any] = Field(default_factory=dict)
+    # The user reviewed the data-quality pre-check before running.
+    precheck_acknowledged: bool = False
+    precheck_summary: dict[str, Any] = Field(default_factory=dict)
 
     @staticmethod
     def _sources_for_rule(files: list[FileSource], sheet_ids: list[str]) -> list[FileSource]:
@@ -117,6 +228,12 @@ class ReconciliationPlan(BaseModel):
                         ],
                         "similarity_policy": rule.matching_strategy.similarity_policy.model_dump(),
                         "date_only_override": rule.matching_strategy.date_only_override,
+                        "matching_passes": [
+                            item.model_dump() for item in rule.matching_strategy.matching_passes if item.enabled
+                        ],
+                        "normalization": rule.matching_strategy.normalization.model_dump(),
+                        "transformations": [step.model_dump() for step in rule.transformations],
+                        "date_dayfirst": rule.date_format == "day_first",
                         "file_pair_id": file_pair.file_pair_id or f"file-pair-{pair_index}",
                         "file_pair_label": file_pair_label,
                         "file_pair_index": pair_index,
@@ -175,6 +292,8 @@ class GenericReconciliationRequest(BaseModel):
     file_pairs: list[FilePairConfig] = Field(default_factory=list)
     plan: ReconciliationPlan | None = None
     orientation: str = "vertical"
+    precheck_acknowledged: bool = False
+    precheck_summary: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def populate_file_sources(self) -> GenericReconciliationRequest:
@@ -246,7 +365,12 @@ def normalize_legacy_request(
     if request.plan is not None:
         return request.plan
     if request.file_pairs:
-        return ReconciliationPlan(file_pairs=request.file_pairs, orientation=request.orientation)
+        return ReconciliationPlan(
+            file_pairs=request.file_pairs,
+            orientation=request.orientation,
+            precheck_acknowledged=request.precheck_acknowledged,
+            precheck_summary=request.precheck_summary,
+        )
     if request.pairs:
         return ReconciliationPlan(
             file_pairs=[_legacy_pair_to_file_pair(pair, index) for index, pair in enumerate(request.pairs, start=1)],

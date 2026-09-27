@@ -70,6 +70,7 @@ _HIDDEN_COLUMNS = {
     "MATCH THRESHOLD", "IDENTITY CLASSIFICATION", "MATCH EXPLANATION", "GROUPED ROWS",
     "COMPOSITE MATCH KEY", "MATCHED COMPOSITE KEY", "MATCH KEY", "MATCHED KEY",
     "SECONDARY KEY", "MATCHED SECONDARY KEY", "GROUP CLASSIFICATION", "CANDIDATE KEY",
+    "MATCH PASS", "NORMALIZATION APPLIED",
 }
 _HIDDEN_PREFIXES = ("NORM_", "MATCHED NORM_", "__")
 
@@ -571,6 +572,25 @@ class UniversalReporter:
             )
         if meta.get("compared_fields"):
             description.append(("Compared fields", ", ".join(meta["compared_fields"])))
+        if meta.get("transformations"):
+            description.append(("Prepared before matching", "; ".join(meta["transformations"]) + " (original values are shown next to changed ones)"))
+        passes = meta.get("matching_passes") or []
+        if len(passes) > 1 or (passes and passes[0] != "Primary key"):
+            counts_by_pass = meta.get("pass_counts") or {}
+            description.append((
+                "Matching passes (in order)",
+                " → ".join(f"{label} ({counts_by_pass.get(label, 0):,} matched)" for label in passes)
+                + ". Each pass only looks at records still unmatched; ties are never decided automatically.",
+            ))
+        rules_used = meta.get("normalization_rules_used") or {}
+        if rules_used:
+            top = sorted(rules_used.items(), key=lambda item: -item[1])[:6]
+            description.append((
+                "Name normalization used",
+                ", ".join(f"{rule} ({count:,})" for rule, count in top) + " — spelling variants treated as the same name.",
+            ))
+        if meta.get("date_convention") and meta.get("date_convention", "").startswith("Month"):
+            description.append(("Date format", meta["date_convention"]))
         combined = sum(
             1
             for category in ("matched_records", "missing_in_file_1", "missing_in_file_2")
@@ -692,8 +712,10 @@ class UniversalReporter:
             for record in records:
                 exception = record.get("IDENTITY CLASSIFICATION") == "EXCEPTION_MATCH"
                 values = [self._sheet_label(record)] if self.multi_rule else []
+                keyless = record.get("MATCH PASS") and record.get("MATCH PASS") != "Primary key"
                 values += [
-                    _RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION")),
+                    f"Matched by {record['MATCH PASS'].split(': ', 1)[-1].lower()}" if keyless and exception
+                    else _RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION")),
                     record.get("MATCH KEY"),
                     record.get("CANDIDATE KEY") or None,
                     record.get("MATCH EXPLANATION"),
@@ -730,9 +752,11 @@ class UniversalReporter:
         records = self.data.get("matched_records", [])
         has_secondary = any(record.get("SECONDARY KEY") for record in records)
         has_groups = any(record.get("GROUPED ROWS") for record in records)
+        has_normalization = any(record.get("NORMALIZATION APPLIED") for record in records)
         headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}", f"Key in {self.file2}"]
         headers += ["Secondary key"] if has_secondary else []
         headers += ["How matched"]
+        headers += ["Normalization applied"] if has_normalization else []
         headers += ["Combined rows"] if has_groups else []
         headers += [f"Row in {self.file1}", f"Row in {self.file2}"]
 
@@ -744,9 +768,14 @@ class UniversalReporter:
                 if has_secondary:
                     values.append(record.get("SECONDARY KEY"))
                 how = record.get("GROUP CLASSIFICATION") or "One-to-One Match"
-                if record.get("IDENTITY CLASSIFICATION") == "EXCEPTION_MATCH":
+                match_pass = record.get("MATCH PASS")
+                if match_pass and match_pass != "Primary key":
+                    how = f"{how} ({match_pass.split(': ', 1)[-1].lower()})"
+                elif record.get("IDENTITY CLASSIFICATION") == "EXCEPTION_MATCH":
                     how = f"{how} (by secondary keys)"
                 values.append(how)
+                if has_normalization:
+                    values.append(record.get("NORMALIZATION APPLIED"))
                 if has_groups:
                     values.append(record.get("GROUPED ROWS"))
                 values += [_row_number(record, 1), _row_number(record, 2)]
@@ -845,6 +874,8 @@ class UniversalReporter:
             rule.get("status") != "completed"
             or rule.get("secondary_conditions")
             or rule.get("date_only_override")
+            or rule.get("transformations")
+            or rule.get("matching_passes")
             for rule in rules
         )
 
@@ -886,6 +917,22 @@ class UniversalReporter:
                 method = f"{method} ±{condition.get('numeric_tolerance') or 0}"
             return f"{condition.get('source_column')} ↔ {condition.get('destination_column')} ({method})"
 
+        def describe_transformation(step: dict) -> str:
+            from app.reconciliation_engine.transformations import describe
+
+            side = step.get("side", "both")
+            return f"{describe(step)} ({'both files' if side == 'both' else side})"
+
+        def describe_pass(item: dict, number: int) -> str:
+            from app.reconciliation_engine.matching.pass_matcher import pass_label
+
+            tolerance = []
+            if item.get("amount_tolerance"):
+                tolerance.append(f"±{item['amount_tolerance']}")
+            if item.get("amount_tolerance_percent"):
+                tolerance.append(f"±{item['amount_tolerance_percent']}%")
+            return pass_label(item, number) + (f" (amount {' / '.join(tolerance)})" if tolerance else "")
+
         def describe_similarity(policy: dict) -> str:
             matcher = policy.get("matcher_type_override") or "automatic by data type"
             threshold = policy.get("threshold")
@@ -922,6 +969,9 @@ class UniversalReporter:
                     else "No",
                 ),
                 ("Compared fields", rule.get("mapping_count", 0)),
+                ("Prepared before matching", "; ".join(describe_transformation(step) for step in rule.get("transformations") or []) or "None"),
+                ("Additional matching passes", "; ".join(describe_pass(item, index) for index, item in enumerate(rule.get("matching_passes") or [], start=2)) or "None"),
+                ("Date format", "Month first (MM/DD/YYYY)" if rule.get("date_format") == "month_first" else "Day first (DD/MM/YYYY)"),
                 ("Status", f"FAILED — {rule.get('error')}" if failed else "Completed"),
             ]
             for label, value in details:

@@ -1,11 +1,11 @@
 import pandas as pd
 
-from app.reconciliation_engine.cache import canonical_date_value
+from app.reconciliation_engine.cache import parse_date_value
 
 
 def normalize_date_series(series: pd.Series) -> pd.Series:
     """Normalize a series of dates into a standard canonical format YYYY-MM-DD."""
-    normalized = series.map(canonical_date_value)
+    normalized = series.map(parse_date_value)  # Honors the rule's date convention.
     return normalized.map(lambda value: value.isoformat() if value is not None else None).fillna(series.astype(str))
 
 

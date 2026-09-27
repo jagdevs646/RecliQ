@@ -14,6 +14,7 @@ try:
 except Exception:  # pragma: no cover
     fuzz = None
 
+from app.reconciliation_engine.normalization.entities import active_normalizer
 from app.reconciliation_engine.cache import (
     compact_identifier,
     is_blank,
@@ -72,6 +73,8 @@ class MatchResult:
     detail: str = ""
     value1_normalized: str = ""
     value2_normalized: str = ""
+    # Normalization rules that made the values comparable (e.g. "Pvt → Private").
+    rules: tuple[str, ...] = ()
 
 
 class MatchClassification(str, Enum):
@@ -190,7 +193,9 @@ def normalized_identity_value(value: object, matcher_type: str) -> str | None:
         number = to_number(value)
         normalized = str(number) if number is not None else ""
     else:
-        normalized = normalize_text(value, use_synonyms=False)
+        # Names and text: deterministic business normalization ("ABC Pvt Ltd"
+        # and "ABC PRIVATE LIMITED" share one identity). Never fuzzy.
+        normalized = active_normalizer().identity(value) or ""
     return normalized or None
 
 
@@ -281,28 +286,27 @@ def _compare_text(value1: object, value2: object, matcher_type: str, prefer_name
     if norm1 == norm2:
         return MatchResult(True, 100, matcher_type, "Exact text match", value1_normalized=norm1, value2_normalized=norm2)
 
-    if prefer_name or _looks_like_name(value1, value2):
-        key1 = sorted_token_key(value1)
-        key2 = sorted_token_key(value2)
-        if key1 and key1 == key2:
-            return MatchResult(True, 100, matcher_type, "Name words reordered", value1_normalized=key1, value2_normalized=key2)
+    # Deterministic normalization first: legal forms, abbreviations, "&",
+    # prefixes, initials, word order and organization aliases.
+    normalizer = active_normalizer()
+    identity1, identity2 = normalizer.identity(value1), normalizer.identity(value2)
+    if identity1 and identity1 == identity2:
+        rules = tuple(normalizer.explain(value1, value2))
+        status = "Name words reordered" if rules == ("Word order ignored",) else "Business synonym match"
+        return MatchResult(
+            True, 100, matcher_type, status, "Normalized: " + ", ".join(rules), identity1, identity2, rules
+        )
 
-    synonym1 = normalize_text(value1, use_synonyms=True)
-    synonym2 = normalize_text(value2, use_synonyms=True)
-    if synonym1 == synonym2:
-        return MatchResult(True, 100, matcher_type, "Business synonym match", value1_normalized=synonym1, value2_normalized=synonym2)
-
-    synonym_key1 = sorted_token_key(value1, use_synonyms=True)
-    synonym_key2 = sorted_token_key(value2, use_synonyms=True)
-    if synonym_key1 and synonym_key1 == synonym_key2:
-        return MatchResult(True, 100, matcher_type, "Business synonym/name order match", value1_normalized=synonym_key1, value2_normalized=synonym_key2)
-
-    score = _fuzzy_score(synonym1 or norm1, synonym2 or norm2)
+    # Fuzzy scoring only after every deterministic rule failed; scores below
+    # 85 are flagged for manual review and never count as exact.
+    canonical1 = normalizer.canonical(value1).text or norm1
+    canonical2 = normalizer.canonical(value2).text or norm2
+    score = _fuzzy_score(canonical1, canonical2)
     if score >= 85:
-        return MatchResult(True, score, matcher_type, "Minor spelling variation", value1_normalized=synonym1, value2_normalized=synonym2)
+        return MatchResult(True, score, matcher_type, "Minor spelling variation", value1_normalized=canonical1, value2_normalized=canonical2)
     if score >= 75:
-        return MatchResult(True, score, matcher_type, "Possible Match - Manual Review", value1_normalized=synonym1, value2_normalized=synonym2)
-    return MatchResult(False, score, matcher_type, "No Match", f"File1: {value1} | File2: {value2}", synonym1, synonym2)
+        return MatchResult(True, score, matcher_type, "Possible Match - Manual Review", value1_normalized=canonical1, value2_normalized=canonical2)
+    return MatchResult(False, score, matcher_type, "No Match", f"File1: {value1} | File2: {value2}", canonical1, canonical2)
 
 
 def compare_values(
@@ -500,8 +504,9 @@ class IndexedCandidateMatcher:
     def _condition_exact_map(self, column: str) -> Dict[str, List[int]]:
         if column not in self.condition_exact_maps:
             index: Dict[str, List[int]] = {}
+            normalizer = active_normalizer()
             for position, row in enumerate(self.rows):
-                value = normalize_text(row.get(column))
+                value = normalizer.identity(row.get(column))
                 if value:
                     index.setdefault(value, []).append(position)
             self.condition_exact_maps[column] = index
@@ -544,7 +549,8 @@ class IndexedCandidateMatcher:
             return set(), f"{destination_column or 'destination column'} is unavailable"
 
         if method == "exact_text":
-            value = normalize_text(source_value)
+            # "Exact" after deterministic normalization, never fuzzy.
+            value = active_normalizer().identity(source_value)
             positions = set(self._condition_exact_map(destination_column).get(value, [])) if value else set()
             return positions, f"{destination_column} exact text"
 

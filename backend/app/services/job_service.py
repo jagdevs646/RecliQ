@@ -68,10 +68,13 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
         report = db.query(Report).filter(Report.id == report_id).first()
         if report:
             if storage:
-                try:
-                    storage.delete_file(report.storage_path)
-                except Exception:
-                    pass
+                from app.storage.base import report_data_path
+
+                for path in (report.storage_path, report_data_path(report.storage_path)):
+                    try:
+                        storage.delete_file(path)
+                    except Exception:
+                        pass
             db.delete(report)
 
     # Clean up uploaded files if no other job references them
@@ -128,7 +131,18 @@ def prune_old_jobs(db: Session, session_id: str, storage=None, max_records: int 
 
     excess_jobs = jobs[max_records:]
     pruned_count = 0
+    pruned_ids = []
     for job in excess_jobs:
-        if delete_job(db, job.id, session_id, storage):
+        job_id = job.id
+        if delete_job(db, job_id, session_id, storage):
             pruned_count += 1
+            pruned_ids.append(job_id)
+    if pruned_ids:
+        from app.services.audit_service import AuditActor, record_event
+
+        record_event(
+            scope_id=session_id, actor=AuditActor.system("retention"), action="job.pruned", entity_type="session",
+            entity_id=session_id, summary=f"Removed {pruned_count} old reconciliation(s) beyond the {max_records}-record limit",
+            before={"job_ids": pruned_ids},
+        )
     return pruned_count

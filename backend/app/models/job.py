@@ -22,6 +22,14 @@ class ReconciliationJob(IdMixin, TimestampMixin, Base):
     report_id: Mapped[str | None] = mapped_column(ForeignKey("reports.id"))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Durable execution: a worker claims a queued job, counts the attempt and
+    # refreshes the heartbeat while it runs. A stale heartbeat means the worker
+    # died, so the job is retried (up to the attempt limit) or failed.
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    worker_id: Mapped[str | None] = mapped_column(String(120))
+    template_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    template_version: Mapped[int | None] = mapped_column(Integer)
 
     report = relationship("Report", foreign_keys=[report_id], post_update=True)
     input_file_1 = relationship("UploadedFile", foreign_keys=[input_file_1_id])

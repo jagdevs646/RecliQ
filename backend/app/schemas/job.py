@@ -28,6 +28,9 @@ class ReconciliationJobOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    attempts: int = 0
+    template_id: str | None = None
+    template_version: int | None = None
 
     model_config = {"from_attributes": True}
 

@@ -23,6 +23,27 @@ def get_file_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
 
+# .xls (Excel 97-2003) needs xlrd; pandas' default engine only reads .xlsx.
+_EXCEL_ENGINES = {".xlsx": "openpyxl", ".xls": "xlrd"}
+
+
+def _max_rows() -> int | None:
+    try:
+        from app.core.config import get_settings
+
+        return get_settings().max_rows_per_sheet
+    except Exception:
+        return None
+
+
+def _enforce_row_limit(df: pd.DataFrame, sheet_id: str) -> pd.DataFrame:
+    """Backstop for the upload-time check (e.g. PDF/Word tables)."""
+    limit = _max_rows()
+    if limit and len(df) > limit:
+        raise ValueError(f"Sheet '{sheet_id}' has {len(df):,} rows; the limit is {limit:,} rows per sheet.")
+    return df
+
+
 def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]]:
     """
     Returns a list of available 'sheets' or 'tables' within the file.
@@ -32,10 +53,10 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
     """
     ext = get_file_extension(filename)
     
-    if ext in ['.xlsx', '.xls']:
+    if ext in _EXCEL_ENGINES:
         try:
-            xl = pd.ExcelFile(file_path)
-            return [{"id": sheet, "name": sheet} for sheet in xl.sheet_names]
+            with pd.ExcelFile(file_path, engine=_EXCEL_ENGINES[ext]) as xl:
+                return [{"id": sheet, "name": sheet} for sheet in xl.sheet_names]
         except Exception as e:
             raise ValueError(f"Failed to read Excel file: {e}")
             
@@ -63,7 +84,7 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
             raise ValueError("No tables detected in PDF.")
         return tables
         
-    elif ext in ['.docx', '.doc']:
+    elif ext == '.docx':
         if docx is None:
             raise ImportError("python-docx is required to parse Word documents.")
         try:
@@ -185,8 +206,8 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
         except Exception:
             pass
     ext = get_file_extension(filename)
-    if ext in [".xlsx", ".xls"]:
-        return pd.read_excel(file_path, sheet_name=sheet_id, nrows=nrows)
+    if ext in _EXCEL_ENGINES:
+        return pd.read_excel(file_path, sheet_name=sheet_id, nrows=nrows, engine=_EXCEL_ENGINES[ext])
     if ext in [".csv", ".txt", ".tsv"]:
         return pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=nrows)
     return read_table_data(file_path, filename, sheet_id).head(nrows)
@@ -200,8 +221,8 @@ def read_table_columns(file_path: Path, filename: str, sheet_id: str) -> list[st
     if cached is not None:
         return [str(column) for column in cached.columns]
     ext = get_file_extension(filename)
-    if ext in [".xlsx", ".xls"]:
-        return [str(column) for column in pd.read_excel(file_path, sheet_name=sheet_id, nrows=0).columns]
+    if ext in _EXCEL_ENGINES:
+        return [str(column) for column in pd.read_excel(file_path, sheet_name=sheet_id, nrows=0, engine=_EXCEL_ENGINES[ext]).columns]
     if ext in [".csv", ".txt", ".tsv"]:
         return [str(column) for column in pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=0).columns]
     return [str(column) for column in read_table_data(file_path, filename, sheet_id).columns]
@@ -252,13 +273,15 @@ def clear_table_cache(file_path: Path) -> None:
 
 
 def _parse_table_data(file_path: Path, filename: str, sheet_id: str) -> pd.DataFrame:
-    """
-    Reads the specific sheet/table from the file into a Pandas DataFrame.
-    """
+    """Read one sheet/table and apply the configured row limit."""
+    return _enforce_row_limit(_parse_table_unchecked(file_path, filename, sheet_id), sheet_id)
+
+
+def _parse_table_unchecked(file_path: Path, filename: str, sheet_id: str) -> pd.DataFrame:
     ext = get_file_extension(filename)
     
-    if ext in ['.xlsx', '.xls']:
-        return pd.read_excel(file_path, sheet_name=sheet_id)
+    if ext in _EXCEL_ENGINES:
+        return pd.read_excel(file_path, sheet_name=sheet_id, engine=_EXCEL_ENGINES[ext])
         
     elif ext in ['.csv', '.txt']:
         return pd.read_csv(file_path)
@@ -292,7 +315,7 @@ def _parse_table_data(file_path: Path, filename: str, sheet_id: str) -> pd.DataF
         except Exception as e:
             raise ValueError(f"Failed to extract PDF table: {e}")
             
-    elif ext in ['.docx', '.doc']:
+    elif ext == '.docx':
         if docx is None:
             raise ImportError("python-docx is required")
             

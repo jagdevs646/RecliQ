@@ -7,15 +7,20 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import BackgroundTasks, HTTPException, status
+import logging
+
+from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.observability import capture_exception
 from app.database.session import SessionLocal
+from app.jobs.queue import enqueue_job
+from app.jobs.runner import claim_job, heartbeat, is_transient
+from app.models.alias import EntityAlias
 from app.models.file import UploadedFile
 from app.models.job import ReconciliationJob
 from app.models.report import Report
-from app.reconciliation_engine.background_jobs import run_in_background
 from app.reconciliation_engine.engine import (
     read_excel_columns,
     run_generic_reconciliation,
@@ -27,8 +32,12 @@ from app.schemas.reconciliation import (
     ReconciliationPlan,
     normalize_legacy_request,
 )
+from app.services.audit_service import AuditActor, record_event
 from app.services.job_service import append_history
 from app.storage import get_storage
+from app.storage.base import report_data_path
+
+logger = logging.getLogger("recliq.jobs")
 
 
 def _file_record(db: Session, file_id: str, session_id: str) -> UploadedFile:
@@ -144,18 +153,33 @@ def _label_multi_rule_report(universal_data: dict, rules: list[dict]) -> None:
     metadata["matching_keys"] = ["Match Key"]
     metadata["secondary_keys"] = []
     metadata["compared_fields"] = []
+    # Per-rule preparation and passes are listed on the Sheet Rules tab.
+    for key in ("transformations", "matching_passes", "pass_counts", "normalization_rules_used", "date_convention"):
+        metadata.pop(key, None)
+
+
+def _plan_summary(plan: ReconciliationPlan) -> dict:
+    """What the audit log records about a submitted plan."""
+    return {
+        "file_pairs": len(plan.file_pairs),
+        "sheet_rules": sum(len(pair.sheet_rules) for pair in plan.file_pairs),
+        "precheck_acknowledged": plan.precheck_acknowledged,
+        "precheck_summary": plan.precheck_summary,
+    }
 
 
 def enqueue_generic_job(
     db: Session,
-    payload: GenericReconciliationRequest,
-    background_tasks: BackgroundTasks,
+    payload: GenericReconciliationRequest | ReconciliationPlan,
     session_id: str,
+    actor: AuditActor | None = None,
+    template: tuple[str, int] | None = None,
 ) -> ReconciliationJob:
     try:
         plan = normalize_legacy_request(payload)
+        plan.execution_rules()  # Validates every pair/rule before queueing.
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     source_file_ids = [
         source.file_id
@@ -188,21 +212,39 @@ def enqueue_generic_job(
         input_file_1_id=file_1_id,
         input_file_2_id=file_2_id,
         settings_json=plan.model_dump_json(),
+        template_id=template[0] if template else None,
+        template_version=template[1] if template else None,
     )
     db.add(job)
     db.flush()
     append_history(db, job, "queued", "Generic reconciliation job queued")
     db.commit()
     db.refresh(job)
-    background_tasks.add_task(process_reconciliation_job_async, job.id)
+    record_event(
+        scope_id=session_id, actor=actor or AuditActor("session", session_id), action="job.created",
+        entity_type="job", entity_id=job.id, summary="Reconciliation queued",
+        after=json.loads(job.settings_json), metadata={**_plan_summary(plan), "template": list(template) if template else None},
+    )
+    _enqueue_or_fail(db, job)
     return job
+
+
+def _enqueue_or_fail(db: Session, job: ReconciliationJob) -> None:
+    """Queue the job; if the queue is unreachable the job stays queued and the
+    recovery sweeper retries it, so the request itself still succeeds."""
+    try:
+        enqueue_job(job.id)
+    except Exception as exc:
+        capture_exception(exc, queued_job_id=job.id)
+        append_history(db, job, "queued", "The job queue is temporarily unavailable; the job will start automatically.")
+        db.commit()
 
 
 def enqueue_gst_job(
     db: Session,
     payload: GSTReconciliationRequest,
-    background_tasks: BackgroundTasks,
     session_id: str,
+    actor: AuditActor | None = None,
 ) -> ReconciliationJob:
     file_1_id = payload.file_1_id or (payload.source_files_1[0].file_id if payload.source_files_1 else None)
     file_2_id = payload.file_2_id or (payload.source_files_2[0].file_id if payload.source_files_2 else None)
@@ -238,7 +280,11 @@ def enqueue_gst_job(
     append_history(db, job, "queued", "GST reconciliation job queued")
     db.commit()
     db.refresh(job)
-    background_tasks.add_task(process_reconciliation_job_async, job.id)
+    record_event(
+        scope_id=session_id, actor=actor or AuditActor("session", session_id), action="job.created",
+        entity_type="job", entity_id=job.id, summary="GST reconciliation queued", after=json.loads(job.settings_json),
+    )
+    _enqueue_or_fail(db, job)
     return job
 
 
@@ -273,31 +319,35 @@ def get_file_columns(db: Session, file_id: str, session_id: str, sheet_id: str |
     return [normalize_header(col) for col in transform_horizontal_dataframe(df).columns]
 
 
-def process_reconciliation_job_async(job_id: str) -> None:
-    # FastAPI already runs sync background tasks in a thread off the event loop.
-    # Calling directly avoids double-threading (submit + future.result()) which
-    # caused hangs with multi-worker Uvicorn deployments.
-    process_reconciliation_job(job_id)
+def _saved_aliases(db: Session, scope_id: str) -> list[tuple[str, str]]:
+    """Organization-approved aliases as (variant, canonical) pairs."""
+    rows = db.query(EntityAlias).filter(EntityAlias.scope_id == scope_id, EntityAlias.active.is_(True)).all()
+    return [(row.variant, row.canonical) for row in rows]
 
 
 def process_reconciliation_job(job_id: str) -> None:
+    """Run one queued job. Only the worker that claims the job runs it."""
+    if not claim_job(job_id):
+        logger.info("Job not claimable; it is already running, finished or cancelled")
+        return
+    settings = get_settings()
+    with heartbeat(job_id, max(5.0, settings.job_lease_seconds / 4)):
+        _process_claimed_job(job_id)
+
+
+def _process_claimed_job(job_id: str) -> None:
     db = SessionLocal()
     settings = get_settings()
     storage = get_storage()
     output_path: Path | None = None
     try:
         job = db.get(ReconciliationJob, job_id)
-        if not job:
+        if not job or job.status != "processing":
             return
-
-        if job.status == "cancelled":
-            return
-
-        job.status = "processing"
-        job.progress = 10
-        job.started_at = datetime.now(timezone.utc)
-        append_history(db, job, "processing", "Reconciliation started")
+        append_history(db, job, "processing", f"Reconciliation started (attempt {job.attempts})")
         db.commit()
+        logger.info("Reconciliation started", extra={"attempt": job.attempts, "job_type": job.job_type})
+        saved_aliases = _saved_aliases(db, job.session_id) if job.job_type == "generic" else []
 
         def is_cancelled() -> bool:
             try:
@@ -410,6 +460,10 @@ def process_reconciliation_job(job_id: str) -> None:
                 "secondary_conditions": pair.get("secondary_conditions", []),
                 "similarity_policy": pair.get("similarity_policy", {}),
                 "date_only_override": bool(pair.get("date_only_override", False)),
+                "matching_passes": pair.get("matching_passes", []),
+                "transformations": pair.get("transformations", []),
+                "normalization": pair.get("normalization", {}),
+                "date_format": "day_first" if pair.get("date_dayfirst", True) else "month_first",
                 "mapping_count": len(pair.get("rules", [])),
                 "status": "failed",
                 "error": None,
@@ -469,6 +523,11 @@ def process_reconciliation_job(job_id: str) -> None:
                         file_2_name=f"{destination_record.original_filename} ({sheet_name_2})", is_cancelled=is_cancelled,
                         write_report=False, secondary_conditions=pair.get("secondary_conditions", []),
                         similarity_policy=pair.get("similarity_policy", {}), date_only_override=bool(pair.get("date_only_override", False)),
+                        transformations=pair.get("transformations", []),
+                        matching_passes=pair.get("matching_passes", []),
+                        normalization=pair.get("normalization", {}),
+                        date_dayfirst=bool(pair.get("date_dayfirst", True)),
+                        saved_aliases=saved_aliases,
                     )
 
                 for k, v in res["summary"].items():
@@ -482,6 +541,9 @@ def process_reconciliation_job(job_id: str) -> None:
             except InterruptedError:
                 raise
             except Exception as exc:
+                if is_transient(exc):
+                    raise  # Infrastructure failure: retry the whole job.
+                logger.warning("Sheet rule failed", extra={"sheet_rule_id": sheet_rule_id, "error": str(exc)})
                 # str(KeyError) wraps its message in quotes; report the message itself.
                 message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
                 manifest_entry.update(status="failed", error=message)
@@ -559,14 +621,11 @@ def process_reconciliation_job(job_id: str) -> None:
             raise InterruptedError("Reconciliation cancelled by user")
 
         stored_report = storage.save_report(output_path, job.session_id, output_name)
-        
-        # Also copy the raw JSON data so we can rebuild custom reports later
-        raw_path = output_path.with_name(f"{output_path.stem}_data.json")
+
+        # The report data is stored as its own object (local disk or blob
+        # storage), so previews and custom reports work from any worker.
         if raw_path.exists():
-            import shutil
-            raw_storage_path = storage.resolve_path(stored_report.storage_path).with_name(f"{Path(stored_report.storage_path).stem}_data.json")
-            shutil.copy(raw_path, raw_storage_path)
-            
+            storage.save_file(raw_path, report_data_path(stored_report.storage_path))
         from app.utils.json_encoder import safe_json_dumps
 
         # The report summary doubles as the job manifest: aggregate counts at the
@@ -594,6 +653,12 @@ def process_reconciliation_job(job_id: str) -> None:
         completion_message = "Reconciliation completed with sheet-rule errors" if rule_errors else "Reconciliation completed"
         append_history(db, job, job.status, completion_message, safe_json_dumps(summary))
         db.commit()
+        logger.info(completion_message, extra={"failed_rules": len(rule_errors), "report_id": report.id})
+        record_event(
+            scope_id=job.session_id, actor=AuditActor.system(), action="job.completed", entity_type="job",
+            entity_id=job.id, summary=completion_message, after={"status": job.status, "report_id": report.id},
+            metadata={key: value for key, value in summary.items() if isinstance(value, (int, float))},
+        )
 
         # Enforce maximum 20 stored records per session
         from app.services.job_service import prune_old_jobs
@@ -624,6 +689,20 @@ def process_reconciliation_job(job_id: str) -> None:
             pass
         job = db.get(ReconciliationJob, job_id)
         if job and job.status != "cancelled":
+            if is_transient(exc) and job.attempts < settings.job_max_attempts:
+                # Database/storage/queue outage: put the job back in the queue.
+                logger.warning("Transient failure; job will be retried", exc_info=True)
+                job.status = "queued"
+                job.progress = 0
+                job.worker_id = None
+                append_history(db, job, "queued", f"Temporary problem ({type(exc).__name__}); retrying.")
+                try:
+                    db.commit()
+                    enqueue_job(job.id)
+                except Exception as queue_exc:
+                    capture_exception(queue_exc)
+                return
+            capture_exception(exc, job_type=job.job_type, attempt=job.attempts)
             job.status = "failed"
             job.progress = 100
             job.error_message = str(exc)
@@ -633,6 +712,10 @@ def process_reconciliation_job(job_id: str) -> None:
                 db.commit()
             except Exception:
                 pass
+            record_event(
+                scope_id=job.session_id, actor=AuditActor.system(), action="job.failed", entity_type="job",
+                entity_id=job.id, summary="Reconciliation failed", after={"status": "failed", "error": str(exc)[:2000]},
+            )
     finally:
         db.close()
         try:

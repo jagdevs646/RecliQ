@@ -16,6 +16,7 @@ def build_universal_data_model(
     identity_resolution: list[dict] | None = None,
     secondary_keys: list[str] | None = None,
     compared_fields: list[str] | None = None,
+    extra_metadata: dict | None = None,
 ) -> dict:
 
     # 1. One difference row per mismatched field. Records are identified by
@@ -167,6 +168,7 @@ def build_universal_data_model(
             "matching_keys": matching_keys,
             "secondary_keys": secondary_keys or [],
             "compared_fields": compared_fields or [],
+            **(extra_metadata or {}),
         },
         "statistics": {
             "total_file_1": total_file_1,

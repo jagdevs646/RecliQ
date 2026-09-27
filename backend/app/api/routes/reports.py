@@ -9,11 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_session_id
+from app.api.deps import get_actor, get_session_id
 from app.database.session import get_db
 from app.models.job import ReconciliationJob
 from app.models.report import Report
+from app.services.audit_service import AuditActor, record_event
 from app.storage import get_storage
+from app.storage.base import report_data_path
 from pydantic import BaseModel
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
@@ -76,9 +78,18 @@ def _report_media_type(path: Path) -> str:
     return "application/zip" if path.suffix.lower() == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _report_preview_data(path: Path) -> dict[str, Any]:
-    raw_path = path.with_name(f"{path.stem}_data.json")
-    if not raw_path.exists():
+def _report_data_file(report: Report) -> Path | None:
+    """Local path of the report's stored JSON data, wherever it is kept."""
+    try:
+        return get_storage().resolve_path(report_data_path(report.storage_path))
+    except FileNotFoundError:
+        return None
+
+
+def _report_preview_data(report: Report | Path) -> dict[str, Any]:
+    """Stored report data, from a Report record or a local workbook path."""
+    raw_path = report.with_name(f"{report.stem}_data.json") if isinstance(report, Path) else _report_data_file(report)
+    if raw_path is None or not raw_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report preview metadata is unavailable")
     try:
         with open(raw_path, encoding="utf-8") as raw_file:
@@ -112,11 +123,16 @@ def download_report(
     report_id: str,
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
 ) -> FileResponse:
     report = db.query(Report).filter(Report.id == report_id, Report.session_id == session_id).first()
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     path = get_storage().resolve_path(report.storage_path)
+    record_event(
+        scope_id=session_id, actor=actor, action="report.downloaded", entity_type="report", entity_id=report.id,
+        summary=f"Downloaded {report.filename}",
+    )
     return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
 
 
@@ -126,9 +142,14 @@ def download_job_report(
     file_pair_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
 ) -> FileResponse | Response:
     _, report = _job_report(db, job_id, session_id)
     path = get_storage().resolve_path(report.storage_path)
+    record_event(
+        scope_id=session_id, actor=actor, action="report.downloaded", entity_type="job", entity_id=job_id,
+        summary=f"Downloaded report {report.filename}", metadata={"file_pair_id": file_pair_id, "report_id": report.id},
+    )
     if not file_pair_id or path.suffix.lower() != ".zip":
         # A single-pair job's only workbook is the whole report.
         return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
@@ -176,16 +197,21 @@ def download_custom_report(
     file_pair_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
 ) -> FileResponse:
     _, report = _job_report(db, job_id, session_id)
     storage = get_storage()
     path = storage.resolve_path(report.storage_path)
-    raw_path = path.with_name(f"{path.stem}_data.json")
+    raw_path = _report_data_file(report) or path.with_name(f"{path.stem}_data.json")
     is_archive = path.suffix.lower() == ".zip"
+    record_event(
+        scope_id=session_id, actor=actor, action="report.customized", entity_type="job", entity_id=job_id,
+        summary="Downloaded a customized report", after=config.model_dump(), metadata={"file_pair_id": file_pair_id},
+    )
 
     if is_archive and not file_pair_id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="Choose a file pair to customize: each file pair has its own workbook.",
         )
 
@@ -256,11 +282,10 @@ def job_report_preview(
     session_id: str = Depends(get_session_id),
 ) -> dict[str, Any]:
     _, report = _job_report(db, job_id, session_id)
-    path = get_storage().resolve_path(report.storage_path)
     section = _PREVIEW_SECTIONS.get(category)
     if section is None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unknown preview category")
-    data = _report_preview_data(path)
+        raise HTTPException(status_code=422, detail="Unknown preview category")
+    data = _report_preview_data(report)
     records = data.get(section, [])
     if file_pair_id:
         records = [record for record in records if record.get("File Pair ID") == file_pair_id]

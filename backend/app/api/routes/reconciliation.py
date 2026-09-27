@@ -1,10 +1,10 @@
 import tempfile
 from pathlib import Path
-from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_session_id
+from app.api.deps import get_actor, get_session_id
 from app.database.session import get_db
 from app.models.job import ReconciliationJob
 from app.reconciliation.gst import AMOUNT_COLUMNS, MERGE_KEY_COLUMNS, REQUIRED_COLUMNS
@@ -12,6 +12,7 @@ from app.reconciliation.gst import generate_sample_format as generate_gst_sample
 from app.reconciliation_engine.report_generator import generate_generic_sample_format
 from app.schemas.job import ReconciliationJobOut
 from app.schemas.reconciliation import GenericReconciliationRequest, GSTReconciliationRequest
+from app.services.audit_service import AuditActor
 from app.services.reconciliation_service import enqueue_generic_job, enqueue_gst_job
 
 
@@ -52,18 +53,18 @@ def download_sample_template(type: str = Query("generic")) -> FileResponse:
 @router.post("/generic", response_model=ReconciliationJobOut)
 def start_generic_reconciliation(
     payload: GenericReconciliationRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
 ) -> ReconciliationJob:
-    return enqueue_generic_job(db, payload, background_tasks, session_id)
+    return enqueue_generic_job(db, payload, session_id, actor)
 
 
 @router.post("/gst", response_model=ReconciliationJobOut)
 def start_gst_reconciliation(
     payload: GSTReconciliationRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
 ) -> ReconciliationJob:
-    return enqueue_gst_job(db, payload, background_tasks, session_id)
+    return enqueue_gst_job(db, payload, session_id, actor)

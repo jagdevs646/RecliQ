@@ -4,8 +4,10 @@ import math
 import re
 import unicodedata
 from datetime import date, datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
-from typing import Tuple
+from typing import Iterator, Tuple
 
 import pandas as pd
 
@@ -211,6 +213,24 @@ def canonical_date_value(value: object, *, dayfirst: bool = True) -> date | None
     return _cached_canonical_date_from_text(str(value), dayfirst)
 
 
+# Ambiguous numeric dates (03/04/2026) follow the convention of the sheet rule
+# being executed: day-first unless the rule says month-first.
+_DAYFIRST: ContextVar[bool] = ContextVar("date_dayfirst", default=True)
+
+
+@contextmanager
+def use_date_convention(dayfirst: bool) -> Iterator[None]:
+    token = _DAYFIRST.set(bool(dayfirst))
+    try:
+        yield
+    finally:
+        _DAYFIRST.reset(token)
+
+
+def date_convention_dayfirst() -> bool:
+    return _DAYFIRST.get()
+
+
 def parse_date_value(value: object) -> date | None:
-    """Backward-compatible name for the canonical day-first parser."""
-    return canonical_date_value(value, dayfirst=True)
+    """Canonical date using the active convention (day-first by default)."""
+    return canonical_date_value(value, dayfirst=_DAYFIRST.get())

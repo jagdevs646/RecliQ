@@ -15,7 +15,7 @@ class LocalStorage:
         self.base_path = Path(settings.local_storage_path)
         self.base_path.mkdir(parents=True, exist_ok=True)
 
-    def save_upload(self, file: UploadFile, session_id: str) -> StoredObject:
+    def save_upload(self, file: UploadFile, session_id: str, content_type: str | None = None) -> StoredObject:
         suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
         stored_filename = f"{uuid4()}{suffix}"
         relative_path = Path("uploads") / str(session_id) / stored_filename
@@ -30,7 +30,7 @@ class LocalStorage:
             storage_backend=self.name,
             storage_path=relative_path.as_posix(),
             size_bytes=destination.stat().st_size,
-            content_type=file.content_type,
+            content_type=content_type or file.content_type,
         )
 
     def save_report(self, source_path: Path, session_id: str, filename: str) -> StoredObject:
@@ -47,6 +47,13 @@ class LocalStorage:
             size_bytes=destination.stat().st_size,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+
+    def save_file(self, source_path: Path, storage_path: str) -> None:
+        destination = self.base_path / storage_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_name(f"{destination.name}.part")
+        partial.write_bytes(source_path.read_bytes())
+        partial.replace(destination)
 
     def resolve_path(self, storage_path: str) -> Path:
         path = self.base_path / storage_path

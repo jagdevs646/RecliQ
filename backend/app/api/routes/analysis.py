@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from pathlib import Path
 
-from app.api.deps import get_session_id
+from app.api.deps import get_actor, get_session_id
 from app.database.session import get_db
-from app.schemas.reconciliation import AnalysisRequest, AnalysisResponse, PairAnalysisResult
+from app.schemas.reconciliation import AnalysisRequest, AnalysisResponse, GenericReconciliationRequest, normalize_legacy_request
+from app.services.audit_service import AuditActor, record_event
 from app.models.file import UploadedFile
 from app.storage import get_storage
 from app.reconciliation_engine.ingestion import read_table_data, read_table_sample
@@ -116,3 +117,25 @@ def analyze_reconciliation_files(
     result = _analyze_pair(df1, df2)
     return AnalysisResponse(**result)
 
+
+
+@router.post("/precheck")
+def precheck_reconciliation(
+    payload: GenericReconciliationRequest,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
+) -> dict:
+    """Data-quality pre-check of a planned run (same body as the run request)."""
+    from app.services.precheck_service import precheck_summary, run_precheck
+
+    try:
+        plan = normalize_legacy_request(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result = run_precheck(db, session_id, plan)
+    record_event(
+        scope_id=session_id, actor=actor, action="precheck.run", entity_type="plan",
+        summary=f"Data-quality pre-check: {result['status']}", metadata=precheck_summary(result),
+    )
+    return result

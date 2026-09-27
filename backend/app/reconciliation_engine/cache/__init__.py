@@ -2,6 +2,7 @@ from app.reconciliation_engine.cache.cache_manager import (
     BUSINESS_SYNONYMS,
     canonical_date_value,
     compact_identifier,
+    date_convention_dayfirst,
     is_blank,
     normalize_header,
     normalize_text,
@@ -10,6 +11,7 @@ from app.reconciliation_engine.cache.cache_manager import (
     to_number,
     tokens,
     unicode_clean,
+    use_date_convention,
 )
 
 __all__ = [
@@ -24,4 +26,7 @@ __all__ = [
     "sorted_token_key",
     "to_number",
     "parse_date_value",
+    "use_date_convention",
+    "date_convention_dayfirst",
+    "compact_identifier",
 ]
