@@ -1,4 +1,4 @@
-export type Page = "dashboard" | "upload" | "status" | "results" | "history";
+export type Page = "dashboard" | "upload" | "status" | "results" | "history" | "saved" | "aliases" | "audit";
 
 export interface User {
   id: string;
@@ -50,6 +50,49 @@ export interface SimilarityPolicy {
   threshold?: number;
 }
 
+export type TransformationOperation =
+  | "trim" | "uppercase" | "lowercase" | "remove_characters" | "replace_text" | "remove_prefix" | "remove_suffix"
+  | "strip_leading_zeros" | "keep_alphanumeric" | "invert_sign" | "absolute_value" | "multiply" | "round"
+  | "debit_credit_to_signed";
+
+export interface TransformationStep {
+  operation: TransformationOperation;
+  side: "source" | "destination" | "both";
+  columns: string[];
+  params: Record<string, string | number | boolean>;
+  output_column?: string | null;
+}
+
+export interface MatchingPass {
+  type: "amount_date" | "amount_tolerance";
+  name?: string;
+  enabled?: boolean;
+  amount_source: string;
+  amount_destination: string;
+  date_source?: string | null;
+  date_destination?: string | null;
+  date_window_days: number;
+  amount_tolerance: number;
+  amount_tolerance_percent: number;
+  narrative_source?: string | null;
+  narrative_destination?: string | null;
+  narrative_threshold: number;
+  respect_secondary_keys: boolean;
+}
+
+export interface NormalizationSettings {
+  legal_forms: boolean;
+  abbreviations: boolean;
+  ignore_prefixes: boolean;
+  join_initials: boolean;
+  word_order: boolean;
+  use_saved_aliases: boolean;
+  synonyms: Array<{ term: string; replacement: string }>;
+  aliases: Array<{ canonical: string; variants: string[] }>;
+}
+
+export type DateFormat = "day_first" | "month_first";
+
 export interface SheetRuleDraft {
   file1Columns: string[];
   file2Columns: string[];
@@ -62,6 +105,160 @@ export interface SheetRuleDraft {
   includeFile1: string[];
   includeFile2: string[];
   analysis: AnalysisResponse | null;
+  transformations: TransformationStep[];
+  matchingPasses: MatchingPass[];
+  normalization: NormalizationSettings;
+  dateFormat: DateFormat;
+}
+
+/** One sheet rule as sent to the API (canonical plan). */
+export interface SheetRulePayload {
+  sheet_rule_id: string;
+  source_sheets: string[];
+  destination_sheets: string[];
+  matching_strategy: {
+    primary_key_source: string[];
+    primary_key_destination: string[];
+    secondary_conditions: SecondaryMatchCondition[];
+    similarity_policy: SimilarityPolicy;
+    date_only_override: boolean;
+    matching_passes: MatchingPass[];
+    normalization: NormalizationSettings;
+  };
+  reconciliation_mapping: RuleMapping[];
+  include_columns_file_1: string[];
+  include_columns_file_2: string[];
+  transformations: TransformationStep[];
+  date_format: DateFormat;
+  report_label: string;
+}
+
+export interface FilePairPayload {
+  file_pair_id: string;
+  source_files: FileSource[];
+  destination_files: FileSource[];
+  report_metadata?: { label?: string };
+  sheet_rules: SheetRulePayload[];
+}
+
+export interface GenericPlanPayload {
+  orientation: string;
+  file_pairs: FilePairPayload[];
+  file_1_id?: string;
+  file_2_id?: string;
+  precheck_acknowledged?: boolean;
+  precheck_summary?: Record<string, unknown>;
+}
+
+export type PrecheckSeverity = "blocker" | "warning" | "info";
+
+export interface PrecheckIssue {
+  severity: PrecheckSeverity;
+  category: string;
+  side: "source" | "destination" | null;
+  column: string | null;
+  message: string;
+  count: number | null;
+  examples: Array<{ row: number | null; value: string | null }>;
+  suggestion: { date_format?: DateFormat } | null;
+}
+
+export interface PrecheckRuleResult {
+  file_pair_id: string;
+  sheet_rule_id: string;
+  label: string;
+  date_format: DateFormat;
+  source_rows?: number;
+  destination_rows?: number;
+  issues: PrecheckIssue[];
+}
+
+export interface PrecheckResult {
+  status: "ok" | "warnings" | "blockers";
+  summary: Record<PrecheckSeverity, number>;
+  rules: PrecheckRuleResult[];
+}
+
+export interface TemplateSummary {
+  id: string;
+  name: string;
+  description: string;
+  current_version: number;
+  archived: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  last_run_at: string | null;
+  summary: {
+    file_pairs: number;
+    sheet_rules: number;
+    keys: string[];
+    pairs: Array<{ file_pair_id: string; label: string; source_filename: string; destination_filename: string; sheet_rules: number }>;
+  };
+  config?: { file_pairs: Array<{ file_pair_id: string; label: string; sheet_rules: SheetRulePayload[] }>; column_aliases: Record<string, string[]>; report_settings: Record<string, unknown> };
+  versions?: Array<{ version: number; change_note: string; created_at: string | null; created_by: string }>;
+}
+
+export interface TemplateResolutionItem {
+  side?: "source" | "destination";
+  template: string | null;
+  resolved: string | null;
+  method: string;
+}
+
+export interface TemplateResolution {
+  file_pairs: Array<{ file_pair_id: string; label: string; sheets: TemplateResolutionItem[]; rules: Array<{ sheet_rule_id: string; columns: TemplateResolutionItem[] }> }>;
+  unresolved: Array<{ file_pair_id: string; sheet_rule_id?: string; side?: "source" | "destination"; sheet?: string; column?: string; problem: string; available?: string[] }>;
+  automatic?: TemplateResolutionItem[];
+}
+
+export interface TemplateRunRequest {
+  files: Array<{ file_pair_id: string; source_file_id: string; destination_file_id: string }>;
+  sheet_overrides?: Record<string, Record<string, Record<string, string>>>;
+  column_overrides?: Record<string, Record<string, Record<string, string>>>;
+  precheck_acknowledged?: boolean;
+  precheck_summary?: Record<string, unknown>;
+}
+
+export interface AuditEvent {
+  sequence: number;
+  event_id: string;
+  occurred_at: string;
+  actor_type: string;
+  actor_id: string;
+  ip_address: string | null;
+  request_id: string | null;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  summary: string;
+  before: unknown;
+  after: unknown;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface EntityAlias {
+  id: string;
+  canonical: string;
+  variant: string;
+  column_hint: string;
+  active: boolean;
+  source: string;
+  created_at: string | null;
+}
+
+export interface AliasSuggestion {
+  pair_key: string;
+  value_1: string;
+  value_2: string;
+  acceptances: number;
+  jobs: number;
+  column_hint: string;
+}
+
+export interface SupportedFormats {
+  formats: Array<{ extension: string; label: string; content_type: string }>;
+  max_upload_mb: number;
+  max_rows_per_sheet: number;
 }
 
 export interface AnalysisResponse {
@@ -104,6 +301,9 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  attempts?: number;
+  template_id?: string | null;
+  template_version?: number | null;
 }
 
 export interface ReconciliationSummary {
@@ -122,6 +322,8 @@ export interface ReconciliationSummary {
   field_discrepancies?: number;
   completed_rules?: number;
   failed_rules?: number;
+  keyless_matches?: number;
+  normalized_matches?: number;
   /** Job manifest (generic jobs): one entry per file pair and per sheet rule. */
   file_pairs?: FilePairManifest[];
   sheet_rules?: SheetRuleManifest[];

@@ -1,0 +1,258 @@
+/**
+ * Pure helpers for building and validating a reconciliation plan in the
+ * browser. Kept free of React so they can be unit-tested.
+ */
+import type {
+  AnalysisResponse,
+  DateFormat,
+  MatchingPass,
+  NormalizationSettings,
+  PrecheckIssue,
+  PrecheckResult,
+  SecondaryMatchCondition,
+  SheetRuleDraft,
+  SheetRulePayload,
+  TransformationStep,
+} from "../types";
+
+export const DEFAULT_NORMALIZATION: NormalizationSettings = {
+  legal_forms: true,
+  abbreviations: true,
+  ignore_prefixes: true,
+  join_initials: true,
+  word_order: true,
+  use_saved_aliases: true,
+  synonyms: [],
+  aliases: [],
+};
+
+export function emptyDraft(file1Columns: string[], file2Columns: string[], analysis: AnalysisResponse | null): SheetRuleDraft {
+  return {
+    file1Columns,
+    file2Columns,
+    primaryKeySource: [],
+    primaryKeyDestination: [],
+    secondaryConditions: [],
+    similarityPolicy: {},
+    dateOnlyOverride: false,
+    rules: [],
+    includeFile1: [],
+    includeFile2: [],
+    analysis,
+    transformations: [],
+    matchingPasses: [],
+    normalization: { ...DEFAULT_NORMALIZATION },
+    dateFormat: "day_first",
+  };
+}
+
+const DATE_COLUMN_HINT = /date|\bdt\b/i;
+
+/** Column names are compared the way the server normalizes headers. */
+export function normalizeHeader(value: string): string {
+  return value.replace(/[\r\n]/g, "").trim().toUpperCase();
+}
+
+/** Columns created by transformations (e.g. a signed amount), per side. */
+export function derivedColumns(config: Pick<SheetRuleDraft, "transformations">, side: "source" | "destination"): string[] {
+  return config.transformations
+    .filter((step) => step.operation === "debit_credit_to_signed" && step.side === side)
+    .map((step) => normalizeHeader(step.output_column || "Signed Amount"));
+}
+
+/** File columns plus derived columns, for mapping and pass selection. */
+export function availableColumns(config: SheetRuleDraft, side: "source" | "destination"): string[] {
+  const base = side === "source" ? config.file1Columns : config.file2Columns;
+  return [...base, ...derivedColumns(config, side).filter((column) => !base.includes(column))];
+}
+
+/** A one-column key on a date column (values decide first, names are a fallback). */
+export function isDateOnlyKey(config: SheetRuleDraft): boolean {
+  if (config.primaryKeySource.length !== 1 || config.primaryKeyDestination.length !== 1) return false;
+  const [source] = config.primaryKeySource;
+  const [destination] = config.primaryKeyDestination;
+  const dateValued = Boolean(config.analysis?.date_columns_1?.includes(source) || config.analysis?.date_columns_2?.includes(destination));
+  return dateValued || DATE_COLUMN_HINT.test(source) || DATE_COLUMN_HINT.test(destination);
+}
+
+export function passIsComplete(item: MatchingPass): boolean {
+  if (!item.amount_source || !item.amount_destination) return false;
+  if (item.type === "amount_date" && (!item.date_source || !item.date_destination)) return false;
+  if (Boolean(item.date_source) !== Boolean(item.date_destination)) return false;
+  if (Boolean(item.narrative_source) !== Boolean(item.narrative_destination)) return false;
+  return true;
+}
+
+const PARAMETER_REQUIRED: Partial<Record<TransformationStep["operation"], string>> = {
+  replace_text: "find",
+  remove_prefix: "text",
+  remove_suffix: "text",
+  remove_characters: "characters",
+  multiply: "factor",
+};
+
+export function transformationIsComplete(step: TransformationStep): boolean {
+  if (step.operation === "debit_credit_to_signed") {
+    return step.side !== "both" && Boolean(step.params.debit_column) && Boolean(step.params.credit_column);
+  }
+  if (!step.columns.length || step.columns.some((column) => !column)) return false;
+  const required = PARAMETER_REQUIRED[step.operation];
+  return !required || (step.params[required] !== undefined && step.params[required] !== "");
+}
+
+export function hasKeys(config: SheetRuleDraft): boolean {
+  return config.primaryKeySource.length > 0 && [...config.primaryKeySource, ...config.primaryKeyDestination].some(Boolean);
+}
+
+/** Matching setup is complete (step 3). Keys are optional when a keyless pass exists. */
+export function ruleIsReady(config: SheetRuleDraft | undefined): boolean {
+  if (!config) return false;
+  const passesReady = config.matchingPasses.every(passIsComplete);
+  const keyed = hasKeys(config);
+  const keysComplete = config.primaryKeySource.length === config.primaryKeyDestination.length
+    && [...config.primaryKeySource, ...config.primaryKeyDestination].every(Boolean);
+  return Boolean(
+    (keyed ? keysComplete : config.matchingPasses.length > 0)
+    && passesReady
+    && config.transformations.every(transformationIsComplete)
+    && config.secondaryConditions.every((condition) => condition.source_column && condition.destination_column)
+    && (!keyed || !isDateOnlyKey(config) || config.dateOnlyOverride),
+  );
+}
+
+export function ruleStatus(config: SheetRuleDraft): string {
+  const keyed = hasKeys(config);
+  if (!keyed && !config.matchingPasses.length) return "Choose the key columns";
+  if (keyed && ![...config.primaryKeySource, ...config.primaryKeyDestination].every(Boolean)) return "Choose the key columns";
+  if (config.secondaryConditions.some((condition) => !condition.source_column || !condition.destination_column)) return "Finish the \"must also match\" columns";
+  if (!config.matchingPasses.every(passIsComplete)) return "Finish the extra matching passes";
+  if (!config.transformations.every(transformationIsComplete)) return "Finish the value preparation steps";
+  if (keyed && isDateOnlyKey(config) && !config.dateOnlyOverride) return "Date-only key needs attention";
+  const parts = [
+    keyed ? config.primaryKeySource.join(" + ") : "No key (amount/date matching)",
+    `${config.secondaryConditions.length} must-also-match column${config.secondaryConditions.length === 1 ? "" : "s"}`,
+  ];
+  if (config.matchingPasses.length) parts.push(`${config.matchingPasses.length} extra pass${config.matchingPasses.length === 1 ? "" : "es"}`);
+  if (config.transformations.length) parts.push(`${config.transformations.length} preparation step${config.transformations.length === 1 ? "" : "s"}`);
+  parts.push(`${config.rules.length} mapping${config.rules.length === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+/** Deep-copies another rule's settings, keeping only columns that exist in the target sheets. */
+export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft): SheetRuleDraft {
+  const copy = structuredClone(source);
+  const transformations = copy.transformations.filter((step) => {
+    const columns = step.side === "destination" ? target.file2Columns : step.side === "source" ? target.file1Columns : [...target.file1Columns].filter((column) => target.file2Columns.includes(column));
+    const needed = step.operation === "debit_credit_to_signed" ? [String(step.params.debit_column), String(step.params.credit_column)] : step.columns;
+    return needed.every((column) => columns.includes(column));
+  });
+  const withSteps = { ...target, transformations };
+  const has1 = new Set(availableColumns(withSteps, "source"));
+  const has2 = new Set(availableColumns(withSteps, "destination"));
+  const keyPairs = copy.primaryKeySource.map((column, index) => [column, copy.primaryKeyDestination[index]] as const)
+    .filter(([left, right]) => has1.has(left) && right !== undefined && has2.has(right));
+  const passColumnsExist = (item: MatchingPass) => [item.amount_source, item.date_source, item.narrative_source].every((column) => !column || has1.has(column))
+    && [item.amount_destination, item.date_destination, item.narrative_destination].every((column) => !column || has2.has(column));
+  return {
+    ...withSteps,
+    primaryKeySource: keyPairs.map(([left]) => left),
+    primaryKeyDestination: keyPairs.map(([, right]) => right),
+    secondaryConditions: copy.secondaryConditions.filter((condition: SecondaryMatchCondition) => has1.has(condition.source_column) && has2.has(condition.destination_column)),
+    similarityPolicy: copy.similarityPolicy,
+    dateOnlyOverride: false,
+    rules: copy.rules.filter((rule) => rule.file_1_fields.every((field) => has1.has(field)) && rule.file_2_fields.every((field) => has2.has(field))),
+    includeFile1: copy.includeFile1.filter((column) => has1.has(column)),
+    includeFile2: copy.includeFile2.filter((column) => has2.has(column)),
+    matchingPasses: copy.matchingPasses.filter(passColumnsExist),
+    normalization: copy.normalization,
+    dateFormat: copy.dateFormat,
+  };
+}
+
+/** One sheet rule of the canonical plan sent to the API. */
+export function draftToSheetRule(config: SheetRuleDraft, ids: { sheetRuleId: string; sourceSheet: string; destinationSheet: string; label: string }): SheetRulePayload {
+  const keyed = hasKeys(config);
+  return {
+    sheet_rule_id: ids.sheetRuleId,
+    source_sheets: [ids.sourceSheet],
+    destination_sheets: [ids.destinationSheet],
+    matching_strategy: {
+      primary_key_source: keyed ? config.primaryKeySource : [],
+      primary_key_destination: keyed ? config.primaryKeyDestination : [],
+      secondary_conditions: config.secondaryConditions,
+      similarity_policy: config.similarityPolicy,
+      date_only_override: keyed && isDateOnlyKey(config) && config.dateOnlyOverride,
+      matching_passes: config.matchingPasses.map((item) => ({
+        ...item,
+        date_source: item.date_source || null,
+        date_destination: item.date_destination || null,
+        narrative_source: item.narrative_source || null,
+        narrative_destination: item.narrative_destination || null,
+      })),
+      normalization: config.normalization,
+    },
+    reconciliation_mapping: config.rules,
+    include_columns_file_1: config.includeFile1,
+    include_columns_file_2: config.includeFile2,
+    transformations: config.transformations,
+    date_format: config.dateFormat,
+    report_label: ids.label,
+  };
+}
+
+export function newPass(type: MatchingPass["type"], config: SheetRuleDraft): MatchingPass {
+  const guess = (columns: string[], pattern: RegExp) => columns.find((column) => pattern.test(column)) ?? "";
+  const source = availableColumns(config, "source");
+  const destination = availableColumns(config, "destination");
+  return {
+    type,
+    amount_source: guess(source, /amount|amt|value|debit|credit|total/i),
+    amount_destination: guess(destination, /amount|amt|value|debit|credit|total/i),
+    date_source: guess(source, /date/i),
+    date_destination: guess(destination, /date/i),
+    date_window_days: type === "amount_date" ? 3 : 0,
+    amount_tolerance: type === "amount_tolerance" ? 1 : 0,
+    amount_tolerance_percent: 0,
+    narrative_source: "",
+    narrative_destination: "",
+    narrative_threshold: 85,
+    respect_secondary_keys: true,
+  };
+}
+
+export function describePass(item: MatchingPass, number: number): string {
+  const base = item.type === "amount_date" ? "Same amount" : `Amount within ${[item.amount_tolerance ? `±${item.amount_tolerance}` : "", item.amount_tolerance_percent ? `±${item.amount_tolerance_percent}%` : ""].filter(Boolean).join(" / ") || "±0"}`;
+  const date = item.date_source ? ` and date within ±${item.date_window_days} day${item.date_window_days === 1 ? "" : "s"}` : "";
+  const reference = item.narrative_source ? `, reference ≥ ${item.narrative_threshold}% similar` : "";
+  return `Pass ${number}: ${base}${date}${reference}`;
+}
+
+// ── Pre-check ───────────────────────────────────────────────────────────
+export function precheckBlocked(result: PrecheckResult | null): boolean {
+  return Boolean(result && result.summary.blocker > 0);
+}
+
+export function precheckNeedsAcknowledgement(result: PrecheckResult | null): boolean {
+  return Boolean(result && result.summary.warning > 0);
+}
+
+export function issuesBySeverity(issues: PrecheckIssue[]): Record<PrecheckIssue["severity"], PrecheckIssue[]> {
+  return {
+    blocker: issues.filter((issue) => issue.severity === "blocker"),
+    warning: issues.filter((issue) => issue.severity === "warning"),
+    info: issues.filter((issue) => issue.severity === "info"),
+  };
+}
+
+/** The compact summary stored with the job when the user confirms warnings. */
+export function precheckSummary(result: PrecheckResult): Record<string, unknown> {
+  return {
+    status: result.status,
+    ...result.summary,
+    issues: result.rules.flatMap((rule) => rule.issues.filter((issue) => issue.severity !== "info").map((issue) => ({ rule: rule.sheet_rule_id, severity: issue.severity, category: issue.category, count: issue.count }))).slice(0, 100),
+  };
+}
+
+export function dateFormatLabel(format: DateFormat): string {
+  return format === "month_first" ? "Month first (MM/DD/YYYY)" : "Day first (DD/MM/YYYY)";
+}

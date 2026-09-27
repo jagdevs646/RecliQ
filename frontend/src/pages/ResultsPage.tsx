@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Search, ShieldCheck, Settings2, Split, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Search, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../services/api";
 import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportCustomConfig, ReportScope } from "../types";
@@ -22,6 +22,9 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [viewStage, setViewStage] = useState<"results" | "customize" | "download">("results");
   const [customConfig, setCustomConfig] = useState<ReportCustomConfig | null>(null);
+  // Reviewer decisions on proposed matches (evidence for alias suggestions).
+  const [decisions, setDecisions] = useState<Record<string, "accept" | "reject">>({});
+  const [savedNote, setSavedNote] = useState("");
 
   const filePairs = jobSummary.file_pairs ?? [];
   const isMultiPair = filePairs.length > 1;
@@ -68,7 +71,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
     { category: "only_file_1", title: `Present in ${file1Name} only`, label: `Found only in ${file1Name}`, count: summary.only_in_file_1, icon: FileWarning, tone: "amber" },
     { category: "only_file_2", title: `Present in ${file2Name} only`, label: `Found only in ${file2Name}`, count: summary.only_in_file_2, icon: FileWarning, tone: "slate" },
     ...(hasIdentityBreakdown ? [
-      { category: "exception_matches" as const, title: "Exception matches", label: "Primary key differed; one record passed every secondary condition", count: summary.exception_matches ?? 0, icon: Split, tone: "violet" },
+      { category: "exception_matches" as const, title: "Matches to confirm", label: "Please confirm: similar key with matching secondary keys, or an amount/date pass", count: summary.exception_matches ?? 0, icon: Split, tone: "violet" },
       { category: "ambiguous_matches" as const, title: "Ambiguous matches", label: "Several candidates qualified, so none was selected", count: summary.ambiguous_matches ?? 0, icon: HelpCircle, tone: "amber" },
       { category: "not_found" as const, title: "Not found", label: "No destination record qualified for this primary key", count: summary.not_found_matches ?? 0, icon: XCircle, tone: "slate" },
     ] : [
@@ -79,6 +82,33 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
 
   function openPreview(nextCategory: PreviewCategory) {
     setCategory(nextCategory); setPage(0); setQuery(""); setPreviewOpen(true);
+  }
+
+  const decisionKey = (row: Record<string, unknown>) => `${row["MATCH KEY"] ?? ""}||${row["CANDIDATE KEY"] ?? ""}`;
+  const reviewable = (row: Record<string, unknown>) => row["IDENTITY CLASSIFICATION"] === "EXCEPTION_MATCH" && Boolean(row["MATCH KEY"]) && Boolean(row["CANDIDATE KEY"]);
+  const showDecisions = Boolean(preview && ["exception_matches", "review"].includes(preview.category) && preview.rows.some(reviewable));
+
+  async function decide(row: Record<string, unknown>, decision: "accept" | "reject") {
+    if (!job) return;
+    try {
+      const confidence = Number(String(row["MATCH CONFIDENCE"] ?? "").replace("%", ""));
+      await api.recordDecision({ value_1: String(row["MATCH KEY"]), value_2: String(row["CANDIDATE KEY"]), decision, job_id: job.id, column_hint: "key", confidence: Number.isFinite(confidence) ? confidence : undefined });
+      setDecisions((current) => ({ ...current, [decisionKey(row)]: decision }));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not record the decision");
+    }
+  }
+
+  async function saveSetup() {
+    if (!job) return;
+    const name = window.prompt("Name this setup so it can be re-run on new files:", `${file1Name} vs ${file2Name}`);
+    if (!name?.trim()) return;
+    try {
+      await api.createTemplate({ name: name.trim(), job_id: job.id });
+      setSavedNote(`Saved as "${name.trim()}". Find it under Saved setups.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save the setup");
+    }
   }
 
   async function download(pairId?: string) { if (!job) return; try { await api.downloadJobReport(job.id, pairId); } catch (error) { setMessage(error instanceof Error ? error.message : "Download failed"); } }
@@ -146,9 +176,11 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
         {/* Customization rebuilds one workbook: the job's, or the selected file pair's. */}
         {canCustomize && <button type="button" className="secondary" onClick={() => setViewStage("customize")}><Settings2 size={18} />{pairDownload ? "Customize this pair" : "Customize Report"}</button>}
         {pairDownload && pairDownload.report_filename && <button type="button" className="secondary" onClick={() => download(pairDownload.file_pair_id)}><Download size={18} />{pairDownload.report_filename}</button>}
+        {job.job_type === "generic" && <button type="button" className="secondary" onClick={saveSetup}><BookmarkPlus size={18} />Save for reuse</button>}
         <button type="button" className="primary" onClick={() => download()}><Download size={18} />{downloadLabel}</button>
       </div>
     </div>
+    {savedNote && <p className="success-text"><CheckCircle2 size={16} />{savedNote}</p>}
     {(isMultiPair || (jobSummary.sheet_rules?.length ?? 0) > 1) && <div className="results-scope-bar">
       {isMultiPair && <label><span>File pair</span><select value={filePairId} onChange={(event) => selectFilePair(event.target.value)}><option value="">All file pairs ({filePairs.length})</option>{filePairs.map((pair) => <option key={pair.file_pair_id} value={pair.file_pair_id}>{pair.label}{pair.status === "completed" ? "" : pair.status === "failed" ? " (failed)" : " (with errors)"}</option>)}</select></label>}
       {rulesInScope.length > 1 && <div className="rule-navigator" aria-label="Sheet rule navigation">
@@ -163,7 +195,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
     <div className="summary-grid"><Metric label="Records compared" value={total} icon={<ShieldCheck size={20} />} tone="blue" /><Metric label="Fully matched" value={matched} icon={<CheckCircle2 size={20} />} tone="green" /><Metric label="Discrepancies found" value={summary.report_rows} icon={<AlertTriangle size={20} />} tone="coral" /><Metric label="Reconciliation accuracy" value={total ? `${accuracy.toFixed(2)}%` : "—"} icon={<ShieldCheck size={20} />} tone="violet" /></div>
     {hasIdentityBreakdown && <div className="identity-breakdown" aria-label="Identity resolution outcomes">
       <IdentityStat label="Exact" value={summary.exact_matches ?? 0} hint="Primary key matched after normalization" />
-      <IdentityStat label="Exception" value={summary.exception_matches ?? 0} hint="Resolved by secondary conditions" />
+      <IdentityStat label="To confirm" value={summary.exception_matches ?? 0} hint="Similar key, or matched by an amount/date pass" />
       <IdentityStat label="Ambiguous" value={summary.ambiguous_matches ?? 0} hint="Several candidates; none selected" />
       <IdentityStat label="Field discrepancy" value={summary.field_discrepancies ?? summary.report_rows} hint="Matched, but mapped values differ" />
       <IdentityStat label="Not found" value={summary.not_found_matches ?? 0} hint="No qualifying destination record" />
@@ -175,7 +207,7 @@ export function ResultsPage({ job, onNewReconciliation }: Props) {
       </div>
     </div></div></div>
     <section><div className="section-heading"><div><h2>Exception categories</h2><p>Open any category to inspect a paginated preview of up to 25 report rows at a time.</p></div></div><div className={`result-card-grid${cards.length > 4 ? " is-three-column" : ""}`}>{cards.map(({ category: cardCategory, title, label, count, icon: Icon, tone }) => <article className={`result-card tone-${tone}`} key={cardCategory}><Icon size={20} /><span>{title}</span><strong>{count.toLocaleString()}</strong><p>{label}</p><button type="button" className="text-command" onClick={() => openPreview(cardCategory)}><Eye size={16} />View details</button></article>)}</div></section>
-    {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{cards.find((card) => card.category === preview.category)?.title ?? preview.sheet_name}{activeRule ? ` · ${activeRule.report_label}` : activePair ? ` · ${activePair.label}` : ""}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div><div className="table-scroll"><table><thead><tr>{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length)}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{preview.columns.map((column) => <td key={column}>{row[column] ?? "—"}</td>)}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
+    {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{cards.find((card) => card.category === preview.category)?.title ?? preview.sheet_name}{activeRule ? ` · ${activeRule.report_label}` : activePair ? ` · ${activePair.label}` : ""}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div><div className="table-scroll"><table><thead><tr>{showDecisions && <th>Your decision</th>}{preview.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length + (showDecisions ? 1 : 0))}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{showDecisions && <td className="decision-cell">{reviewable(row) ? (decisions[decisionKey(row)] ? <span className={`badge ${decisions[decisionKey(row)] === "accept" ? "success" : "danger"}`}>{decisions[decisionKey(row)] === "accept" ? "Confirmed" : "Rejected"}</span> : <><button type="button" className="icon-button" title="Confirm this match" aria-label="Confirm this match" onClick={() => decide(row, "accept")}><ThumbsUp size={14} /></button><button type="button" className="icon-button" title="Not the same record" aria-label="Not the same record" onClick={() => decide(row, "reject")}><ThumbsDown size={14} /></button></>) : null}</td>}{preview.columns.map((column) => <td key={column}>{row[column] ?? "—"}</td>)}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
     {job.status === "completed_with_errors" && <section className="rule-errors"><h2><AlertTriangle size={18} />Some sheet rules failed</h2><p>Successful sheet rules are included above and in the report. These rules produced no results:</p><ul>{failedRules.map((rule) => <li key={rule.sheet_rule_id}><strong>{rule.report_label}</strong><span>{rule.error}</span></li>)}</ul></section>}
     {message && <p className="error-text">{message}</p>}
   </section>;

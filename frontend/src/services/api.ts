@@ -1,4 +1,4 @@
-import type { AnalysisResponse, FileMetadataResponse, FileSource, GstConfiguration, Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, RuleMapping, UploadedFile, SecondaryMatchCondition, SimilarityPolicy } from "../types";
+import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -46,6 +46,22 @@ function saveBlob(blob: Blob, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** An API error with its HTTP status and parsed body (e.g. a template resolution). */
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public body: unknown) {
+    super(message);
+  }
+}
+
+function errorMessage(body: unknown, fallback: string): string {
+  if (body && typeof body === "object" && "detail" in body) {
+    const detail = (body as { detail: unknown }).detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) return detail.map((item) => (item && typeof item === "object" && "msg" in item ? String((item as { msg: unknown }).msg) : String(item))).join("; ");
+  }
+  return fallback;
+}
+
 function sessionHeaders(): Headers {
   const headers = new Headers();
   const sessionId = readSessionId();
@@ -67,7 +83,9 @@ export class ApiClient {
     rememberSession(response);
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(text || response.statusText);
+      let body: unknown = text;
+      try { body = JSON.parse(text); } catch { /* plain-text error */ }
+      throw new ApiError(errorMessage(body, text || response.statusText), response.status, body);
     }
     if (response.status === 204) {
       return undefined as T;
@@ -122,53 +140,104 @@ export class ApiClient {
     });
   }
 
-  async startGeneric(payload: {
-    file_1_id?: string;
-    file_2_id?: string;
-    source_files_1?: FileSource[];
-    source_files_2?: FileSource[];
-    key_file_1?: string | string[];
-    key_file_2?: string | string[];
-    rules?: RuleMapping[];
-    orientation: string;
-    include_columns_file_1?: string[];
-    include_columns_file_2?: string[];
-    pairs?: Array<{
-      source_file_1: FileSource;
-      source_file_2: FileSource;
-      key_file_1: string | string[];
-      key_file_2: string | string[];
-      rules: RuleMapping[];
-      include_columns_file_1: string[];
-      include_columns_file_2: string[];
-    }>;
-    file_pairs?: Array<{
-      file_pair_id: string;
-      source_files: FileSource[];
-      destination_files: FileSource[];
-      report_metadata?: { label?: string };
-      sheet_rules: Array<{
-        sheet_rule_id: string;
-        source_sheets: string[];
-        destination_sheets: string[];
-        matching_strategy: {
-          primary_key_source: string[];
-          primary_key_destination: string[];
-          secondary_conditions: SecondaryMatchCondition[];
-          similarity_policy: SimilarityPolicy;
-          date_only_override: boolean;
-        };
-        reconciliation_mapping: RuleMapping[];
-        include_columns_file_1: string[];
-        include_columns_file_2: string[];
-        report_label: string;
-      }>;
-    }>;
-  }): Promise<Job> {
+  async startGeneric(payload: GenericPlanPayload): Promise<Job> {
     return this.request<Job>("/reconciliation/generic", {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  }
+
+  async getSupportedFormats(): Promise<SupportedFormats> {
+    return this.request<SupportedFormats>("/files/formats");
+  }
+
+  /** Data-quality pre-check of a planned run (same body as the run request). */
+  async precheck(payload: GenericPlanPayload): Promise<PrecheckResult> {
+    return this.request<PrecheckResult>("/analysis/precheck", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  // ── Saved reconciliations ──────────────────────────────────────────────
+  async listTemplates(): Promise<TemplateSummary[]> {
+    return (await this.request<{ templates: TemplateSummary[] }>("/templates")).templates;
+  }
+
+  async getTemplate(templateId: string): Promise<TemplateSummary> {
+    return this.request<TemplateSummary>(`/templates/${templateId}`);
+  }
+
+  async createTemplate(payload: { name: string; description?: string; plan?: GenericPlanPayload; job_id?: string }): Promise<TemplateSummary> {
+    return this.request<TemplateSummary>("/templates", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async updateTemplate(templateId: string, payload: { name?: string; description?: string; column_aliases?: Record<string, string[]>; change_note?: string }): Promise<TemplateSummary> {
+    return this.request<TemplateSummary>(`/templates/${templateId}`, { method: "PUT", body: JSON.stringify(payload) });
+  }
+
+  async archiveTemplate(templateId: string): Promise<void> {
+    await this.request(`/templates/${templateId}`, { method: "DELETE" });
+  }
+
+  /** Maps a template onto new files. A 422 carries the unresolved sheets/columns. */
+  async resolveTemplate(templateId: string, payload: TemplateRunRequest): Promise<{ resolution: TemplateResolution; plan: GenericPlanPayload | null; error?: string }> {
+    try {
+      const result = await this.request<{ resolution: TemplateResolution; plan: GenericPlanPayload }>(`/templates/${templateId}/resolve`, { method: "POST", body: JSON.stringify(payload) });
+      return result;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 422 && error.body && typeof error.body === "object" && "resolution" in error.body) {
+        return { resolution: (error.body as { resolution: TemplateResolution }).resolution, plan: null, error: error.message };
+      }
+      throw error;
+    }
+  }
+
+  async runTemplate(templateId: string, payload: TemplateRunRequest): Promise<Job> {
+    return this.request<Job>(`/templates/${templateId}/run`, { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  // ── Aliases and review decisions ───────────────────────────────────────
+  async listAliases(): Promise<EntityAlias[]> {
+    return (await this.request<{ aliases: EntityAlias[] }>("/aliases")).aliases;
+  }
+
+  async createAlias(canonical: string, variants: string[], columnHint = ""): Promise<EntityAlias[]> {
+    return (await this.request<{ aliases: EntityAlias[] }>("/aliases", { method: "POST", body: JSON.stringify({ canonical, variants, column_hint: columnHint }) })).aliases;
+  }
+
+  async removeAlias(aliasId: string): Promise<void> {
+    await this.request(`/aliases/${aliasId}`, { method: "DELETE" });
+  }
+
+  async recordDecision(payload: { value_1: string; value_2: string; decision: "accept" | "reject"; job_id?: string; column_hint?: string; confidence?: number; note?: string }): Promise<void> {
+    await this.request("/aliases/decisions", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async aliasSuggestions(): Promise<{ minimum_acceptances: number; suggestions: AliasSuggestion[] }> {
+    return this.request("/aliases/suggestions");
+  }
+
+  async approveSuggestion(canonical: string, variant: string, columnHint = ""): Promise<EntityAlias> {
+    return this.request<EntityAlias>("/aliases/suggestions/approve", { method: "POST", body: JSON.stringify({ canonical, variant, column_hint: columnHint }) });
+  }
+
+  async previewNormalization(value1: string, value2: string): Promise<{ equivalent: boolean; rules: string[]; value_1: { normalized: string }; value_2: { normalized: string } }> {
+    return this.request("/aliases/preview", { method: "POST", body: JSON.stringify({ value_1: value1, value_2: value2 }) });
+  }
+
+  // ── Audit log ──────────────────────────────────────────────────────────
+  async listAuditEvents(params: { action?: string; entity_id?: string; offset?: number; limit?: number } = {}): Promise<AuditEvent[]> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return (await this.request<{ events: AuditEvent[] }>(`/audit/events?${query.toString()}`)).events;
+  }
+
+  async verifyAuditLog(): Promise<{ valid: boolean; checked: number; broken_at: string | null; reason: string }> {
+    return this.request("/audit/verify");
+  }
+
+  async downloadAuditLog(format: "csv" | "json"): Promise<void> {
+    const response = await fetch(`${API_BASE}/audit/export?format=${format}`, { credentials: "include", headers: sessionHeaders() });
+    rememberSession(response);
+    if (!response.ok) throw new Error(await response.text());
+    saveBlob(await response.blob(), responseFilename(response, `RecliQ_Audit_Log.${format}`));
   }
 
   async startGst(payload: {

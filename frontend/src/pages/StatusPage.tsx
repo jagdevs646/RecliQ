@@ -170,7 +170,10 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
               <div><dt>Type</dt><dd>{job.job_type === "gst" ? "GST invoices" : "General"}</dd></div>
               <div><dt>Orientation</dt><dd>{job.orientation === "horizontal" ? "Row headers" : "Column headers"}</dd></div>
               <div><dt>Job ID</dt><dd>{job.id.slice(0, 8)}</dd></div>
+              {(job.attempts ?? 0) > 1 && <div><dt>Attempt</dt><dd>{job.attempts} (retried automatically after a worker restart)</dd></div>}
+              {job.template_id && <div><dt>Saved setup</dt><dd>Version {job.template_version}</dd></div>}
             </dl>
+            {job.status === "queued" && <p className="muted">Waiting for a worker. The job is saved and will start even if the server restarts.</p>}
             {["completed", "completed_with_errors"].includes(job.status) && (
               <>
                 <button type="button" className="primary full-width" onClick={onViewResults}>View results</button>

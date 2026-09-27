@@ -1,4 +1,4 @@
-import { BarChart3, ClipboardList, Files, History, Plus, type LucideIcon } from "lucide-react";
+import { BarChart3, BookMarked, ClipboardList, Files, History, Plus, ScrollText, Tags, type LucideIcon } from "lucide-react";
 import type React from "react";
 import type { Page } from "../types";
 
@@ -12,7 +12,10 @@ const navItems: Array<{ page: Page; label: string; icon: LucideIcon }> = [
   { page: "dashboard", label: "Dashboard", icon: BarChart3 },
   { page: "upload", label: "Reconcile", icon: Files },
   { page: "status", label: "Status", icon: ClipboardList },
-  { page: "history", label: "History", icon: History }
+  { page: "history", label: "History", icon: History },
+  { page: "saved", label: "Saved setups", icon: BookMarked },
+  { page: "aliases", label: "Name aliases", icon: Tags },
+  { page: "audit", label: "Audit log", icon: ScrollText }
 ];
 
 export function Shell({ activePage, onNavigate, children }: Props) {

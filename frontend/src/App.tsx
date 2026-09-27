@@ -7,6 +7,9 @@ import { HistoryPage } from "./pages/HistoryPage";
 import { ResultsPage } from "./pages/ResultsPage";
 import { StatusPage } from "./pages/StatusPage";
 import { UploadPage } from "./pages/UploadPage";
+import { SavedReconciliationsPage } from "./pages/SavedReconciliationsPage";
+import { AliasesPage } from "./pages/AliasesPage";
+import { AuditLogPage } from "./pages/AuditLogPage";
 
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
@@ -40,6 +43,9 @@ export default function App() {
       {page === "status" && <StatusPage job={activeJob} onJobUpdate={setActiveJob} onViewResults={() => setPage("results")} />}
       {page === "results" && <ResultsPage job={activeJob} onNewReconciliation={() => setPage("upload")} />}
       {page === "history" && <HistoryPage onOpenJob={openJob} />}
+      {page === "saved" && <SavedReconciliationsPage onJobCreated={(job) => { setActiveJob(job); setPage("status"); }} onNewReconciliation={() => setPage("upload")} />}
+      {page === "aliases" && <AliasesPage />}
+      {page === "audit" && <AuditLogPage />}
     </Shell>
   );
 }
