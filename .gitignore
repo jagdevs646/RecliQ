@@ -33,3 +33,14 @@ AzureCloud*.txt
 *.pfx
 *.key
 .env.production.local
+
+# Local notes, images and sample data (not needed to run RecliQ)
+/Errors.txt
+/Updates.txt
+/diagram.png
+/Reckli.png
+/RecliQ.ico
+/Recliq.jpg
+/RecliQ_Reconciliation_Report - Sample.xlsx
+/tests/Data to recon/
+/.claude/
