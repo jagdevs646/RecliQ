@@ -73,6 +73,35 @@ def validate_gst_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in REQUIRED_GST_COLUMNS if col not in df.columns]
 
 
+# Column-name types that are never amounts, even when the cell holds a number
+# ("Invoice No" 0 vs blank is a missing identifier, not a zero amount).
+_NON_AMOUNT_NAME_TYPES = {"date", "invoice", "gstin", "pan", "identifier", "company_name", "person_name"}
+
+
+def _blank_as_zero(
+    file_1_value: object,
+    file_2_value: object,
+    file_1_fields: list[str],
+    file_2_fields: list[str],
+) -> tuple[object, object]:
+    """For a numeric field, a blank on one side counts as 0 when the other side
+    is a number, so 0 vs blank is equal and 5 vs blank shows a difference of 5.
+
+    Applies only to this comparison: the displayed values stay as they were,
+    both-blank stays "both blank", and text or date fields are untouched.
+    """
+    blank_1, blank_2 = is_blank(file_1_value), is_blank(file_2_value)
+    if blank_1 == blank_2:
+        return file_1_value, file_2_value
+    populated = file_2_value if blank_1 else file_1_value
+    if to_number(populated) is None:
+        return file_1_value, file_2_value
+    name_type = detect_matcher_type(None, fields_label(file_1_fields), fields_label(file_2_fields))
+    if name_type in _NON_AMOUNT_NAME_TYPES:
+        return file_1_value, file_2_value
+    return (0 if blank_1 else file_1_value), (0 if blank_2 else file_2_value)
+
+
 def compare_rule_values(
     file_1_row: dict,
     file_2_row: dict,
@@ -83,6 +112,7 @@ def compare_rule_values(
     file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields)
     file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields)
     label = fields_label(file_1_fields)
+    # A blank side has no type of its own; the populated side decides.
     matcher_type = type_hint_1 or type_hint_2
 
     if matcher_type is None:
@@ -92,9 +122,13 @@ def compare_rule_values(
             fields_label(file_2_fields),
         )
 
+    compared_1, compared_2 = file_1_value, file_2_value
+    if matcher_type == "numeric":
+        compared_1, compared_2 = _blank_as_zero(file_1_value, file_2_value, file_1_fields, file_2_fields)
+
     result = compare_values(
-        file_1_value,
-        file_2_value,
+        compared_1,
+        compared_2,
         fields_label(file_1_fields),
         fields_label(file_2_fields),
         matcher_type,
