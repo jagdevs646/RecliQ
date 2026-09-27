@@ -1,0 +1,32 @@
+title = "RecliQ secret scanning"
+
+[extend]
+useDefault = true
+
+# Credentials that must never reach the repository. The default gitleaks rules
+# already cover cloud keys and tokens; these add the shapes RecliQ uses.
+[[rules]]
+id = "database-url-with-password"
+description = "Database URL containing an inline password"
+regex = '''(?i)(postgres(?:ql)?(?:\+psycopg)?|mysql|mssql)://[^:\s/]+:([^@\s]{6,})@'''
+secretGroup = 2
+keywords = ["postgres", "mysql", "mssql"]
+
+[[rules]]
+id = "azure-storage-connection-string"
+description = "Azure Storage connection string with an account key"
+regex = '''(?i)AccountKey=([A-Za-z0-9+/=]{40,})'''
+secretGroup = 1
+keywords = ["accountkey"]
+
+[allowlist]
+description = "Local development placeholders only"
+regexes = [
+  '''postgresql\+psycopg://recliq:recliq@''',
+  '''<password>''',
+  '''<key-vault-secret>''',
+]
+paths = [
+  '''tests/Data to recon/.*\.xlsx''',
+  '''frontend/pnpm-lock\.yaml''',
+]

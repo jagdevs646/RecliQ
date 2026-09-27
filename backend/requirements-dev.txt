@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest==8.3.3
+fakeredis==2.23.5
+xlwt==1.3.0
+pip-audit==2.7.3

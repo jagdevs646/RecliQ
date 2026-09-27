@@ -50,6 +50,12 @@ See [docs/local-development.md](docs/local-development.md).
 
 See [docs/api.md](docs/api.md).
 
+## Operations, security and controls
+
+Secrets policy and rotation, CI, logging and error tracking, upload limits, durable job workers, saved reconciliations, the audit log, the data-quality pre-check, keyless matching, transformations and name normalization: see [docs/operations-and-security.md](docs/operations-and-security.md).
+
+Run the tests with `python -m pytest tests/backend` (backend) and `pnpm test` in `frontend/`.
+
 ## Azure Deployment
 
 See [docs/azure-deployment.md](docs/azure-deployment.md). For a new Azure Container Apps deployment, sign in with `az login`, then run `./scripts/deploy-azure.ps1 -SubscriptionId <your-subscription-id>` from the repository root. The script prompts for the PostgreSQL password and never writes it to source control.

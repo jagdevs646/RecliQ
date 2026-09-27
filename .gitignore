@@ -23,3 +23,13 @@ recliq_dev.db
 scratch/
 backend/test_report_output.xlsx
 RecliQ_Custom_Report.xlsx
+
+# Credentials must never be committed: keep them in environment variables or
+# a managed secret store (Azure Key Vault, GitHub Actions secrets).
+AzureCloud*.txt
+*credentials*.txt
+*secret*.txt
+*.pem
+*.pfx
+*.key
+.env.production.local

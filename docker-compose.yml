@@ -1,3 +1,6 @@
+# Local production-like stack: API, durable worker, Redis queue, PostgreSQL.
+# Secrets here are local development placeholders only; real deployments
+# inject them from a secret store (Azure Key Vault, GitHub Actions secrets).
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,16 +18,30 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    # Append-only persistence: queued jobs survive a Redis restart.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   backend:
     build:
       context: ./backend
       dockerfile: ../docker/backend.Dockerfile
     env_file:
       - ./backend/.env.example
-    environment:
+    environment: &backend-env
       DATABASE_URL: postgresql+psycopg://recliq:recliq@postgres:5432/recliq
       FRONTEND_ORIGIN: http://localhost:5173
       LOCAL_STORAGE_PATH: /data/storage
+      JOB_QUEUE_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -32,6 +49,26 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: ../docker/backend.Dockerfile
+    command: ["python", "-m", "app.jobs.worker"]
+    env_file:
+      - ./backend/.env.example
+    environment: *backend-env
+    # Shares the upload/report volume with the API (or use Azure Blob Storage).
+    volumes:
+      - backend-storage:/data/storage
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
   frontend:
     build:
@@ -46,4 +83,5 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   backend-storage:
