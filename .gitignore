@@ -44,3 +44,4 @@ AzureCloud*.txt
 /RecliQ_Reconciliation_Report - Sample.xlsx
 /tests/Data to recon/
 /.claude/
+/frontend/pnpm-workspace.yaml
