@@ -21,8 +21,11 @@ keywords = ["accountkey"]
 
 [allowlist]
 description = "Local development placeholders only"
+# These patterns are checked against the captured secret itself (gitleaks'
+# default regexTarget), not against the whole URL.
 regexes = [
-  '''postgresql\+psycopg://recliq:recliq@''',
+  '''^recliq$''',            # throwaway password of the local/CI Postgres container
+  '''^\$[({]''',             # a shell or PowerShell variable, not a literal password
   '''<password>''',
   '''<key-vault-secret>''',
 ]
