@@ -15,6 +15,7 @@ Tabs (each only when included):
     06 Matched          records that agree on every compared field
     07 Checks           do the counts balance, and how matching was done
     08 Sheet Rules      per-rule configuration (multi-rule jobs)
+    09 Auto-resolved    exceptions explained by the organization's rules
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ class ReportConfig:
         # Historical name: now controls the "Match Review" tab.
         include_field_differences: bool = True,
         include_controls: bool = True,
+        include_auto_resolved: bool = True,
         date_format: str = "YYYY-MM-DD",
         number_format: str = "#,##0.00",
     ):
@@ -60,6 +62,7 @@ class ReportConfig:
         self.include_missing_file_2 = include_missing_file_2
         self.include_field_differences = include_field_differences
         self.include_controls = include_controls
+        self.include_auto_resolved = include_auto_resolved
         self.date_format = date_format
         self.number_format = number_format
 
@@ -70,7 +73,7 @@ _HIDDEN_COLUMNS = {
     "MATCH THRESHOLD", "IDENTITY CLASSIFICATION", "MATCH EXPLANATION", "GROUPED ROWS",
     "COMPOSITE MATCH KEY", "MATCHED COMPOSITE KEY", "MATCH KEY", "MATCHED KEY",
     "SECONDARY KEY", "MATCHED SECONDARY KEY", "GROUP CLASSIFICATION", "CANDIDATE KEY",
-    "MATCH PASS", "NORMALIZATION APPLIED",
+    "MATCH PASS", "NORMALIZATION APPLIED", "MATCH METHOD", "REVIEW HISTORY", "LEARNED CONFIDENCE", "AUTO-RESOLVED BY",
 }
 _HIDDEN_PREFIXES = ("NORM_", "MATCHED NORM_", "__")
 
@@ -186,6 +189,7 @@ class UniversalReporter:
             "matched": "06 Matched",
             "checks": "07 Checks",
             "rules": "08 Sheet Rules",
+            "resolved": "09 Auto-resolved",
         }
 
     def _counts(self) -> dict[str, int]:
@@ -204,7 +208,13 @@ class UniversalReporter:
             "only_1": len(self.data.get("missing_in_file_2", [])),
             "only_2": len(self.data.get("missing_in_file_1", [])),
             "review": (identity.get("EXCEPTION_MATCH", 0) + identity.get("AMBIGUOUS_MATCH", 0)) if identity else len(review_rows),
+            "resolved": len(self.data.get("auto_resolved") or []),
+            "resolved_1": self._resolved_count("only_in_source"),
+            "resolved_2": self._resolved_count("only_in_destination"),
         }
+
+    def _resolved_count(self, kind: str) -> int:
+        return sum(1 for row in self.data.get("auto_resolved") or [] if row.get("__KIND__") == kind)
 
     def _review_records(self) -> list[dict]:
         return [
@@ -322,6 +332,7 @@ class UniversalReporter:
             "matched": self.config.include_matched,
             "checks": self.config.include_controls,
             "rules": self._has_rule_breakdown(),
+            "resolved": self.config.include_auto_resolved and bool(self.data.get("auto_resolved")),
         }
         if self.config.include_summary:
             self._generate_summary(wb, included)
@@ -339,6 +350,8 @@ class UniversalReporter:
             self._generate_checks(wb)
         if included["rules"]:
             self._generate_sheet_rules(wb)
+        if included["resolved"]:
+            self._generate_auto_resolved(wb)
 
         if default_sheet in wb.worksheets:
             wb.remove(default_sheet)
@@ -437,6 +450,8 @@ class UniversalReporter:
         ]
         if self.data.get("identity_resolution"):
             results.append(("Needs review", counts["review"], "Matched through secondary keys with a slightly different primary key, or several possible matches were found.", "review", self.colors["review"]))
+        if counts["resolved"]:
+            results.append(("Auto-resolved by rules", counts["resolved"], "Recurring exceptions explained by your organization's rules, with the rule, resolution and GL account.", "resolved", self.colors["accent"]))
         first_result_row = row + 1
         for label, count, meaning, sheet_key, color in results:
             row += 1
@@ -512,7 +527,7 @@ class UniversalReporter:
             f"{self.sheet_names['review']}: matches made through secondary keys, or records with several possible matches. Confirm them.",
             f"{self.sheet_names['matched']}: records that agree on every compared field.",
             f"{self.sheet_names['checks']}: confirms every record is accounted for.",
-        ]
+        ] + ([f"{self.sheet_names['resolved']}: exceptions your auto-resolution rules explained, and which rule did it."] if counts["resolved"] else [])
         for line in guide:
             ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=8)
             cell = ws.cell(row=row, column=2, value=f"•  {line}")
@@ -589,6 +604,13 @@ class UniversalReporter:
                 "Name normalization used",
                 ", ".join(f"{rule} ({count:,})" for rule, count in top) + " — spelling variants treated as the same name.",
             ))
+        used = meta.get("resolution_rules_used") or {}
+        if used:
+            description.append((
+                "Auto-resolution rules",
+                ", ".join(f"{rule} ({count:,})" for rule, count in sorted(used.items(), key=lambda item: -item[1]))
+                + " — exceptions they explain are listed separately, never deleted.",
+            ))
         if meta.get("date_convention") and meta.get("date_convention", "").startswith("Month"):
             description.append(("Date format", meta["date_convention"]))
         combined = sum(
@@ -619,11 +641,13 @@ class UniversalReporter:
         has_matched_key = any("Matched Key" in row for row in records)
         has_secondary = any(row.get("Secondary Key") for row in records)
         has_groups = any(row.get("Grouped Rows") for row in records)
+        has_similarity = any(row.get("Similarity") for row in records)
 
         headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}"]
         headers += [f"Key in {self.file2}"] if has_matched_key else []
         headers += ["Secondary key"] if has_secondary else []
         headers += ["Field", f"{self.file1} value", f"{self.file2} value", "Difference", "Difference %"]
+        headers += ["Similarity"] if has_similarity else []
         headers += ["Combined rows"] if has_groups else []
         headers += ["Reviewer notes"]
 
@@ -638,6 +662,8 @@ class UniversalReporter:
                 difference_pct = row.get("Difference %")
                 values += [row.get("Field"), row.get("File 1 Value"), row.get("File 2 Value"), row.get("Difference"),
                            difference_pct if _is_number(difference_pct) else None]
+                if has_similarity:
+                    values.append(row.get("Similarity"))
                 if has_groups:
                     values.append(row.get("Grouped Rows"))
                 values.append(None)
@@ -789,6 +815,39 @@ class UniversalReporter:
         )
         self._write_table(ws, headers, rows(), "MatchedRecordsTbl", "No record matched on every compared field.")
 
+    # ── 09 Auto-resolved ───────────────────────────────────────────────────
+    def _generate_auto_resolved(self, wb: openpyxl.Workbook) -> None:
+        ws = wb.create_sheet(self.sheet_names["resolved"])
+        ws.sheet_properties.tabColor = self.colors["accent"]
+        ws.views.sheetView[0].showGridLines = False
+        records = self.data.get("auto_resolved") or []
+        fixed = ["Exception", "Resolution", "Rule", "Rule Version", "Reason Code", "GL Account", "Record"]
+        optional = ["Field", "File 1 Value", "File 2 Value", "Difference", "Matched With", "How Matched", "Match Confidence"]
+        present = [column for column in optional if any(record.get(column) not in (None, "") for record in records)]
+        skip = set(fixed) | set(optional) | {"Note"}
+        data_columns = [
+            column for column in dict.fromkeys(key for record in records for key in record)
+            if column not in skip and _visible(column)
+        ]
+        headers = (["Sheet"] if self.multi_rule else []) + fixed + present + data_columns + ["Note", "Row"]
+
+        def rows():
+            for record in records:
+                values = [self._sheet_label(record)] if self.multi_rule else []
+                values += [record.get(column) for column in fixed + present + data_columns]
+                kind = record.get("__KIND__")
+                values += [record.get("Note"), _row_number(record, 2 if kind == "only_in_destination" else 1)]
+                yield values
+
+        self._title(
+            ws,
+            "Auto-resolved — explained by your rules",
+            "These exceptions matched an auto-resolution rule. They are not deleted: each shows the rule and version "
+            "that explained it, the resolution, reason code and GL account. Rules never decide between several possible matches.",
+            len(headers),
+        )
+        self._write_table(ws, headers, rows(), "AutoResolvedTbl", "No exception was auto-resolved.")
+
     # ── 07 Checks ──────────────────────────────────────────────────────────
     def _generate_checks(self, wb: openpyxl.Workbook) -> None:
         ws = wb.create_sheet(self.sheet_names["checks"])
@@ -797,15 +856,19 @@ class UniversalReporter:
         counts = self._counts()
         self._title(ws, "Checks — is every record accounted for?", "Each record ends up in exactly one result, so the totals must balance.", 4)
 
-        accounted_1 = counts["matched"] + counts["differ"] + counts["only_1"]
-        accounted_2 = counts["matched"] + counts["differ"] + counts["only_2"]
+        accounted_1 = counts["matched"] + counts["differ"] + counts["only_1"] + counts["resolved_1"]
+        accounted_2 = counts["matched"] + counts["differ"] + counts["only_2"] + counts["resolved_2"]
+        resolved_check = [
+            ("Not found, explained by an auto-resolution rule", counts["resolved_1"], counts["resolved_2"], "")
+        ] if counts["resolved_1"] or counts["resolved_2"] else []
         checks = [
             ("Records compared", counts["total_1"], counts["total_2"], ""),
             ("Matched – all fields agree", counts["matched"], counts["matched"], ""),
             ("Matched – values differ", counts["differ"], counts["differ"], "Pass" if counts["differ"] == 0 else "Review"),
             ("Not found in the other file", counts["only_1"], counts["only_2"], "Pass" if counts["only_1"] + counts["only_2"] == 0 else "Review"),
+            *resolved_check,
             (
-                "Records accounted for (matched + differ + not found)",
+                "Records accounted for (matched + differ + not found" + (" + auto-resolved)" if resolved_check else ")"),
                 accounted_1,
                 accounted_2,
                 "Pass" if accounted_1 == counts["total_1"] and accounted_2 == counts["total_2"] else "Check",
@@ -887,8 +950,9 @@ class UniversalReporter:
         metric_columns = [
             ("Records in source", "source_records"),
             ("Records in destination", "destination_records"),
-            ("Matched on key", "exact_matches"),
-            ("Matched by secondary keys", "exception_matches"),
+            ("Exact matches", "exact_matches"),
+            ("Matches to confirm", "exception_matches"),
+            ("Of these, matched in later passes", "keyless_matches"),
             ("Several possible matches", "ambiguous_matches"),
             ("Not found", "not_found_matches"),
             ("Values differ", "field_discrepancies"),

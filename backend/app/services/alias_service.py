@@ -5,6 +5,11 @@ two spellings of a vendor). Decisions are stored as evidence. A value pair is
 *suggested* as an alias only when it was accepted in at least two different
 reconciliations and never rejected; a suggestion becomes an active alias only
 when a person approves it. Nothing is learned or activated automatically.
+
+A "reset" decision withdraws the earlier decisions on a pair (for example a
+rejection made by mistake); only decisions after the last reset count.
+Decisions on keyless passes (amount/date pairs) are evidence for learned rule
+weights, never for name aliases.
 """
 from __future__ import annotations
 
@@ -13,23 +18,20 @@ from dataclasses import dataclass
 from sqlalchemy.orm import Session
 
 from app.models.alias import EntityAlias, MatchDecision
-from app.reconciliation_engine.normalization.entities import EntityNormalizer
+from app.reconciliation_engine.learning import pair_key, value_key  # noqa: F401  (re-exported)
 from app.services.audit_service import AuditActor, record_event
 
 MIN_ACCEPTANCES = 2
-_PLAIN = EntityNormalizer()  # Built-in rules only: aliases must not feed themselves.
+DECISIONS = {"accept": "Accepted", "reject": "Rejected", "reset": "Withdrew earlier decisions on"}
 
 
 class AliasConflict(ValueError):
     pass
 
 
-def value_key(value: str) -> str:
-    return _PLAIN.identity(value) or ""
-
-
-def pair_key(value_1: str, value_2: str) -> str:
-    return "||".join(sorted((value_key(value_1), value_key(value_2))))
+def is_name_evidence(decision: MatchDecision) -> bool:
+    """Only key/name matches can become aliases (older decisions have no method)."""
+    return not decision.method or decision.method.lower().startswith("similar key")
 
 
 def record_decision(
@@ -44,9 +46,10 @@ def record_decision(
     column_hint: str = "",
     confidence: int | None = None,
     note: str = "",
+    method: str | None = None,
 ) -> MatchDecision:
-    if decision not in {"accept", "reject"}:
-        raise ValueError("Decision must be 'accept' or 'reject'.")
+    if decision not in DECISIONS:
+        raise ValueError("Decision must be 'accept', 'reject' or 'reset'.")
     if not value_key(value_1) or not value_key(value_2):
         raise ValueError("Both values are required.")
     row = MatchDecision(
@@ -60,14 +63,16 @@ def record_decision(
         confidence=confidence,
         note=note,
         decided_by=actor.actor_id,
+        method=(method or "").strip()[:80] or None,
     )
     db.add(row)
     db.commit()
     db.refresh(row)
     record_event(
-        scope_id=scope_id, actor=actor, action=f"match.{decision}ed", entity_type="match_decision", entity_id=row.id,
-        summary=f"{'Accepted' if decision == 'accept' else 'Rejected'} match: '{value_1}' ↔ '{value_2}'",
-        after={"value_1": value_1, "value_2": value_2, "decision": decision, "confidence": confidence, "note": note},
+        scope_id=scope_id, actor=actor, action=f"match.{decision}{'' if decision == 'reset' else 'ed'}",
+        entity_type="match_decision", entity_id=row.id,
+        summary=f"{DECISIONS[decision]} match: '{value_1}' ↔ '{value_2}'",
+        after={"value_1": value_1, "value_2": value_2, "decision": decision, "confidence": confidence, "note": note, "method": method},
         metadata={"job_id": job_id, "column": column_hint},
     )
     return row
@@ -92,15 +97,18 @@ def suggestions(db: Session, scope_id: str) -> list[Suggestion]:
     decisions = db.query(MatchDecision).filter(MatchDecision.scope_id == scope_id).order_by(MatchDecision.created_at).all()
     by_pair: dict[str, list[MatchDecision]] = {}
     for decision in decisions:
-        by_pair.setdefault(decision.pair_key, []).append(decision)
+        if decision.decision == "reset":
+            by_pair[decision.pair_key] = []  # Only decisions after a reset count.
+        elif is_name_evidence(decision):
+            by_pair.setdefault(decision.pair_key, []).append(decision)
     existing = _active_alias_keys(db, scope_id)
     result = []
     for key, rows in by_pair.items():
         left, _, right = key.partition("||")
-        if key in existing or left == right:
+        if not rows or key in existing or left == right:
             continue  # Already an alias, or already equal without one.
         if any(row.decision == "reject" for row in rows):
-            continue  # One rejection blocks the suggestion permanently.
+            continue  # One rejection blocks the suggestion (until a reset).
         accepted = [row for row in rows if row.decision == "accept"]
         jobs = {row.job_id or row.id for row in accepted}
         if len(accepted) >= MIN_ACCEPTANCES and len(jobs) >= MIN_ACCEPTANCES:

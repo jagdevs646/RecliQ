@@ -21,11 +21,12 @@ class AliasCreate(BaseModel):
 class DecisionCreate(BaseModel):
     value_1: str = Field(min_length=1, max_length=300)
     value_2: str = Field(min_length=1, max_length=300)
-    decision: str = Field(pattern="^(accept|reject)$")
+    decision: str = Field(pattern="^(accept|reject|reset)$")
     job_id: str | None = None
     column_hint: str = ""
     confidence: int | None = Field(default=None, ge=0, le=100)
     note: str = ""
+    method: str | None = Field(default=None, max_length=80)
 
 
 class SuggestionApproval(BaseModel):
@@ -117,7 +118,7 @@ def list_decisions(job_id: str | None = None, db: Session = Depends(get_db), ses
         "decisions": [
             {
                 "id": row.id, "job_id": row.job_id, "value_1": row.value_1, "value_2": row.value_2,
-                "decision": row.decision, "confidence": row.confidence, "column_hint": row.column_hint,
+                "decision": row.decision, "confidence": row.confidence, "column_hint": row.column_hint, "method": row.method,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
             }
             for row in query.order_by(MatchDecision.created_at.desc()).limit(500).all()

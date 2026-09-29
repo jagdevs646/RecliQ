@@ -84,13 +84,18 @@ def _narrative_score(value_1: object, value_2: object) -> int:
         return 0
     normalizer = active_normalizer()
     text_1, text_2 = normalizer.canonical(value_1).text, normalizer.canonical(value_2).text
-    if text_1 == text_2:
+    # Equal after normalization, word order included ("NEFT ACME CORP" and
+    # "Acme Corporation NEFT"): the same reference.
+    identity_1 = normalizer.identity(value_1)
+    if text_1 == text_2 or (identity_1 and identity_1 == normalizer.identity(value_2)):
         return 100
     if fuzz is None:  # pragma: no cover
         from difflib import SequenceMatcher
 
-        return int(round(SequenceMatcher(None, text_1, text_2).ratio() * 100))
-    return int(max(fuzz.token_set_ratio(text_1, text_2), fuzz.ratio(text_1, text_2)))
+        return min(int(round(SequenceMatcher(None, text_1, text_2).ratio() * 100)), 99)
+    # Different texts score at most 99: token_set_ratio gives 100 when one
+    # text contains the other, and 100 means the same reference.
+    return min(int(max(fuzz.token_set_ratio(text_1, text_2), fuzz.ratio(text_1, text_2))), 99)
 
 
 def run_pass(

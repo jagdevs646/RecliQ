@@ -41,6 +41,7 @@ _PREVIEW_SECTIONS = {
     "exception_matches": "identity_resolution",
     "ambiguous_matches": "identity_resolution",
     "not_found": "identity_resolution",
+    "auto_resolved": "auto_resolved",
 }
 
 # Identity-scoped categories select audit rows by their recorded classification.
@@ -114,6 +115,7 @@ class ReportCustomConfig(BaseModel):
     include_missing_file_2: bool = True
     include_field_differences: bool = True
     include_controls: bool = True
+    include_auto_resolved: bool = True
     date_format: str = "YYYY-MM-DD"
     number_format: str = "#,##0.00"
 
@@ -173,7 +175,7 @@ def download_job_report(
     )
 
 
-_PAIR_RECORD_CATEGORIES = ("exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "identity_resolution")
+_PAIR_RECORD_CATEGORIES = ("exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "identity_resolution", "auto_resolved")
 
 
 def _file_pair_universal_data(universal_data: dict[str, Any], file_pair_id: str) -> dict[str, Any]:

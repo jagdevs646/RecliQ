@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.053.001.08">
+  <BkToCstmrStmt>
+    <GrpHdr><MsgId>MSG-20260105</MsgId><CreDtTm>2026-01-06T08:00:00</CreDtTm></GrpHdr>
+    <Stmt>
+      <Id>STMT-1</Id>
+      <ElctrncSeqNb>12</ElctrncSeqNb>
+      <Acct><Id><IBAN>GB29NWBK60161331926819</IBAN></Id><Ccy>GBP</Ccy></Acct>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>OPBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="GBP">2000.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-01-04</Dt></Dt>
+      </Bal>
+      <Bal>
+        <Tp><CdOrPrtry><Cd>CLBD</Cd></CdOrPrtry></Tp>
+        <Amt Ccy="GBP">2715.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Dt><Dt>2026-01-06</Dt></Dt>
+      </Bal>
+      <Ntry>
+        <Amt Ccy="GBP">1000.00</Amt><CdtDbtInd>CRDT</CdtDbtInd><Sts><Cd>BOOK</Cd></Sts>
+        <BookgDt><Dt>2026-01-05</Dt></BookgDt><ValDt><Dt>2026-01-05</Dt></ValDt>
+        <AcctSvcrRef>BR-1</AcctSvcrRef>
+        <BkTxCd><Domn><Cd>PMNT</Cd><Fmly><Cd>RCDT</Cd><SubFmlyCd>BOOK</SubFmlyCd></Fmly></Domn></BkTxCd>
+        <NtryDtls>
+          <TxDtls>
+            <Refs><EndToEndId>INV-2001</EndToEndId></Refs>
+            <Amt Ccy="GBP">600.00</Amt>
+            <RltdPties><Dbtr><Nm>Globex Ltd</Nm></Dbtr></RltdPties>
+            <RmtInf><Ustrd>Invoice INV-2001</Ustrd></RmtInf>
+          </TxDtls>
+          <TxDtls>
+            <Refs><EndToEndId>INV-2002</EndToEndId></Refs>
+            <Amt Ccy="GBP">400.00</Amt>
+            <RltdPties><Dbtr><Pty><Nm>Initech Pvt Ltd</Nm></Pty></Dbtr></RltdPties>
+            <RmtInf><Ustrd>Invoice INV-2002</Ustrd></RmtInf>
+          </TxDtls>
+        </NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="GBP">285.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts>BOOK</Sts>
+        <BookgDt><Dt>2026-01-06</Dt></BookgDt><ValDt><Dt>2026-01-06</Dt></ValDt>
+        <AcctSvcrRef>BR-2</AcctSvcrRef>
+        <NtryDtls><TxDtls>
+          <Refs><EndToEndId>NOTPROVIDED</EndToEndId></Refs>
+          <RltdPties><Cdtr><Nm>City Power</Nm></Cdtr></RltdPties>
+          <RmtInf><Ustrd>Electricity December</Ustrd></RmtInf>
+        </TxDtls></NtryDtls>
+      </Ntry>
+      <Ntry>
+        <Amt Ccy="GBP">50.00</Amt><CdtDbtInd>DBIT</CdtDbtInd><Sts>PDNG</Sts>
+        <BookgDt><Dt>2026-01-06</Dt></BookgDt>
+        <AddtlNtryInf>Pending card payment</AddtlNtryInf>
+      </Ntry>
+    </Stmt>
+  </BkToCstmrStmt>
+</Document>

@@ -23,6 +23,35 @@ def get_file_extension(filename: str) -> str:
     return os.path.splitext(filename)[1].lower()
 
 
+_format_cache: "OrderedDict[tuple, str | None]" = OrderedDict()
+
+
+def finance_format(file_path: Path, filename: str) -> str | None:
+    """MT940/CAMT.053/BAI2/GSTR-2B, or None for an ordinary table.
+
+    ``.txt`` files are sniffed, since banks deliver MT940 and BAI2 as .txt.
+    """
+    from app.reconciliation_engine.ingestion import finance_formats
+
+    ext = get_file_extension(filename)
+    if ext not in finance_formats.EXTENSION_FORMATS and ext != ".txt":
+        return None
+    key = _cache_key(Path(file_path), "__format__")
+    if key is not None and key in _format_cache:
+        return _format_cache[key]
+    try:
+        with open(file_path, "rb") as handle:
+            head = handle.read(8192)
+    except OSError:
+        return None
+    fmt = finance_formats.format_for(ext, head)
+    if key is not None:
+        _format_cache[key] = fmt
+        while len(_format_cache) > 256:
+            _format_cache.popitem(last=False)
+    return fmt
+
+
 # .xls (Excel 97-2003) needs xlrd; pandas' default engine only reads .xlsx.
 _EXCEL_ENGINES = {".xlsx": "openpyxl", ".xls": "xlrd"}
 
@@ -52,7 +81,12 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
     For PDF/Word, it attempts to find tables.
     """
     ext = get_file_extension(filename)
-    
+
+    if fmt := finance_format(file_path, filename):
+        from app.reconciliation_engine.ingestion.finance_formats import sheet_names
+
+        return [{"id": name, "name": name} for name in sheet_names(fmt)]
+
     if ext in _EXCEL_ENGINES:
         try:
             with pd.ExcelFile(file_path, engine=_EXCEL_ENGINES[ext]) as xl:
@@ -112,7 +146,7 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
 # with openpyxl), and one reconciliation reads each sheet several times
 # (analysis, columns, execution). Each sheet is parsed once, kept in a small
 # in-memory LRU and in a pickle beside the upload so other workers reuse it.
-_CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv"}
+_CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv", ".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json"}
 _MEMORY_CACHE_SIZE = 6
 _memory_cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
 _cache_guard = threading.Lock()
@@ -208,7 +242,7 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
     ext = get_file_extension(filename)
     if ext in _EXCEL_ENGINES:
         return pd.read_excel(file_path, sheet_name=sheet_id, nrows=nrows, engine=_EXCEL_ENGINES[ext])
-    if ext in [".csv", ".txt", ".tsv"]:
+    if ext in [".csv", ".txt", ".tsv"] and not finance_format(file_path, filename):
         return pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=nrows)
     return read_table_data(file_path, filename, sheet_id).head(nrows)
 
@@ -223,7 +257,7 @@ def read_table_columns(file_path: Path, filename: str, sheet_id: str) -> list[st
     ext = get_file_extension(filename)
     if ext in _EXCEL_ENGINES:
         return [str(column) for column in pd.read_excel(file_path, sheet_name=sheet_id, nrows=0, engine=_EXCEL_ENGINES[ext]).columns]
-    if ext in [".csv", ".txt", ".tsv"]:
+    if ext in [".csv", ".txt", ".tsv"] and not finance_format(file_path, filename):
         return [str(column) for column in pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=0).columns]
     return [str(column) for column in read_table_data(file_path, filename, sheet_id).columns]
 
@@ -279,7 +313,15 @@ def _parse_table_data(file_path: Path, filename: str, sheet_id: str) -> pd.DataF
 
 def _parse_table_unchecked(file_path: Path, filename: str, sheet_id: str) -> pd.DataFrame:
     ext = get_file_extension(filename)
-    
+
+    if fmt := finance_format(file_path, filename):
+        from app.reconciliation_engine.ingestion.finance_formats import parse_file
+
+        sheets = parse_file(file_path, fmt)
+        if sheet_id not in sheets:
+            raise ValueError(f"Sheet '{sheet_id}' does not exist in this file. Available: {', '.join(sheets)}.")
+        return sheets[sheet_id]
+
     if ext in _EXCEL_ENGINES:
         return pd.read_excel(file_path, sheet_name=sheet_id, engine=_EXCEL_ENGINES[ext])
         

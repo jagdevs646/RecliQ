@@ -1,0 +1,41 @@
+{
+  "chksum": "ADFADRGA4GADFADGERE34",
+  "data": {
+    "gstin": "27AAACR5055K1Z5",
+    "rtnprd": "012026",
+    "version": "1.0",
+    "gendt": "14-02-2026",
+    "docdata": {
+      "b2b": [
+        {
+          "ctin": "27AABCA1234B1Z5",
+          "trdnm": "ACME PRIVATE LIMITED",
+          "supfildt": "11-02-2026",
+          "supprd": "012026",
+          "inv": [
+            {"inum": "INV-001", "typ": "R", "dt": "05-01-2026", "val": 1180, "pos": "27", "rev": "N", "itcavl": "Y", "rsn": "", "diffprcnt": 1, "srctyp": "e-Invoice", "irn": "abc123", "txval": 1000, "igst": 0, "cgst": 90, "sgst": 90, "cess": 0},
+            {"inum": "INV-002", "typ": "R", "dt": "20-01-2026", "val": 2360, "pos": "27", "rev": "N", "itcavl": "Y", "rsn": "", "diffprcnt": 1,
+             "items": [
+               {"num": 1, "rt": 18, "txval": 1000, "igst": 0, "cgst": 90, "sgst": 90, "cess": 0},
+               {"num": 2, "rt": 18, "txval": 1000, "igst": 0, "cgst": 90, "sgst": 90, "cess": 0}
+             ]}
+          ]
+        }
+      ],
+      "cdnr": [
+        {
+          "ctin": "29AAGCB9876C1Z2",
+          "trdnm": "Globex Traders",
+          "supfildt": "10-02-2026",
+          "supprd": "012026",
+          "nt": [
+            {"ntnum": "CN-7", "typ": "C", "suptyp": "R", "dt": "25-01-2026", "val": 590, "pos": "27", "rev": "N", "itcavl": "Y", "rsn": "", "txval": 500, "igst": 90, "cgst": 0, "sgst": 0, "cess": 0}
+          ]
+        }
+      ],
+      "impg": [
+        {"refdt": "15-01-2026", "portcode": "INNSA1", "boenum": "BOE-991", "boedt": "12-01-2026", "isamd": "N", "txval": 10000, "igst": 1800, "cess": 0}
+      ]
+    }
+  }
+}

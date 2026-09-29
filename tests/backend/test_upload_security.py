@@ -25,7 +25,11 @@ def _xls_bytes(rows: list[list]) -> io.BytesIO:
 
 
 def test_supported_formats_are_truthful():
-    assert set(SUPPORTED_FORMATS) == {".xlsx", ".xls", ".csv", ".tsv", ".txt", ".pdf", ".docx"}
+    assert set(SUPPORTED_FORMATS) == {
+        ".xlsx", ".xls", ".csv", ".tsv", ".txt", ".pdf", ".docx",
+        # Bank statements and GST returns (see test_finance_formats.py).
+        ".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json",
+    }
     with TestClient(app) as client:
         formats = client.get("/api/files/formats").json()
     extensions = {item["extension"] for item in formats["formats"]}

@@ -67,14 +67,46 @@ git push --force --all origin && git push --force --tags origin
 ## Uploads
 
 - Accepted formats (`GET /api/files/formats`): `.xlsx`, `.xls`, `.csv`,
-  `.tsv`, `.txt`, `.pdf` (tables) and `.docx` (tables). `.doc` and `.md`
-  were listed before but never worked, so they are refused.
+  `.tsv`, `.txt`, `.pdf` (tables) and `.docx` (tables), plus bank
+  statements and GST returns (below). `.doc` and `.md` were listed before
+  but never worked, so they are refused.
 - Content is checked against the extension (ZIP/OOXML, OLE2, `%PDF`, no
   binary in text files); password-protected workbooks and ZIP bombs are
   refused with a clear message.
 - `MAX_UPLOAD_MB` (default 50) is enforced while the request streams in, and
   `MAX_ROWS_PER_SHEET` (default 500,000) from workbook metadata at upload
   and again when a sheet is parsed.
+
+### Bank statements and GST returns
+
+| Format | Extensions | Sheets |
+| --- | --- | --- |
+| MT940 (SWIFT) | `.sta`, `.mt940`, `.940`, or `.txt` (recognised by content) | Transactions, Balances |
+| CAMT.053 (ISO 20022; CAMT.052/054 too) | `.xml` | Transactions, Balances |
+| BAI2 | `.bai`, `.bai2`, or `.txt` (recognised by content) | Transactions, Balances |
+| GSTR-2B / GSTR-2A (GST portal JSON) | `.json` | GSTR-2B |
+
+- **Transactions**: one row per booking with booking and value dates (ISO,
+  never ambiguous), Debit/Credit, Amount, Signed Amount (credit +, debit −),
+  separate Debit and Credit columns, currency, bank transaction code and
+  type, customer and bank references, counterparty and narrative. MT940
+  `?20…?33` sub-fields are decoded; CAMT batch bookings are split into their
+  payments when each has an amount; BAI2 `88` continuations and funds-type
+  fields are handled. A BAI2 code outside 100–699 has no defined direction,
+  so it gets no signed amount rather than a guessed one.
+- **Balances**: opening and closing balance per statement, the booked credits
+  and debits, and a check that opening + credits − debits = closing
+  ("Balanced" or "Off by …"). A BAI2 control total that does not add up is
+  reported here too.
+- **GSTR-2B**: one row per document, with exactly the columns the GST
+  reconciliation expects (GSTR, trader name, invoice number and date, taxable
+  value, IGST/CGST/SGST/cess, invoice value) plus section, document type,
+  ITC availability and reason, reverse charge, place of supply, filing dates,
+  original numbers for amendments and IRN. Credit notes are negative;
+  rate-wise items are summed; imports (bill of entry) are included.
+- The file is parsed at upload, so a damaged or mislabelled file is refused
+  with the parser's reason. XML is parsed with `defusedxml`: DTDs, entities
+  and external references are refused.
 
 ## Durable job processing
 
@@ -175,3 +207,56 @@ by people on the Name aliases page. Reviewers can confirm or reject proposed
 matches in the results; a pair is *suggested* as an alias only after it was
 confirmed in at least two different reconciliations and never rejected, and
 it is used only after someone approves it.
+
+### Learning from reviewers' decisions
+
+Reviewers confirm or reject "Matches to confirm" on the results page. Each
+decision is kept (with the method that proposed the match and its score) and
+used conservatively:
+
+- A **rejected pairing is never proposed again**. If exactly one other
+  candidate then qualifies, that one is proposed instead (still to confirm).
+  A rejection can be withdrawn on the Learning page ("reset"); that is
+  audited too.
+- A pairing confirmed before is labelled "Confirmed by a reviewer N times".
+- **Rule weights**: for each method (e.g. "Similar key (company name)" in
+  5-point score bands, or a given amount + date pass) RecliQ shows the share
+  of proposals reviewers confirmed and a conservative estimate (lower end of
+  the 95% Wilson interval). After 5 decisions, results show it as a learned
+  confidence. Suggestions follow from it: raise a threshold for a band that
+  is often rejected, tighten a weak pass, or (after at least 10 decisions
+  with an estimate of 90% or more) add a rule to confirm a reliable method.
+- Nothing is confirmed automatically by learning. Name aliases still need
+  approval, and decisions on keyless (amount/date) passes never become
+  aliases.
+
+### Auto-resolution rules
+
+Rules explain exceptions a team clears the same way every period. Each rule
+has one exception type, conditions that must all hold, and a resolution with
+optional reason code, GL account and note:
+
+| Exception type | Conditions |
+| --- | --- |
+| Only in the source / destination file | column contains / is / starts or ends with / is (not) blank; amount at most / at least (with or without sign) / between. `*` = any column |
+| Difference in a compared field | field is …; difference at most X or X%; plus column conditions |
+| Match to confirm | confirmed by a reviewer at least N times; confidence at least X%; found by a given method |
+
+- Rules run after matching, in the order shown. The first rule that fits
+  labels the exception; it is removed from its exception list and listed on
+  the report's **09 Auto-resolved** tab with the rule name and version,
+  resolution, reason code and GL account. The Checks tab still balances.
+- Safety limits: every rule needs a condition; a condition on a column the
+  record does not have is false; difference rules must cap the difference;
+  confirmation rules need earlier reviewer confirmation or a minimum
+  confidence; ambiguous records are never resolved.
+- **Test before saving**: the editor shows what a rule would resolve in any
+  finished reconciliation (it uses that report's columns).
+- **Suggestions**: unresolved unmatched records are grouped by column and
+  wording (numbers removed, e.g. "bank charges jan"). Wording seen in 3 or more
+  reconciliations and not yet covered by a rule is suggested, with an amount
+  cap at the largest amount seen.
+- **Audit**: creating, changing (new version, before/after), reordering and
+  removing rules are audit events. Each run records which rule versions were
+  active (`resolution_rules` in the job summary) and one
+  `exceptions.auto_resolved` event with the count per rule version.

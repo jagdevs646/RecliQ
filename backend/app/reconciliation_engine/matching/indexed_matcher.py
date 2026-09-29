@@ -298,10 +298,12 @@ def _compare_text(value1: object, value2: object, matcher_type: str, prefer_name
         )
 
     # Fuzzy scoring only after every deterministic rule failed; scores below
-    # 85 are flagged for manual review and never count as exact.
+    # 85 are flagged for manual review and never count as exact. A fuzzy score
+    # is at most 99: subset scorers give 100 when one text contains the other
+    # ("Automobiles" in "Automobiles & Components"), and 100 means identical.
     canonical1 = normalizer.canonical(value1).text or norm1
     canonical2 = normalizer.canonical(value2).text or norm2
-    score = _fuzzy_score(canonical1, canonical2)
+    score = min(_fuzzy_score(canonical1, canonical2), 99)
     if score >= 85:
         return MatchResult(True, score, matcher_type, "Minor spelling variation", value1_normalized=canonical1, value2_normalized=canonical2)
     if score >= 75:

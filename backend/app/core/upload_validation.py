@@ -23,11 +23,20 @@ SUPPORTED_FORMATS: dict[str, dict[str, str]] = {
     ".xls": {"label": "Excel 97-2003 workbook", "content_type": "application/vnd.ms-excel"},
     ".csv": {"label": "Comma-separated values", "content_type": "text/csv"},
     ".tsv": {"label": "Tab-separated values", "content_type": "text/tab-separated-values"},
-    ".txt": {"label": "Comma-delimited text", "content_type": "text/plain"},
+    ".txt": {"label": "Comma-delimited text, or an MT940/BAI2 statement", "content_type": "text/plain"},
     ".pdf": {"label": "PDF (tables only)", "content_type": "application/pdf"},
     ".docx": {"label": "Word document (tables only)", "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    ".sta": {"label": "MT940 bank statement", "content_type": "text/plain"},
+    ".mt940": {"label": "MT940 bank statement", "content_type": "text/plain"},
+    ".940": {"label": "MT940 bank statement", "content_type": "text/plain"},
+    ".bai": {"label": "BAI2 bank statement", "content_type": "text/plain"},
+    ".bai2": {"label": "BAI2 bank statement", "content_type": "text/plain"},
+    ".xml": {"label": "CAMT.053 bank statement (ISO 20022)", "content_type": "application/xml"},
+    ".json": {"label": "GSTR-2B return (GST portal JSON)", "content_type": "application/json"},
 }
 _TABULAR_TEXT = {".csv", ".tsv", ".txt"}
+# Finance formats are text too; their content is checked by parsing them.
+_FINANCE_TEXT = {".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json"}
 # Uncompressed content above this multiple of the upload limit is treated as a
 # decompression bomb.
 _MAX_EXPANSION = 20
@@ -101,9 +110,27 @@ def _check_content(extension: str, head: bytes, stream: BinaryIO, max_bytes: int
     elif extension == ".pdf":
         if PDF_SIGNATURE not in head[:1024]:
             raise UploadRejected("The file is named .pdf but its content is not a PDF.", 415)
-    elif extension in _TABULAR_TEXT:
+    elif extension in _TABULAR_TEXT or extension in _FINANCE_TEXT:
         if any(head.startswith(signature) for signature in _BINARY_SIGNATURES) or b"\x00" in head:
-            raise UploadRejected(f"The file is named {extension} but contains binary data, not delimited text.", 415)
+            kind = "delimited text" if extension in _TABULAR_TEXT else SUPPORTED_FORMATS[extension]["label"]
+            raise UploadRejected(f"The file is named {extension} but contains binary data, not {kind}.", 415)
+
+
+def _finance_row_counts(extension: str, head: bytes, stream: BinaryIO) -> dict[str, int] | None:
+    """Parse a bank statement or GST return now, so a damaged or mislabelled
+    file is refused at upload with the parser's reason. None: not finance."""
+    from app.reconciliation_engine.ingestion.finance_formats import FORMAT_LABELS, FinanceFormatError, format_for, parse_bytes
+
+    fmt = format_for(extension, head)
+    if fmt is None:
+        return None
+    try:
+        sheets = parse_bytes(stream.read(), fmt)
+    except FinanceFormatError as exc:
+        raise UploadRejected(f"This {FORMAT_LABELS[fmt]} could not be read: {exc}", 415) from exc
+    finally:
+        stream.seek(0)
+    return {name: len(frame) + 1 for name, frame in sheets.items()}  # +1: counted like a header row.
 
 
 def _count_text_rows(stream: BinaryIO) -> int:
@@ -165,7 +192,9 @@ def validate_upload(filename: str | None, stream: BinaryIO, *, max_bytes: int, m
     stream.seek(0)
     _check_content(extension, head, stream, max_bytes)
 
-    row_counts = _row_counts(extension, stream)
+    row_counts = _finance_row_counts(extension, head, stream)
+    if row_counts is None:
+        row_counts = _row_counts(extension, stream)
     for sheet, rows in row_counts.items():
         data_rows = max(0, rows - 1)  # The first row is the header.
         if data_rows > max_rows:

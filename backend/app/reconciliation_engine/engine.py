@@ -36,6 +36,8 @@ from app.reconciliation_engine.preprocessing import (
 from app.reconciliation_engine.normalization import build_normalizer, normalize_dataframe, use_normalizer
 from app.reconciliation_engine.normalization.entities import active_normalizer
 from app.reconciliation_engine.transformations import apply_transformations, original_values
+from app.reconciliation_engine.learning import LearningContext
+from app.reconciliation_engine.resolution import Evaluator, describe_rule, referenced_values, resolution_fields
 from app.reconciliation_engine.matching.advanced_matcher import consolidate_duplicate_keys
 from app.reconciliation_engine.progress_tracker import ProgressTracker
 from app.reconciliation_engine.report_generator import (
@@ -226,8 +228,17 @@ def _numeric_rule_columns(df: pd.DataFrame, field_lists: list[list[str]]) -> lis
 
 def _secondary_mismatches(file_1_row: dict, file_2_row: dict, conditions: list[dict]) -> list[str]:
     """Describe which secondary keys differ for a row whose primary key matched."""
-    mismatches = []
-    for condition in conditions:
+    return [
+        f"{conditions[index]['source_column']} differs "
+        f"('{file_1_row.get(conditions[index]['source_column'])}' vs '{file_2_row.get(conditions[index]['destination_column'])}')"
+        for index in _failed_secondary_conditions(file_1_row, file_2_row, conditions)
+    ]
+
+
+def _failed_secondary_conditions(file_1_row: dict, file_2_row: dict, conditions: list[dict]) -> list[int]:
+    """Positions of the secondary keys that differ for a pair of rows."""
+    failed = []
+    for index, condition in enumerate(conditions):
         source_value = file_1_row.get(condition["source_column"])
         destination_value = file_2_row.get(condition["destination_column"])
         method = condition.get("comparison_method")
@@ -242,8 +253,21 @@ def _secondary_mismatches(file_1_row: dict, file_2_row: dict, conditions: list[d
         else:
             passed = compare_values(source_value, destination_value, condition["source_column"], condition["destination_column"]).matched
         if not passed:
-            mismatches.append(f"{condition['source_column']} differs ('{source_value}' vs '{destination_value}')")
-    return mismatches
+            failed.append(index)
+    return failed
+
+
+def _conditions_replaced_by_pass(config: dict, conditions: list[dict]) -> set[int]:
+    """Secondary keys a pass's own date window replaces: an exact-date key on
+    the same two date columns (the pass checks those dates within ±N days)."""
+    return {
+        index
+        for index, condition in enumerate(conditions)
+        if condition.get("comparison_method") == "normalized_date"
+        and config.get("date_source")
+        and condition["source_column"] == config["date_source"]
+        and condition["destination_column"] == config.get("date_destination")
+    }
 
 
 def _primary_similarity_result(
@@ -379,6 +403,8 @@ def run_generic_reconciliation(
     normalization: dict | None = None,
     date_dayfirst: bool = True,
     saved_aliases: list[tuple[str, str]] | None = None,
+    resolution_rules: list[dict] | None = None,
+    learning: LearningContext | None = None,
 ) -> dict:
     """Reconcile one sheet rule.
 
@@ -386,14 +412,17 @@ def run_generic_reconciliation(
     ``date_dayfirst`` the convention for ambiguous dates such as 03/04/2026,
     ``transformations`` the pre-match value transformations and
     ``matching_passes`` the ordered keyless passes that run after the key pass.
+    ``learning`` carries reviewers' earlier decisions and ``resolution_rules``
+    the organization's auto-resolution rules for recurring exceptions.
     """
     normalizer = build_normalizer(normalization, saved_aliases or ())
+    evaluator = Evaluator.from_config(resolution_rules, learning)
     with use_date_convention(date_dayfirst), use_normalizer(normalizer):
         return _run_generic_reconciliation(
             file_1_df, file_2_df, output_path, key_file_1, key_file_2, rules,
             include_columns_file_1, include_columns_file_2, progress_callback, file_1_name, file_2_name,
             is_cancelled, write_report, secondary_conditions, similarity_policy, date_only_override,
-            transformations, matching_passes, normalizer, date_dayfirst,
+            transformations, matching_passes, normalizer, date_dayfirst, evaluator, learning,
         )
 
 
@@ -418,6 +447,8 @@ def _run_generic_reconciliation(
     matching_passes: list[dict] | None,
     normalizer,
     date_dayfirst: bool,
+    evaluator: Evaluator | None = None,
+    learning: LearningContext | None = None,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -564,6 +595,7 @@ def _run_generic_reconciliation(
     matched_records: list[dict] = []
     matched_file_2_indices: set = set()
     identity_resolution: list[dict] = []
+    auto_resolved: list[dict] = []  # Exceptions explained by the organization's rules.
     field_discrepancy_count = 0
     normalization_counts: dict[str, int] = {}
 
@@ -584,6 +616,21 @@ def _run_generic_reconciliation(
     def display_key(row: dict, key_columns: list[str], pass_columns: list[str]) -> str:
         columns = key_columns or list(dict.fromkeys(pass_columns))
         return " | ".join("" if is_blank(row.get(column)) else str(row.get(column)) for column in columns).strip(" |")
+
+    def decision_keys(file_1_row: dict, file_2_row: dict) -> tuple[str, str]:
+        """The values a reviewer sees (MATCH KEY / CANDIDATE KEY) and decides on."""
+        return display_key(file_1_row, file_1_id_col, pass_columns_1), display_key(file_2_row, file_2_id_col, pass_columns_2)
+
+    def rejected_note(file_1_row: dict, rejected_rows: list[dict], pass_name: str = "") -> str:
+        """Explain why a remembered rejection was not proposed again."""
+        if not rejected_rows:
+            return ""
+        _, candidate = decision_keys(file_1_row, rejected_rows[0])
+        target = f"'{candidate}'" if len(rejected_rows) == 1 else f"{len(rejected_rows)} records"
+        history = learning.history(*decision_keys(file_1_row, rejected_rows[0])) if learning is not None else None
+        when = f" on {history.rejected_on}" if history and history.rejected_on else ""
+        note = f"a reviewer rejected pairing this record with {target} before{when}, so it is not proposed again."
+        return f"{pass_name}: {note}" if pass_name else note[0].upper() + note[1:]
 
     def key_normalization(file_1_row: dict, file_2_row: dict) -> list[str]:
         """Rules that made text keys or exact secondary keys equal."""
@@ -608,7 +655,8 @@ def _run_generic_reconciliation(
         outcome = {
             "row_idx": row_idx, "row": file_1_row, "classification": MatchClassification.NOT_FOUND,
             "key_result": None, "threshold": None, "best_idx": None, "file_2_row": None, "candidate_row": None,
-            "secondary_mismatch": [], "pass_label": "", "explanation": None,
+            "secondary_mismatch": [], "pass_label": "", "explanation": None, "method": "", "learned_note": "",
+            "key_partners": {},
         }
         outcomes.append(outcome)
         if not has_keys:
@@ -643,6 +691,12 @@ def _run_generic_reconciliation(
             if not exact_candidates:
                 candidate_row = rejected[0][1]
                 secondary_mismatch = _secondary_mismatches(file_1_row, candidate_row, normalized_secondary_conditions)
+                # Kept so a date-window pass can still pair the record with
+                # this same-key partner (see the later passes).
+                outcome["key_partners"] = {
+                    index: set(_failed_secondary_conditions(file_1_row, row, normalized_secondary_conditions))
+                    for index, row, _ in rejected
+                }
 
         if len(exact_candidates) == 1:
             best_idx, file_2_row, key_result = exact_candidates[0]
@@ -677,22 +731,34 @@ def _run_generic_reconciliation(
                 )
                 scored.append((candidate_idx, secondary_row, similarity_result))
             qualifying = [item for item in scored if item[2].confidence >= (required_threshold or 0)]
+            if learning is not None and qualifying:
+                # A pairing a reviewer rejected is never proposed again; if
+                # exactly one other candidate remains, that one is proposed.
+                remembered = [item for item in qualifying if learning.is_rejected(*decision_keys(file_1_row, item[1]))]
+                if remembered:
+                    qualifying = [item for item in qualifying if item not in remembered]
+                    outcome["learned_note"] = rejected_note(file_1_row, [item[1] for item in remembered])
+                    if not qualifying:
+                        _, candidate_row, key_result = remembered[0]
             if len(qualifying) > 1:
                 classification = MatchClassification.AMBIGUOUS_MATCH
             elif len(qualifying) == 1:
                 best_idx, file_2_row, key_result = qualifying[0]
                 candidate_row = file_2_row
                 classification = MatchClassification.EXCEPTION_MATCH
-            elif len(scored) == 1:
+            elif len(scored) == 1 and not outcome["learned_note"]:
                 # One secondary candidate whose key is too different: explain why.
                 _, candidate_row, key_result = scored[0]
 
         if file_2_row is not None:
             matched_file_2_indices.add(best_idx)
+        method = ""
+        if classification is MatchClassification.EXCEPTION_MATCH and key_result is not None:
+            method = f"Similar key ({key_result.matcher_type.replace('_', ' ')})"
         outcome.update(
             classification=classification, key_result=key_result, threshold=required_threshold, best_idx=best_idx,
             file_2_row=file_2_row, candidate_row=candidate_row, secondary_mismatch=secondary_mismatch,
-            pass_label="Primary key" if file_2_row is not None else "",
+            pass_label="Primary key" if file_2_row is not None else "", method=method,
         )
 
     # ── Later passes: keyless matching on records still unmatched ─────────
@@ -700,20 +766,30 @@ def _run_generic_reconciliation(
         file_2_positions = {index: position for position, index in enumerate(file_2_df.index)}
         file_2_rows_all = file_2_df.to_dict('records')
 
-        def secondary_ok(source_row: dict, destination_row: dict) -> bool:
-            return not _secondary_mismatches(source_row, destination_row, normalized_secondary_conditions)
-
         for number, config in enumerate(passes, start=2 if has_keys else 1):
             label = pass_label(config, number)
-            # Ambiguous key matches and explicit secondary-key mismatches are
-            # decisions for a person, never for a later, weaker pass.
-            open_sources = [
-                (outcome["row_idx"], outcome["row"])
-                for outcome in outcomes
-                if outcome["file_2_row"] is None
-                and outcome["classification"] is MatchClassification.NOT_FOUND
-                and not outcome["secondary_mismatch"]
+            # A date window replaces an exact-date secondary key on the same
+            # columns; every other secondary key still applies.
+            replaced = _conditions_replaced_by_pass(config, normalized_secondary_conditions)
+            remaining_conditions = [
+                condition for index, condition in enumerate(normalized_secondary_conditions) if index not in replaced
             ]
+            # Ambiguous key matches and explicit secondary-key mismatches are
+            # decisions for a person, never for a later, weaker pass. The one
+            # exception: the key matched and only a replaced date differs. Such
+            # a record may pair only with its same-key partner, never with an
+            # unrelated record that happens to have the same amount.
+            same_key_only: dict[int, set] = {}
+            open_sources = []
+            for outcome in outcomes:
+                if outcome["file_2_row"] is not None or outcome["classification"] is not MatchClassification.NOT_FOUND:
+                    continue
+                if outcome["secondary_mismatch"]:
+                    partners = {index for index, failed in outcome["key_partners"].items() if replaced and failed <= replaced}
+                    if not partners:
+                        continue
+                    same_key_only[id(outcome["row"])] = partners
+                open_sources.append((outcome["row_idx"], outcome["row"]))
             open_destinations = [
                 (index, file_2_rows_all[file_2_positions[index]])
                 for index in file_2_df.index
@@ -721,11 +797,23 @@ def _run_generic_reconciliation(
             ]
             if not open_sources or not open_destinations:
                 break
-            check = secondary_ok if (normalized_secondary_conditions and config.get("respect_secondary_keys", True)) else None
+            destination_index = {id(row): index for index, row in open_destinations}
+            respect = bool(remaining_conditions) and config.get("respect_secondary_keys", True)
+
+            def check(source_row: dict, destination_row: dict, respect=respect, remaining=remaining_conditions,
+                      same_key_only=same_key_only, destination_index=destination_index) -> bool:
+                partners = same_key_only.get(id(source_row))
+                if partners is not None and destination_index.get(id(destination_row)) not in partners:
+                    return False
+                return not (respect and _failed_secondary_conditions(source_row, destination_row, remaining))
+
             matches, ambiguities = run_pass(config, open_sources, open_destinations, check)
             for match in matches:
                 outcome = outcomes[match.source_position]
                 destination_row = file_2_rows_all[file_2_positions[match.destination_position]]
+                if learning is not None and not match.exact and learning.is_rejected(*decision_keys(outcome["row"], destination_row)):
+                    outcome["learned_note"] = rejected_note(outcome["row"], [destination_row], label)
+                    continue
                 matched_file_2_indices.add(match.destination_position)
                 classification = MatchClassification.EXACT_MATCH if match.exact else MatchClassification.EXCEPTION_MATCH
                 outcome.update(
@@ -734,7 +822,9 @@ def _run_generic_reconciliation(
                     best_idx=match.destination_position,
                     file_2_row=destination_row,
                     candidate_row=destination_row,
+                    secondary_mismatch=[],
                     pass_label=label,
+                    method="" if match.exact else label,
                     explanation=(
                         f"Matched in {label[0].lower()}{label[1:]}: {match.detail}."
                         + ("" if match.exact else " Please confirm.")
@@ -759,7 +849,8 @@ def _run_generic_reconciliation(
             if file_2_row is not None and outcome["pass_label"] == "Primary key"
             else []
         )
-        explanation = outcome["explanation"] or _identity_explanation(
+        unmatched_note = outcome["learned_note"] if file_2_row is None and classification is MatchClassification.NOT_FOUND else ""
+        explanation = outcome["explanation"] or unmatched_note or _identity_explanation(
             classification,
             key_result,
             outcome["threshold"],
@@ -767,6 +858,32 @@ def _run_generic_reconciliation(
             outcome["secondary_mismatch"],
             normalization_applied if classification is MatchClassification.EXACT_MATCH else None,
         )
+        if outcome["learned_note"] and not unmatched_note and file_2_row is not None:
+            explanation = f"{explanation} ({outcome['learned_note']})"
+
+        # What earlier decisions say, and whether a rule confirms the match.
+        method = outcome["method"]
+        review_history = learned_confidence = ""
+        confirmed_by = None
+        if classification is MatchClassification.EXCEPTION_MATCH and file_2_row is not None and key_result is not None:
+            key_1, key_2 = decision_keys(file_1_row, file_2_row)
+            if learning is not None:
+                review_history, learned_confidence = learning.describe(key_1, key_2, method, key_result.confidence)
+                if review_history:
+                    explanation = f"{explanation} {review_history}."
+                if learned_confidence:
+                    explanation = f"{explanation} Learned confidence for this kind of match: {learned_confidence}."
+            if evaluator is not None:
+                confirmed_by = evaluator.confirmation(file_1_row, key_1, key_2, key_result.confidence, method)
+            if confirmed_by is not None:
+                classification = MatchClassification.EXACT_MATCH
+                explanation = f"{explanation} Confirmed automatically by rule '{confirmed_by.label()}'."
+                auto_resolved.append({
+                    **resolution_fields(confirmed_by, "Match to confirm", "to_confirm"),
+                    "Record": key_1, "Matched With": key_2, "How Matched": method,
+                    "Match Confidence": f"{key_result.confidence}%", "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
+                })
+
         identity_record = {
             "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
             "IDENTITY CLASSIFICATION": classification.value,
@@ -782,12 +899,30 @@ def _run_generic_reconciliation(
             identity_record["MATCH PASS"] = outcome["pass_label"]
         if normalization_applied:
             identity_record["NORMALIZATION APPLIED"] = ", ".join(normalization_applied)
+        learned_fields = {
+            name: value
+            for name, value in (
+                ("MATCH METHOD", method), ("REVIEW HISTORY", review_history), ("LEARNED CONFIDENCE", learned_confidence),
+                ("AUTO-RESOLVED BY", confirmed_by.label() if confirmed_by else ""),
+            )
+            if value
+        }
+        identity_record.update(learned_fields)
         identity_resolution.append(identity_record)
 
         if file_2_row is None or key_result is None:
             clean_f1_row = {k: v for k, v in file_1_row.items() if k in allowed_f1_cols}
             clean_f1_row.update(original_values(file_1_row, transformed_1.originals))
             clean_f1_row["ROW (FILE 1)"] = file_1_row.get("_ROW_NO", row_idx + 2)
+            # Ambiguous records are never auto-resolved: a person decides.
+            rule = evaluator.unmatched(file_1_row, "source") if evaluator and classification is MatchClassification.NOT_FOUND else None
+            if rule is not None:
+                identity_record["AUTO-RESOLVED BY"] = rule.label()
+                auto_resolved.append({
+                    **resolution_fields(rule, f"Only in {file_1_name}", "only_in_source"),
+                    "Record": identity_record["MATCH KEY"], **clean_f1_row, **referenced_values(rule, file_1_row),
+                })
+                continue
             clean_f1_row["IDENTITY CLASSIFICATION"] = classification.value
             clean_f1_row["MATCH EXPLANATION"] = explanation
             if note := grouped_rows_note(file_1_row):
@@ -817,6 +952,7 @@ def _run_generic_reconciliation(
         }
         if passes:
             reconciliation_result["MATCH PASS"] = outcome["pass_label"]
+        reconciliation_result.update(learned_fields)
         if not has_keys:
             reconciliation_result["MATCH KEY"] = display_key(file_1_row, [], pass_columns_1)
             reconciliation_result["MATCHED KEY"] = display_key(file_2_row, [], pass_columns_2)
@@ -852,11 +988,28 @@ def _run_generic_reconciliation(
 
         has_field_difference = False
         field_rules: list[str] = []
+        resolved_differences: list[str] = []
         for file_1_fields, file_2_fields in normalized_rules:
             differences = compare_rule_values(file_1_row, file_2_row, file_1_fields, file_2_fields, field_rules)
+            if differences and evaluator is not None:
+                label = fields_label(file_1_fields)
+                value_1, value_2 = differences.get(f"{label} (FILE 1)"), differences.get(f"{label} (FILE 2)")
+                difference = differences.get(f"{label} DIFF")
+                rule = evaluator.difference(label, value_1, value_2, difference, file_1_row)
+                if rule is not None:
+                    resolved_differences.append(f"{label}: {rule.resolution} (rule '{rule.label()}')")
+                    auto_resolved.append({
+                        **resolution_fields(rule, "Field difference", "field_difference"),
+                        "Record": decision_keys(file_1_row, file_2_row)[0], "Field": label,
+                        "File 1 Value": value_1, "File 2 Value": value_2, "Difference": difference,
+                        "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
+                    })
+                    continue
             if differences:
                 has_field_difference = True
                 reconciliation_result.update(differences)
+        if resolved_differences:
+            reconciliation_result["RESOLVED DIFFERENCES"] = "; ".join(resolved_differences)
         if has_field_difference:
             field_discrepancy_count += 1
         all_rules = list(dict.fromkeys(normalization_applied + field_rules))
@@ -886,6 +1039,14 @@ def _run_generic_reconciliation(
             clean_f2_row = {k: v for k, v in file_2_records[i].items() if k in allowed_f2_cols}
             clean_f2_row.update(original_values(file_2_records[i], transformed_2.originals))
             clean_f2_row["ROW (FILE 2)"] = file_2_records[i].get("_ROW_NO", idx + 2)
+            rule = evaluator.unmatched(file_2_records[i], "destination") if evaluator is not None else None
+            if rule is not None:
+                auto_resolved.append({
+                    **resolution_fields(rule, f"Only in {file_2_name}", "only_in_destination"),
+                    "Record": display_key(file_2_records[i], file_2_id_col, pass_columns_2),
+                    **clean_f2_row, **referenced_values(rule, file_2_records[i]),
+                })
+                continue
             if note := grouped_rows_note(file_2_records[i]):
                 clean_f2_row["GROUPED ROWS"] = note
             file_2_not_found.append(clean_f2_row)
@@ -926,8 +1087,11 @@ def _run_generic_reconciliation(
             "pass_counts": pass_counts,
             "normalization_rules_used": normalization_counts,
             "date_convention": "Day first (DD/MM/YYYY)" if date_dayfirst else "Month first (MM/DD/YYYY)",
+            "resolution_rules": [f"{rule.label()}: {describe_rule(rule)}" for rule in (evaluator.rules if evaluator else [])],
+            "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
         },
     )
+    universal_data["auto_resolved"] = auto_resolved
 
     if write_report:
         generate_enterprise_report(universal_data, {}, output_path)
@@ -952,6 +1116,11 @@ def _run_generic_reconciliation(
         "not_found_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.NOT_FOUND.value for item in identity_resolution),
         "keyless_matches": sum(count for label, count in pass_counts.items() if label != "Primary key"),
         "normalized_matches": sum(1 for item in identity_resolution if item.get("NORMALIZATION APPLIED")),
+        "auto_resolved": len(auto_resolved),
+        "auto_resolved_only_in_file_1": sum(1 for item in auto_resolved if item["__KIND__"] == "only_in_source"),
+        "auto_resolved_only_in_file_2": sum(1 for item in auto_resolved if item["__KIND__"] == "only_in_destination"),
+        "auto_resolved_differences": sum(1 for item in auto_resolved if item["__KIND__"] == "field_difference"),
+        "auto_confirmed_matches": sum(1 for item in auto_resolved if item["__KIND__"] == "to_confirm"),
     }
 
     return {

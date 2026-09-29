@@ -56,10 +56,15 @@ def build_universal_data_model(
                 
                 f1_val = row.get(f"{base_field} (FILE 1)")
                 f2_val = row.get(f"{base_field} (FILE 2)")
-                status = row.get(f"{base_field} STATUS", "Mismatch")
+                status = row.get(f"{base_field} STATUS")
                 diff = row.get(f"{base_field} DIFF")
-                
-                if status == "Mismatch" or status == "Partial Match" or str(status).endswith("%"):
+                confidence = row.get(f"{base_field} CONFIDENCE")
+
+                # The engine reports a field only when its values are not
+                # identical, so every reported field is a difference, including
+                # near matches ("Minor spelling variation", 89%). Listing only
+                # outright mismatches left records counted but not shown.
+                if status is not None:
                     fields_processed.add(base_field)
                     
                     # Update field stats
@@ -87,6 +92,7 @@ def build_universal_data_model(
                         "File 2 Value": f2_val,
                         "Difference": diff,
                         "Difference %": diff_pct,
+                        **({"Similarity": f"{status} ({confidence})"} if status != "Mismatch" and confidence else {}),
                         **trailing_context,
                     })
                 else:

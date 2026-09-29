@@ -55,3 +55,7 @@ def test_report_shows_passes_normalization_and_transformations(tmp_path: Path):
     rules_text = " ".join(_cells(workbook["08 Sheet Rules"]))
     assert "Invert sign: Amount (destination)" in rules_text
     assert "Pass 2: Amount + date ±2 days" in rules_text
+    # Counts say what they are: exact matches, matches to confirm, and how many came from later passes.
+    for label in ("Exact matches", "Matches to confirm", "Of these, matched in later passes"):
+        assert label in rules_text
+    assert "Matched by secondary keys" not in rules_text

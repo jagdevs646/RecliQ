@@ -28,6 +28,9 @@ class MatchDecision(IdMixin, TimestampMixin, Base):
 
     Decisions are evidence for alias suggestions. A value pair is suggested
     only after repeated acceptance and no rejection, and still needs approval.
+    A rejection is remembered: the same pair is not proposed again until
+    someone records "reset" (withdraws the earlier decisions). Rows are never
+    edited; the latest decision for a pair is the one that counts.
     """
 
     __tablename__ = "match_decisions"
@@ -38,7 +41,10 @@ class MatchDecision(IdMixin, TimestampMixin, Base):
     value_1: Mapped[str] = mapped_column(String(300), nullable=False)
     value_2: Mapped[str] = mapped_column(String(300), nullable=False)
     pair_key: Mapped[str] = mapped_column(String(620), index=True, nullable=False)
-    decision: Mapped[str] = mapped_column(String(10), nullable=False)  # "accept" or "reject"
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)  # "accept", "reject" or "reset"
     confidence: Mapped[int | None] = mapped_column(Integer)
     note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     decided_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    # How the proposed match was found (e.g. "similar_key:company_name",
+    # "pass:amount_date"). Decisions per method are the learned rule weights.
+    method: Mapped[str | None] = mapped_column(String(80), index=True)

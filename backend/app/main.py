@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import aliases, analysis, audit, files, health, jobs, reconciliation, reports, session, templates
+from app.api.routes import aliases, analysis, audit, files, health, jobs, learning, reconciliation, reports, resolution, session, templates
 from app.core.anonymous_session import AnonymousSessionMiddleware
 from app.core.config import get_settings
 from app.core.observability import RequestContextMiddleware, configure_logging, init_error_tracking
@@ -84,6 +84,8 @@ def create_app() -> FastAPI:
     app.include_router(templates.router, prefix=settings.api_prefix)
     app.include_router(aliases.router, prefix=settings.api_prefix)
     app.include_router(audit.router, prefix=settings.api_prefix)
+    app.include_router(resolution.router, prefix=settings.api_prefix)
+    app.include_router(learning.router, prefix=settings.api_prefix)
     return app
 
 

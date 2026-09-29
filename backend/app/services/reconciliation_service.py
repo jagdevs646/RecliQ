@@ -32,6 +32,7 @@ from app.schemas.reconciliation import (
     ReconciliationPlan,
     normalize_legacy_request,
 )
+from app.services import learning_service, resolution_service
 from app.services.audit_service import AuditActor, record_event
 from app.services.job_service import append_history
 from app.storage import get_storage
@@ -54,6 +55,7 @@ _UNIVERSAL_RECORD_CATEGORIES = (
     "missing_in_file_2",
     "field_differences",
     "identity_resolution",
+    "auto_resolved",
 )
 
 
@@ -90,6 +92,12 @@ def _merge_rule_universal_data(rule_results: list[dict]) -> dict:
                     existing[file_key] += incoming[file_key]
             if incoming.get("Result") == "Exception":
                 existing["Result"] = "Exception"
+    # Rule usage is per sheet rule; the report states the job's totals.
+    rules_used: dict[str, int] = {}
+    for result in rule_results:
+        for label, count in ((result["universal_data"].get("metadata") or {}).get("resolution_rules_used") or {}).items():
+            rules_used[label] = rules_used.get(label, 0) + count
+    merged.setdefault("metadata", {})["resolution_rules_used"] = rules_used
     # Records already live in the merged categories; keep only rule metadata
     # here so the stored audit JSON does not hold every record twice.
     merged["execution_results"] = [
@@ -319,6 +327,26 @@ def get_file_columns(db: Session, file_id: str, session_id: str, sheet_id: str |
     return [normalize_header(col) for col in transform_horizontal_dataframe(df).columns]
 
 
+def _record_auto_resolution(job: ReconciliationJob, report_data: dict) -> None:
+    """One audit event per run listing what each rule version resolved."""
+    resolved = report_data.get("auto_resolved") or []
+    if not resolved:
+        return
+    by_rule: dict[str, dict] = {}
+    for row in resolved:
+        label = f"{row.get('Rule')} (v{row.get('Rule Version')})"
+        entry = by_rule.setdefault(label, {"count": 0, "kinds": {}})
+        entry["count"] += 1
+        kind = row.get("__KIND__", "")
+        entry["kinds"][kind] = entry["kinds"].get(kind, 0) + 1
+    record_event(
+        scope_id=job.session_id, actor=AuditActor.system(), action="exceptions.auto_resolved", entity_type="job",
+        entity_id=job.id, summary=f"{len(resolved)} exception(s) resolved by {len(by_rule)} rule(s)",
+        after={"rules": by_rule},
+        metadata={"auto_resolved": len(resolved)},
+    )
+
+
 def _saved_aliases(db: Session, scope_id: str) -> list[tuple[str, str]]:
     """Organization-approved aliases as (variant, canonical) pairs."""
     rows = db.query(EntityAlias).filter(EntityAlias.scope_id == scope_id, EntityAlias.active.is_(True)).all()
@@ -348,6 +376,10 @@ def _process_claimed_job(job_id: str) -> None:
         db.commit()
         logger.info("Reconciliation started", extra={"attempt": job.attempts, "job_type": job.job_type})
         saved_aliases = _saved_aliases(db, job.session_id) if job.job_type == "generic" else []
+        # Reviewers' earlier decisions and the organization's auto-resolution
+        # rules, read once so every sheet rule of this job uses the same set.
+        learning = learning_service.build_context(db, job.session_id) if job.job_type == "generic" else None
+        resolution_rules = resolution_service.active_rule_configs(db, job.session_id) if job.job_type == "generic" else []
 
         def is_cancelled() -> bool:
             try:
@@ -528,6 +560,8 @@ def _process_claimed_job(job_id: str) -> None:
                         normalization=pair.get("normalization", {}),
                         date_dayfirst=bool(pair.get("date_dayfirst", True)),
                         saved_aliases=saved_aliases,
+                        resolution_rules=resolution_rules,
+                        learning=learning,
                     )
 
                 for k, v in res["summary"].items():
@@ -634,6 +668,10 @@ def _process_claimed_job(job_id: str) -> None:
         if job.job_type == "generic":
             report_summary["file_pairs"] = file_pair_manifest
             report_summary["sheet_rules"] = rule_manifest
+            # Which rule versions could resolve exceptions in this run.
+            report_summary["resolution_rules"] = [
+                {"id": rule["id"], "name": rule["name"], "version": rule["version"]} for rule in resolution_rules
+            ]
         report = Report(
             session_id=job.session_id,
             filename=output_name,
@@ -659,6 +697,12 @@ def _process_claimed_job(job_id: str) -> None:
             entity_id=job.id, summary=completion_message, after={"status": job.status, "report_id": report.id},
             metadata={key: value for key, value in summary.items() if isinstance(value, (int, float))},
         )
+        _record_auto_resolution(job, merged_ud)
+        try:
+            resolution_service.record_patterns(db, job.session_id, job.id, merged_ud)
+        except Exception:
+            db.rollback()
+            logger.warning("Could not record recurring exception patterns", exc_info=True)
 
         # Enforce maximum 20 stored records per session
         from app.services.job_service import prune_old_jobs
