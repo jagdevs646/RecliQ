@@ -73,6 +73,7 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
         {item.narrative_source && <label><span>Reference similarity (%)</span><input type="number" min={50} max={100} value={item.narrative_threshold} onChange={(event) => update(index, { narrative_threshold: Math.min(100, Math.max(50, Number(event.target.value))) })} /></label>}
       </div>
       {config.secondaryConditions.length > 0 && <label className="checkbox-line"><input type="checkbox" checked={item.respect_secondary_keys} onChange={(event) => update(index, { respect_secondary_keys: event.target.checked })} />The "must also match" columns must still agree in this pass</label>}
+      {item.date_source && config.secondaryConditions.some((condition) => condition.comparison_method === "normalized_date" && condition.source_column === item.date_source && condition.destination_column === item.date_destination) && <p className="field-hint">This pass's date window replaces the exact-date "must also match" check on {item.date_source}. Records whose key matched but whose date differed are re-checked here, only against the record with the same key.</p>}
     </div>)}
   </div>;
 }

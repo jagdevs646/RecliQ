@@ -2,6 +2,7 @@ import { AlertTriangle, Archive, CheckCircle2, History, Loader2, Play, UploadClo
 import { useEffect, useRef, useState } from "react";
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { precheckBlocked, precheckNeedsAcknowledgement, precheckSummary } from "../lib/plan";
+import { UPLOAD_ACCEPT } from "../lib/formats";
 import { api } from "../services/api";
 import type { GenericPlanPayload, Job, PrecheckResult, TemplateResolution, TemplateSummary, UploadedFile } from "../types";
 
@@ -47,7 +48,7 @@ export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation }: 
   }
 
   return <section className="page">
-    <div className="page-title"><div><span className="eyebrow">Reuse</span><h1>Saved reconciliations</h1><p>Run a saved setup on new files in one go. Columns are matched automatically when names change; anything uncertain is shown for you to choose.</p></div>
+    <div className="page-title"><div><span className="eyebrow">Reuse</span><h1>Saved setups</h1><p>Run a saved setup on new files in one go. Columns are matched automatically when names change; anything uncertain is shown for you to choose.</p></div>
       <button type="button" className="secondary" onClick={onNewReconciliation}>New setup</button></div>
     {message && <p className="error-text">{message}</p>}
     {loading ? <div className="loading-state"><Loader2 className="animate-spin" /> Loading…</div> : templates.length === 0
@@ -202,6 +203,6 @@ function FilePick({ label, hint, file, busy, onFile }: { label: string; hint: st
     <strong>{file ? file.original_filename : "No file chosen"}</strong>
     {hint && <small>Last time: {hint}</small>}
     <button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={busy}>{busy ? <Loader2 size={15} className="animate-spin" /> : <UploadCloud size={15} />}{file ? "Replace" : "Choose file"}</button>
-    <input ref={inputRef} className="visually-hidden" type="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.pdf,.docx" onChange={(event) => { const chosen = event.target.files?.item(0); if (chosen) onFile(chosen); event.currentTarget.value = ""; }} />
+    <input ref={inputRef} className="visually-hidden" type="file" accept={UPLOAD_ACCEPT} onChange={(event) => { const chosen = event.target.files?.item(0); if (chosen) onFile(chosen); event.currentTarget.value = ""; }} />
   </div>;
 }

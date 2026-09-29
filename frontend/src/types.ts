@@ -1,4 +1,4 @@
-export type Page = "dashboard" | "upload" | "status" | "results" | "history" | "saved" | "aliases" | "audit";
+export type Page = "dashboard" | "upload" | "status" | "results" | "history" | "saved" | "aliases" | "audit" | "rules" | "learning";
 
 export interface User {
   id: string;
@@ -324,6 +324,13 @@ export interface ReconciliationSummary {
   failed_rules?: number;
   keyless_matches?: number;
   normalized_matches?: number;
+  /** Exceptions explained by auto-resolution rules (see the Auto-resolved tab). */
+  auto_resolved?: number;
+  auto_resolved_only_in_file_1?: number;
+  auto_resolved_only_in_file_2?: number;
+  auto_resolved_differences?: number;
+  auto_confirmed_matches?: number;
+  resolution_rules?: Array<{ id: string; name: string; version: number }>;
   /** Job manifest (generic jobs): one entry per file pair and per sheet rule. */
   file_pairs?: FilePairManifest[];
   sheet_rules?: SheetRuleManifest[];
@@ -367,7 +374,83 @@ export interface ReportScope {
   sheetRuleId?: string;
 }
 
-export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review" | "exception_matches" | "ambiguous_matches" | "not_found";
+export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review" | "exception_matches" | "ambiguous_matches" | "not_found" | "auto_resolved";
+
+// ── Auto-resolution rules and learning ──────────────────────────────────
+export type RuleCategory = "only_in_source" | "only_in_destination" | "field_difference" | "to_confirm";
+
+export interface RuleCondition {
+  operator: string;
+  column?: string;
+  value?: string | number | null;
+  value_2?: string | number | null;
+}
+
+export interface RuleAction {
+  resolution: string;
+  reason_code?: string;
+  gl_account?: string;
+  note?: string;
+}
+
+export interface RuleDraft {
+  name: string;
+  description?: string;
+  category: RuleCategory;
+  conditions: RuleCondition[];
+  action: RuleAction;
+  enabled?: boolean;
+}
+
+export interface ResolutionRule extends RuleDraft {
+  id: string;
+  version: number;
+  priority: number;
+  enabled: boolean;
+  archived: boolean;
+  summary: string;
+  category_label: string;
+  updated_at: string | null;
+}
+
+export interface RuleCatalog {
+  categories: Array<{ id: RuleCategory; label: string }>;
+  operators: Array<{ id: string; label: string; group: "text" | "number" | "difference" | "confirmation"; categories: RuleCategory[] }>;
+}
+
+export interface RuleSuggestion {
+  kind: "recurring_exception" | "auto_confirm_method" | "auto_confirm_repeat_pairs" | "weak_method";
+  title: string;
+  detail: string;
+  evidence: Record<string, unknown>;
+  rule: RuleDraft | null;
+}
+
+export interface RulePreviewResult {
+  matches: number;
+  summary: string;
+  sample: Array<Record<string, string | number | boolean | null>>;
+}
+
+export interface MethodWeight {
+  method: string;
+  band: string;
+  accepted: number;
+  rejected: number;
+  total: number;
+  acceptance_rate: number;
+  lower_bound: number;
+  enough_evidence: boolean;
+}
+
+export interface LearningOverview {
+  minimum_evidence: number;
+  method_weights: MethodWeight[];
+  remembered_rejections: Array<{ value_1: string; value_2: string; method: string | null; job_id: string | null; rejected_on: string }>;
+  suggestions: RuleSuggestion[];
+  alias_suggestions: number;
+  confirmed_pairs: number;
+}
 
 export interface ReportPreview {
   category: PreviewCategory;
@@ -387,6 +470,7 @@ export interface ReportCustomConfig {
   include_missing_file_2: boolean;
   include_field_differences: boolean;
   include_controls: boolean;
+  include_auto_resolved?: boolean;
   date_format: string;
   number_format: string;
 }

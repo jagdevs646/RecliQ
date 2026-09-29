@@ -1,5 +1,6 @@
 import { CheckCircle2, FileSpreadsheet, UploadCloud } from "lucide-react";
 import { useRef, useState } from "react";
+import { UPLOAD_ACCEPT, UPLOAD_FORMATS_HINT } from "../lib/formats";
 
 interface Props {
   label: string;
@@ -28,10 +29,10 @@ export function FileDropzone({ label, fileName, fileSize, columnCount, uploading
   return (
     <article className={`upload-card ${dragging ? "is-dragging" : ""} ${fileName ? "is-ready" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); handleFiles(event.dataTransfer.files); }}>
       <div className="upload-card-header"><span>{label}</span>{fileName && <span className="uploaded-state"><CheckCircle2 size={15} />Uploaded</span>}</div>
-      {fileName ? <div className="file-ready"><FileSpreadsheet size={28} /><div><strong>{fileName}</strong><p>{formatBytes(fileSize)} {columnCount ? `· ${columnCount} columns detected` : ""}</p></div></div> : <div className="upload-empty"><UploadCloud size={30} /><strong>Drop a file here</strong><span>Excel, CSV, PDF, or Word</span></div>}
+      {fileName ? <div className="file-ready"><FileSpreadsheet size={28} /><div><strong>{fileName}</strong><p>{formatBytes(fileSize)} {columnCount ? `· ${columnCount} columns detected` : ""}</p></div></div> : <div className="upload-empty"><UploadCloud size={30} /><strong>Drop a file here</strong><span>{UPLOAD_FORMATS_HINT}</span></div>}
       {uploading && <div className="upload-progress"><div><span>Uploading</span><strong>{progress}%</strong></div><span><i style={{ width: `${progress}%` }} /></span></div>}
       <button type="button" className="secondary upload-button" onClick={() => inputRef.current?.click()} disabled={uploading}><UploadCloud size={16} />{fileName ? "Replace file" : "Choose file"}</button>
-      <input ref={inputRef} className="visually-hidden" type="file" accept=".xlsx,.xls,.csv,.pdf,.doc,.docx" onChange={(event) => handleFiles(event.target.files)} />
+      <input ref={inputRef} className="visually-hidden" type="file" accept={UPLOAD_ACCEPT} onChange={(event) => handleFiles(event.target.files)} />
     </article>
   );
 }

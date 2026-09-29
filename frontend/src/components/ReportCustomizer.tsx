@@ -44,8 +44,8 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
     <section className="page customizer-page">
       <div className="page-title">
         <div>
-          <span className="eyebrow">Report Customization</span>
-          <h1>Customize Your Report</h1>
+          <span className="eyebrow">Report settings</span>
+          <h1>Customize your report</h1>
           <p>Choose what to include in your final reconciliation report.</p>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
@@ -63,10 +63,10 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
         <div className="checklist-panel">
           <div className="checklist-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Settings2 size={18} color="#087d72" />
-              <strong>Report Contents</strong>
+              <Settings2 size={18} style={{ color: "var(--color-primary)" }} />
+              <strong>Report contents</strong>
             </div>
-            <span className="eyebrow">{selectedCount} Selected</span>
+            <span className="eyebrow">{selectedCount} selected</span>
           </div>
           <div className="checklist-items" style={{ maxHeight: 'none', padding: '12px' }}>
             <label className="checkbox-row">
@@ -106,7 +106,7 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
           </div>
           <div style={{ padding: '16px', display: 'grid', gap: '16px' }}>
             <label>
-              <span>Number Format</span>
+              <span>Number format</span>
               <select value={config.number_format} onChange={(e) => handleChange("number_format", e.target.value)}>
                 <option value="#,##0.00">1,234.56 (Decimal)</option>
                 <option value="#,##0">1,235 (Integer)</option>
@@ -114,7 +114,7 @@ export function ReportCustomizer({ source1Name = "Source 1", source2Name = "Sour
               </select>
             </label>
             <label>
-              <span>Date Format</span>
+              <span>Date format</span>
               <select value={config.date_format} onChange={(e) => handleChange("date_format", e.target.value)}>
                 <option value="YYYY-MM-DD">YYYY-MM-DD</option>
                 <option value="DD-MM-YYYY">DD-MM-YYYY</option>

@@ -2,6 +2,7 @@ import { CheckCircle2, Clock3, FileSpreadsheet, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../services/api";
 import type { Job } from "../types";
+import { OpenJobButton } from "../components/OpenJobButton";
 import { StatusBadge } from "../components/StatusBadge";
 
 interface Props {
@@ -24,12 +25,13 @@ export function DashboardPage({ onNavigateUpload, onOpenJob }: Props) {
     <section className="page">
       <div className="page-title">
         <div>
+          <span className="eyebrow">Overview</span>
           <h1>Dashboard</h1>
           <p>Recent reconciliation activity and report readiness.</p>
         </div>
         <button className="primary" type="button" onClick={onNavigateUpload}>
           <FileSpreadsheet size={18} />
-          New Reconciliation
+          New reconciliation
         </button>
       </div>
 
@@ -40,29 +42,31 @@ export function DashboardPage({ onNavigateUpload, onOpenJob }: Props) {
       </div>
 
       <div className="table-panel">
-        <h2>Latest Jobs</h2>
-        <table>
-          <thead>
-            <tr>
-              <th>Type</th>
-              <th>Files</th>
-              <th>Status</th>
-              <th>Progress</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {jobs.slice(0, 8).map((job) => (
-              <tr key={job.id} onClick={() => onOpenJob(job)}>
-                <td>{job.job_type === "gst" ? "GST Invoices" : "General"}</td>
-                <td>{job.input_file_1_name && job.input_file_2_name ? `${job.input_file_1_name} vs ${job.input_file_2_name}${(job.file_pair_count ?? 1) > 1 ? ` +${(job.file_pair_count ?? 1) - 1} more pair${(job.file_pair_count ?? 1) > 2 ? "s" : ""}` : ""}` : "—"}</td>
-                <td><StatusBadge status={job.status} /></td>
-                <td>{job.progress}%</td>
-                <td>{new Date(job.created_at).toLocaleString()}</td>
+        <h2>Latest reconciliations</h2>
+        <div className="table-scroll-x">
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Files</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Created</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {jobs.slice(0, 8).map((job) => (
+                <tr key={job.id} className="clickable-row" onClick={() => onOpenJob(job)}>
+                  <td>{job.job_type === "gst" ? "GST invoices" : "General"}</td>
+                  <td className="cell-files"><OpenJobButton job={job} onOpen={onOpenJob} /></td>
+                  <td><StatusBadge status={job.status} /></td>
+                  <td>{job.progress}%</td>
+                  <td>{new Date(job.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );

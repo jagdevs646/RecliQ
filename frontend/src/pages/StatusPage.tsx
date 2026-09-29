@@ -101,7 +101,9 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
         <div>
           <span className="eyebrow">Live reconciliation</span>
           <h1>
-            {["completed", "completed_with_errors"].includes(job?.status ?? "")
+            {!job
+              ? "No reconciliation running"
+              : ["completed", "completed_with_errors"].includes(job.status)
               ? "Your report is ready"
               : job?.status === "cancelled"
               ? "Reconciliation cancelled"
@@ -110,8 +112,10 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
               : "Reconciling your workbooks"}
           </h1>
           <p>
-            {job?.status === "cancelled"
-              ? "This reconciliation was aborted before completion. No report was generated."
+            {!job
+              ? "Start a reconciliation, or open a queued or running one from the Dashboard or History, to follow it here."
+              : job.status === "cancelled"
+              ? "This reconciliation was stopped before completion. No report was generated."
               : "RecliQ updates this page automatically while your report is being generated."}
           </p>
         </div>
@@ -125,19 +129,19 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
               style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
             >
               {cancelling ? <Loader2 size={16} className="animate-spin" /> : <Ban size={16} />}
-              Abort Reconciliation
+              Abort reconciliation
             </button>
           )}
-          <button type="button" className="secondary" onClick={refresh} disabled={!job || busy}>
-            <RefreshCw size={16} />
-            Refresh
-          </button>
+          {job && (
+            <button type="button" className="secondary" onClick={refresh} disabled={busy}>
+              <RefreshCw size={16} />
+              Refresh
+            </button>
+          )}
         </div>
       </div>
 
-      {!job ? (
-        <div className="empty-state">No active job selected.</div>
-      ) : (<>
+      {!job ? null : (<>
         <div className="status-layout">
           <div className="live-progress-card">
             <div className="progress-heading">
@@ -184,7 +188,7 @@ export function StatusPage({ job, onJobUpdate, onViewResults }: Props) {
               <button
                 type="button"
                 className="text-command centered"
-                style={{ color: "#ef4444", marginTop: "1rem" }}
+                style={{ color: "var(--color-danger)", marginTop: "1rem" }}
                 onClick={handleAbort}
                 disabled={cancelling}
               >

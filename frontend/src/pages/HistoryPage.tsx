@@ -1,5 +1,6 @@
 import { Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { OpenJobButton } from "../components/OpenJobButton";
 import { StatusBadge } from "../components/StatusBadge";
 import { api } from "../services/api";
 import type { Job } from "../types";
@@ -66,37 +67,32 @@ export function HistoryPage({ onOpenJob }: Props) {
     <section className="page">
       <div className="page-title">
         <div>
+          <span className="eyebrow">Overview</span>
           <h1>History</h1>
-          <p>
-            Past reconciliation jobs and reports. Storage automatically retains a maximum of 20 completed records.
-          </p>
+          <p>Past reconciliations and their reports. The latest 20 are kept.</p>
         </div>
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-          {jobs.length > 0 && (
-            <button
-              type="button"
-              className="danger-button"
-              onClick={handleClearAll}
-              disabled={busy}
-              style={{ display: "inline-flex", alignItems: "center", gap: "0.4rem" }}
-            >
-              <Trash2 size={16} />
-              Clear History
-            </button>
-          )}
+        {/* Clearing everything is rare and destructive: a quiet command, not the page's main button. */}
+        <div className="page-actions">
           <button type="button" className="secondary" onClick={load} disabled={busy}>
             <RefreshCw size={16} />
             Refresh
           </button>
+          {jobs.length > 0 && (
+            <button type="button" className="text-command is-danger" onClick={handleClearAll} disabled={busy}>
+              <Trash2 size={16} />
+              Clear history
+            </button>
+          )}
         </div>
       </div>
 
       {message && <p className="info-text" style={{ marginBottom: "1rem" }}>{message}</p>}
 
       <div className="table-panel">
-        <div style={{ padding: "0.75rem 1rem", borderBottom: "1px solid var(--color-border, #e2e8f0)", color: "var(--color-muted, #64748b)", fontSize: "0.875rem" }}>
+        <div className="table-caption">
           Stored records: <strong>{jobs.length}</strong> / 20 max
         </div>
+        <div className="table-scroll-x">
         <table>
           <thead>
             <tr>
@@ -112,25 +108,25 @@ export function HistoryPage({ onOpenJob }: Props) {
           <tbody>
             {jobs.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ textAlign: "center", padding: "2rem", color: "var(--color-muted, #64748b)" }}>
+                <td colSpan={7} className="table-empty">
                   No past reconciliation records found.
                 </td>
               </tr>
             ) : (
               jobs.map((job) => (
-                <tr key={job.id} onClick={() => onOpenJob(job)} style={{ cursor: "pointer" }}>
+                <tr key={job.id} className="clickable-row" onClick={() => onOpenJob(job)}>
                   <td><strong>{job.id.slice(0, 8)}</strong></td>
-                  <td>{job.job_type === "gst" ? "GST Invoices" : "General"}</td>
-                  <td>{job.input_file_1_name && job.input_file_2_name ? `${job.input_file_1_name} vs ${job.input_file_2_name}${(job.file_pair_count ?? 1) > 1 ? ` +${(job.file_pair_count ?? 1) - 1} more pair${(job.file_pair_count ?? 1) > 2 ? "s" : ""}` : ""}` : "—"}</td>
+                  <td>{job.job_type === "gst" ? "GST invoices" : "General"}</td>
+                  <td className="cell-files"><OpenJobButton job={job} onOpen={onOpenJob} /></td>
                   <td><StatusBadge status={job.status} /></td>
                   <td>{job.progress}%</td>
                   <td>{new Date(job.created_at).toLocaleString()}</td>
                   <td style={{ textAlign: "center" }}>
                     <button
                       type="button"
-                      className="icon-button"
+                      className="icon-button is-danger"
                       title="Delete record"
-                      style={{ color: "#ef4444" }}
+                      aria-label={`Delete record ${job.id.slice(0, 8)}`}
                       disabled={deletingId === job.id}
                       onClick={(e) => handleDelete(e, job.id)}
                     >
@@ -142,6 +138,7 @@ export function HistoryPage({ onOpenJob }: Props) {
             )}
           </tbody>
         </table>
+        </div>
       </div>
     </section>
   );

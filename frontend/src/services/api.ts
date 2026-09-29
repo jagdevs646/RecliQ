@@ -1,4 +1,4 @@
-import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
+import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -207,8 +207,46 @@ export class ApiClient {
     await this.request(`/aliases/${aliasId}`, { method: "DELETE" });
   }
 
-  async recordDecision(payload: { value_1: string; value_2: string; decision: "accept" | "reject"; job_id?: string; column_hint?: string; confidence?: number; note?: string }): Promise<void> {
+  /** "reset" withdraws earlier decisions on the pair (e.g. a rejection made by mistake). */
+  async recordDecision(payload: { value_1: string; value_2: string; decision: "accept" | "reject" | "reset"; job_id?: string; column_hint?: string; confidence?: number; note?: string; method?: string }): Promise<void> {
     await this.request("/aliases/decisions", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  // ── Auto-resolution rules and learning ────────────────────────────────
+  async ruleCatalog(): Promise<RuleCatalog> {
+    return this.request<RuleCatalog>("/resolution-rules/catalog");
+  }
+
+  async listRules(): Promise<ResolutionRule[]> {
+    return (await this.request<{ rules: ResolutionRule[] }>("/resolution-rules")).rules;
+  }
+
+  async createRule(rule: RuleDraft): Promise<ResolutionRule> {
+    return this.request<ResolutionRule>("/resolution-rules", { method: "POST", body: JSON.stringify(rule) });
+  }
+
+  async updateRule(ruleId: string, changes: Partial<RuleDraft>): Promise<ResolutionRule> {
+    return this.request<ResolutionRule>(`/resolution-rules/${ruleId}`, { method: "PUT", body: JSON.stringify(changes) });
+  }
+
+  async archiveRule(ruleId: string): Promise<void> {
+    await this.request(`/resolution-rules/${ruleId}`, { method: "DELETE" });
+  }
+
+  async reorderRules(ruleIds: string[]): Promise<ResolutionRule[]> {
+    return (await this.request<{ rules: ResolutionRule[] }>("/resolution-rules/order", { method: "POST", body: JSON.stringify({ rule_ids: ruleIds }) })).rules;
+  }
+
+  async previewRule(jobId: string, rule: RuleDraft): Promise<RulePreviewResult> {
+    return this.request<RulePreviewResult>("/resolution-rules/preview", { method: "POST", body: JSON.stringify({ job_id: jobId, rule }) });
+  }
+
+  async ruleSuggestions(): Promise<{ minimum_reconciliations: number; suggestions: RuleSuggestion[] }> {
+    return this.request("/resolution-rules/suggestions");
+  }
+
+  async learningOverview(): Promise<LearningOverview> {
+    return this.request<LearningOverview>("/learning");
   }
 
   async aliasSuggestions(): Promise<{ minimum_acceptances: number; suggestions: AliasSuggestion[] }> {

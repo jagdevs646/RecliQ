@@ -10,6 +10,8 @@ import { UploadPage } from "./pages/UploadPage";
 import { SavedReconciliationsPage } from "./pages/SavedReconciliationsPage";
 import { AliasesPage } from "./pages/AliasesPage";
 import { AuditLogPage } from "./pages/AuditLogPage";
+import { ResolutionRulesPage } from "./pages/ResolutionRulesPage";
+import { LearningPage } from "./pages/LearningPage";
 
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
@@ -21,7 +23,14 @@ export default function App() {
   }, []);
 
   if (!sessionReady) {
-    return <div className="app-loading">Loading RecliQ...</div>;
+    return (
+      <div className="app-loading" role="status" aria-live="polite">
+        <img src="/icon.ico" alt="" className="app-loading-logo" />
+        <strong>RecliQ</strong>
+        <span className="app-loading-bar" aria-hidden="true" />
+        <small>Getting your workspace ready…</small>
+      </div>
+    );
   }
 
   function openJob(job: Job) {
@@ -46,6 +55,8 @@ export default function App() {
       {page === "saved" && <SavedReconciliationsPage onJobCreated={(job) => { setActiveJob(job); setPage("status"); }} onNewReconciliation={() => setPage("upload")} />}
       {page === "aliases" && <AliasesPage />}
       {page === "audit" && <AuditLogPage />}
+      {page === "rules" && <ResolutionRulesPage />}
+      {page === "learning" && <LearningPage onNavigate={setPage} />}
     </Shell>
   );
 }

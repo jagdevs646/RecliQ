@@ -12,10 +12,10 @@ import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingS
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { DatesAndNamesSettings, MatchingPassesEditor, TransformationsEditor } from "../components/RuleExtras";
 import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, ruleIsReady, ruleStatus } from "../lib/plan";
+import { UPLOAD_ACCEPT } from "../lib/formats";
 import { api } from "../services/api";
 import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
-const UPLOAD_ACCEPT = ".xlsx,.xls,.csv,.tsv,.txt,.pdf,.docx";
 
 interface Props {
   onJobCreated: (job: Job) => void;
@@ -361,7 +361,7 @@ export function UploadPage({ onJobCreated }: Props) {
     }
     try {
       await api.createTemplate({ name: templateName.trim(), plan: genericPlan() });
-      setTemplateMessage(`Saved as "${templateName.trim()}". Re-run it on next month's files from Saved reconciliations.`);
+      setTemplateMessage(`Saved as "${templateName.trim()}". Re-run it on next month's files from Saved setups.`);
       setTemplateName("");
     } catch (error) {
       setTemplateMessage(error instanceof Error ? error.message : "Could not save the reconciliation.");
@@ -550,7 +550,7 @@ function GstMatchingKeyStep({ config, missingFile1, missingFile2, error, file1Na
 
 function RulePanel({ index, title, status, ready, children }: { index: number; title: string; status: string; ready: boolean; children: React.ReactNode }) {
   return <details className="rule-panel" open>
-    <summary>{ready ? <CheckCircle2 size={16} color="#087d72" /> : <AlertTriangle size={16} color="#b97a10" />}Rule {index + 1} · {title}<small>{status}</small></summary>
+    <summary>{ready ? <CheckCircle2 size={16} style={{ color: "var(--color-primary)" }} /> : <AlertTriangle size={16} style={{ color: "var(--color-warning)" }} />}Rule {index + 1} · {title}<small>{status}</small></summary>
     <div className="rule-panel-body">{children}</div>
   </details>;
 }
