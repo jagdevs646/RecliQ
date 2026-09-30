@@ -2,6 +2,7 @@
   "name": "recliq-frontend",
   "version": "1.0.0",
   "private": true,
+  "license": "UNLICENSED",
   "type": "module",
   "packageManager": "pnpm@9.15.5",
   "scripts": {
