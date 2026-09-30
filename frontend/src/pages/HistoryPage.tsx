@@ -2,6 +2,7 @@ import { Loader2, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { OpenJobButton } from "../components/OpenJobButton";
 import { StatusBadge } from "../components/StatusBadge";
+import { formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { Job } from "../types";
 
@@ -120,7 +121,7 @@ export function HistoryPage({ onOpenJob }: Props) {
                   <td className="cell-files"><OpenJobButton job={job} onOpen={onOpenJob} /></td>
                   <td><StatusBadge status={job.status} /></td>
                   <td>{job.progress}%</td>
-                  <td>{new Date(job.created_at).toLocaleString()}</td>
+                  <td>{formatServerTime(job.created_at)}</td>
                   <td style={{ textAlign: "center" }}>
                     <button
                       type="button"

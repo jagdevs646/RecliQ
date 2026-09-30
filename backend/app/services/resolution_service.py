@@ -14,6 +14,7 @@ from app.reconciliation_engine.cache import normalize_header, to_number
 from app.reconciliation_engine.learning import LearningContext
 from app.reconciliation_engine.resolution import CATEGORIES, Evaluator, compile_rule, describe_rule, text_signature
 from app.services.audit_service import AuditActor, record_event
+from app.utils.timestamps import iso_utc
 
 MIN_JOBS_FOR_SUGGESTION = 3
 MAX_SIGNATURES_PER_JOB = 200
@@ -51,8 +52,8 @@ def rule_out(rule: ResolutionRule) -> dict:
         "category_label": CATEGORIES.get(rule.category, rule.category),
         "created_by": rule.created_by,
         "updated_by": rule.updated_by,
-        "created_at": rule.created_at.isoformat() if rule.created_at else None,
-        "updated_at": rule.updated_at.isoformat() if rule.updated_at else None,
+        "created_at": iso_utc(rule.created_at),
+        "updated_at": iso_utc(rule.updated_at),
     }
 
 

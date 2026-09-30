@@ -1,5 +1,6 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportCustomConfig, ReportScope } from "../types";
 import { ReportCustomizer } from "../components/ReportCustomizer";
@@ -178,7 +179,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) 
   }
 
   // Say which run this is: the files compared and when it finished.
-  const finishedAt = new Date(job.completed_at ?? job.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  const finishedAt = formatServerTime(job.completed_at ?? job.created_at, { dateStyle: "medium", timeStyle: "short" });
   const runTitle = isMultiPair ? `${filePairs.length} file pairs` : `${job.input_file_1_name ?? file1Name} vs ${job.input_file_2_name ?? file2Name}`;
   const runDetail = `${job.job_type === "gst" ? "GST reconciliation" : "General reconciliation"} · finished ${finishedAt}${isMultiPair ? " · each pair has its own workbook" : ""}`;
 

@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp, Eye, Lightbulb, Loader2, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { formatServerTime } from "../lib/formats";
 import { COLUMN_GROUPS, EMPTY_RULE, NO_VALUE_OPERATORS, NUMBER_VALUE_OPERATORS, cleanDraft, defaultConditions } from "../lib/rules";
 import { api } from "../services/api";
 import type { Job, ResolutionRule, RuleCatalog, RuleCategory, RuleCondition, RuleDraft, RulePreviewResult, RuleSuggestion } from "../types";
@@ -163,7 +164,7 @@ export function ResolutionRulesPage() {
       <div className="rule-test">
         <label className="stacked-field"><span>Test on a finished reconciliation</span><select value={previewJob} onChange={(event) => { setPreviewJob(event.target.value); setPreviewResult(null); }}>
           {jobs.length === 0 && <option value="">No finished reconciliations yet</option>}
-          {jobs.map((job) => <option key={job.id} value={job.id}>{job.input_file_1_name ?? "File 1"} vs {job.input_file_2_name ?? "File 2"} · {new Date(job.created_at).toLocaleString()}</option>)}
+          {jobs.map((job) => <option key={job.id} value={job.id}>{job.input_file_1_name ?? "File 1"} vs {job.input_file_2_name ?? "File 2"} · {formatServerTime(job.created_at)}</option>)}
         </select></label>
         <button type="button" className="secondary" onClick={runPreview} disabled={!previewJob || busy}><Eye size={15} />Test rule</button>
         <button type="button" className="primary" onClick={save} disabled={busy}>{busy ? <Loader2 className="animate-spin" size={15} /> : <Save size={15} />}{editingId ? "Save as new version" : "Save rule"}</button>

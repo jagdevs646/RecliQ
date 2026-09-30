@@ -11,6 +11,7 @@ from app.schemas.job import JobListResponse, JobPlanResponse, ReconciliationJobO
 from app.storage import get_storage
 from app.services.audit_service import AuditActor, record_event
 from app.services.job_service import PlanUnavailable, cancel_job, clear_all_jobs, delete_job, get_job, job_plan, list_jobs
+from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -105,7 +106,7 @@ def delete_reconciliation_job(
     existing = get_job(db, job_id, session_id)
     before = (
         {"status": existing.status, "job_type": existing.job_type, "report_id": existing.report_id,
-         "created_at": existing.created_at.isoformat() if existing.created_at else None}
+         "created_at": iso_utc(existing.created_at)}
         if existing else None
     )
     success = delete_job(db, job_id, session_id, storage=storage)

@@ -1,6 +1,6 @@
-from datetime import datetime
-
 from pydantic import BaseModel
+
+from app.utils.timestamps import UtcDatetime
 
 
 class UploadedFileOut(BaseModel):
@@ -9,7 +9,7 @@ class UploadedFileOut(BaseModel):
     content_type: str | None
     size_bytes: int
     storage_backend: str
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 

@@ -2,7 +2,7 @@ import { AlertTriangle, Archive, CheckCircle2, History, Loader2, Play, UploadClo
 import { useEffect, useRef, useState } from "react";
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { precheckBlocked, precheckNeedsAcknowledgement, precheckSummary } from "../lib/plan";
-import { UPLOAD_ACCEPT } from "../lib/formats";
+import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { GenericPlanPayload, Job, PrecheckResult, TemplateResolution, TemplateSummary, UploadedFile } from "../types";
 
@@ -14,7 +14,7 @@ interface Props {
 type Overrides = Record<string, Record<string, Record<string, string>>>;
 
 function formatDate(value: string | null): string {
-  return value ? new Date(value).toLocaleString() : "Never";
+  return formatServerTime(value, undefined, "Never");
 }
 
 export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation }: Props) {

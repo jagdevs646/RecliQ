@@ -2,6 +2,7 @@ import { Download, Loader2, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
 import { api } from "../services/api";
 import { AUDIT_ACTIONS, auditActionLabel } from "../lib/audit";
+import { formatServerTime } from "../lib/formats";
 import type { AuditEvent } from "../types";
 
 const PAGE_SIZE = 50;
@@ -51,7 +52,7 @@ export function AuditLogPage() {
       {loading ? <tr><td colSpan={6}><Loader2 size={16} className="animate-spin" /> Loading…</td></tr> : events.length === 0 ? <tr><td colSpan={6}>No entries.</td></tr> : events.map((event) => <Fragment key={event.event_id}>
         <tr onClick={() => setOpen(open === event.sequence ? null : event.sequence)} className="clickable-row">
           {/* The number opens the entry's details from the keyboard as well. */}
-          <td><button type="button" className="row-link" aria-expanded={open === event.sequence} title="Show before and after values" onClick={(clicked) => { clicked.stopPropagation(); setOpen(open === event.sequence ? null : event.sequence); }}>{event.sequence}</button></td><td>{event.occurred_at.replace("T", " ").slice(0, 19)}</td><td title={event.action}>{auditActionLabel(event.action)}</td><td>{event.summary}</td>
+          <td><button type="button" className="row-link" aria-expanded={open === event.sequence} title="Show before and after values" onClick={(clicked) => { clicked.stopPropagation(); setOpen(open === event.sequence ? null : event.sequence); }}>{event.sequence}</button></td><td title={event.occurred_at}>{formatServerTime(event.occurred_at)}</td><td title={event.action}>{auditActionLabel(event.action)}</td><td>{event.summary}</td>
           <td>{event.actor_type === "system" ? `System (${event.actor_id})` : `Session ${event.actor_id.slice(0, 8)}…`}</td><td>{event.entity_type}{event.entity_id ? ` ${event.entity_id.slice(0, 8)}…` : ""}</td>
         </tr>
         {open === event.sequence && <tr className="detail-row"><td colSpan={6}><pre>{JSON.stringify({ before: event.before, after: event.after, metadata: event.metadata, ip: event.ip_address, request_id: event.request_id }, null, 2)}</pre></td></tr>}

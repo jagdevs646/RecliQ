@@ -1,16 +1,16 @@
-from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
 
 from app.schemas.file import UploadedFileOut
+from app.utils.timestamps import UtcDatetime
 
 
 class ReportOut(BaseModel):
     id: str
     filename: str
     size_bytes: int
-    created_at: datetime
+    created_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -28,9 +28,9 @@ class ReconciliationJobOut(BaseModel):
     input_file_2_name: str | None = None
     file_pair_count: int = 1
     report_id: str | None
-    created_at: datetime
-    started_at: datetime | None
-    completed_at: datetime | None
+    created_at: UtcDatetime
+    started_at: UtcDatetime | None
+    completed_at: UtcDatetime | None
     attempts: int = 0
     template_id: str | None = None
     template_version: int | None = None

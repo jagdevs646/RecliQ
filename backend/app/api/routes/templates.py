@@ -12,6 +12,7 @@ from app.schemas.template import TemplateConfig, TemplateCreate, TemplateRunRequ
 from app.services import template_service
 from app.services.audit_service import AuditActor, record_event
 from app.services.reconciliation_service import enqueue_generic_job
+from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 
@@ -24,15 +25,15 @@ def _template_out(db: Session, template: ReconciliationTemplate, include_config:
         "description": template.description,
         "current_version": template.current_version,
         "archived": template.archived,
-        "created_at": template.created_at.isoformat() if template.created_at else None,
-        "updated_at": template.updated_at.isoformat() if template.updated_at else None,
-        "last_run_at": template.last_run_at.isoformat() if template.last_run_at else None,
+        "created_at": iso_utc(template.created_at),
+        "updated_at": iso_utc(template.updated_at),
+        "last_run_at": iso_utc(template.last_run_at),
         "summary": template_service.summarize(config),
     }
     if include_config:
         payload["config"] = config.model_dump()
         payload["versions"] = [
-            {"version": row.version, "change_note": row.change_note, "created_at": row.created_at.isoformat() if row.created_at else None, "created_by": row.created_by}
+            {"version": row.version, "change_note": row.change_note, "created_at": iso_utc(row.created_at), "created_by": row.created_by}
             for row in db.query(ReconciliationTemplateVersion)
             .filter(ReconciliationTemplateVersion.template_id == template.id)
             .order_by(ReconciliationTemplateVersion.version.desc())

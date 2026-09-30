@@ -1,5 +1,6 @@
 import { CheckCircle2, Clock3, FileSpreadsheet, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
+import { formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { Job } from "../types";
 import { OpenJobButton } from "../components/OpenJobButton";
@@ -61,7 +62,7 @@ export function DashboardPage({ onNavigateUpload, onOpenJob }: Props) {
                   <td className="cell-files"><OpenJobButton job={job} onOpen={onOpenJob} /></td>
                   <td><StatusBadge status={job.status} /></td>
                   <td>{job.progress}%</td>
-                  <td>{new Date(job.created_at).toLocaleString()}</td>
+                  <td>{formatServerTime(job.created_at)}</td>
                 </tr>
               ))}
             </tbody>

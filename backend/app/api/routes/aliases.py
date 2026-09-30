@@ -8,6 +8,7 @@ from app.models.alias import EntityAlias, MatchDecision
 from app.reconciliation_engine.normalization.entities import EntityNormalizer
 from app.services import alias_service
 from app.services.audit_service import AuditActor
+from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/aliases", tags=["aliases"])
 
@@ -48,7 +49,7 @@ def _alias_out(alias: EntityAlias) -> dict:
         "column_hint": alias.column_hint,
         "active": alias.active,
         "source": alias.source,
-        "created_at": alias.created_at.isoformat() if alias.created_at else None,
+        "created_at": iso_utc(alias.created_at),
     }
 
 
@@ -119,7 +120,7 @@ def list_decisions(job_id: str | None = None, db: Session = Depends(get_db), ses
             {
                 "id": row.id, "job_id": row.job_id, "value_1": row.value_1, "value_2": row.value_2,
                 "decision": row.decision, "confidence": row.confidence, "column_hint": row.column_hint, "method": row.method,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "created_at": iso_utc(row.created_at),
             }
             for row in query.order_by(MatchDecision.created_at.desc()).limit(500).all()
         ]

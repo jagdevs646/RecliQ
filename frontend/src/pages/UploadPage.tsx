@@ -12,7 +12,7 @@ import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingS
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { DatesAndNamesSettings, MatchingPassesEditor, ToleranceEditor, TransformationsEditor } from "../components/RuleExtras";
 import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, ruleIsReady, ruleStatus, sheetRuleToDraft } from "../lib/plan";
-import { UPLOAD_ACCEPT } from "../lib/formats";
+import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
@@ -537,7 +537,7 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
 
   return <section className="page workflow-page">
     <div className="page-title workflow-title">{rerunOf
-      ? <div><span className="eyebrow">Run again</span><h1>Change the rules</h1><p>{rerunOf.input_file_1_name ?? "File 1"} vs {rerunOf.input_file_2_name ?? "File 2"}, loaded with the rules from your run of {new Date(rerunOf.completed_at ?? rerunOf.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}. Change what you need and run again; the earlier run stays in History.</p>{onStartFresh && <button type="button" className="text-command" onClick={onStartFresh}>Start with new files instead</button>}</div>
+      ? <div><span className="eyebrow">Run again</span><h1>Change the rules</h1><p>{rerunOf.input_file_1_name ?? "File 1"} vs {rerunOf.input_file_2_name ?? "File 2"}, loaded with the rules from your run of {formatServerTime(rerunOf.completed_at ?? rerunOf.created_at, { dateStyle: "medium", timeStyle: "short" })}. Change what you need and run again; the earlier run stays in History.</p>{onStartFresh && <button type="button" className="text-command" onClick={onStartFresh}>Start with new files instead</button>}</div>
       : <div><span className="eyebrow">New reconciliation</span><h1>Set up your comparison</h1><p>Six clear steps from Excel files to a downloadable reconciliation report.</p></div>}<span className="workflow-status">Step {step} of 6</span></div>
     <WorkflowSteps current={step} completedThrough={completedThrough} onSelect={setStep} />
     <div className="workflow-panel">
