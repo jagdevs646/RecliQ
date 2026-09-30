@@ -4,8 +4,11 @@ import {
   copyRuleSettings,
   derivedColumns,
   describePass,
+  describeTolerance,
   draftToSheetRule,
   emptyDraft,
+  limitsFromPasses,
+  mappingIsReady,
   newPass,
   precheckBlocked,
   precheckNeedsAcknowledgement,
@@ -19,6 +22,59 @@ import type { PrecheckResult, SheetRuleDraft } from "../types";
 function draft(overrides: Partial<SheetRuleDraft> = {}): SheetRuleDraft {
   return { ...emptyDraft(["INVOICE", "VENDOR", "AMOUNT", "DATE", "DEBIT", "CREDIT"], ["INVOICE NO", "VENDOR", "AMOUNT", "DATE"], null), ...overrides };
 }
+
+describe("tolerance bands", () => {
+  const mapped = () => draft({
+    primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"],
+    rules: [{ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }, { file_1_fields: ["DATE"], file_2_fields: ["DATE"] }],
+  });
+
+  it("need a compared field and a limit above 0 before the mapping step is complete", () => {
+    const config = mapped();
+    expect(mappingIsReady(config)).toBe(true);
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "DEBIT", amount: null, percent: null, days: null }] })).toBe(false);
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "DEBIT", amount: 0.05 }] })).toBe(true);
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "*", days: 3 }] })).toBe(true);
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "CREDIT", amount: 1 }] })).toBe(false); // Not compared.
+  });
+
+  it("are sent with the sheet rule, empty limits as null", () => {
+    const config = { ...mapped(), tolerances: [{ field: "DEBIT", amount: 0.05, percent: 0, days: null }] };
+    const rule = draftToSheetRule(config, { sheetRuleId: "r", sourceSheet: "a", destinationSheet: "b", label: "L" });
+    expect(rule.tolerances).toEqual([{ field: "DEBIT", amount: 0.05, percent: null, days: null, similarity: null }]);
+  });
+
+  it("are copied only for fields the target rule still compares", () => {
+    const source = { ...mapped(), tolerances: [{ field: "DEBIT", amount: 1 }, { field: "*", days: 2 }] };
+    const target = draft({ file1Columns: ["INVOICE", "DATE"], file2Columns: ["INVOICE NO", "DATE"] });
+    expect(copyRuleSettings(source, target).tolerances).toEqual([{ field: "*", days: 2 }]);
+  });
+
+  it("can be taken from a step-3 pass, comparing the pass's date columns if needed", () => {
+    const config = mapped();
+    config.rules = [{ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }, { file_1_fields: ["VENDOR"], file_2_fields: ["VENDOR"] }];
+    config.matchingPasses = [{
+      ...newPass("amount_tolerance", config), amount_source: "DEBIT", amount_destination: "AMOUNT", amount_tolerance: 5, amount_tolerance_percent: 10,
+      date_source: "DATE", date_destination: "DATE", date_window_days: 3, narrative_source: "VENDOR", narrative_destination: "VENDOR", narrative_threshold: 75,
+    }];
+    const { tolerances, rules } = limitsFromPasses(config);
+    expect(tolerances).toEqual([
+      { field: "DEBIT", amount: 5, percent: 10 },
+      { field: "DATE", days: 3 },
+      { field: "VENDOR", similarity: 75 },
+    ]);
+    expect(rules).toContainEqual({ file_1_fields: ["DATE"], file_2_fields: ["DATE"] });
+    expect(mappingIsReady({ ...config, rules, tolerances })).toBe(true);
+    // Once applied, nothing is suggested again.
+    expect(limitsFromPasses({ ...config, rules, tolerances }).tolerances).toEqual([]);
+  });
+
+  it("are described in words", () => {
+    expect(describeTolerance({ field: "NARRATION", similarity: 75 })).toBe("NARRATION: text at least 75% similar");
+    expect(describeTolerance({ field: "DEBIT", amount: 0.05, percent: 1 })).toBe("DEBIT: ±0.05 or ±1%");
+    expect(describeTolerance({ field: "*", days: 1 })).toBe("Every compared field: ±1 day");
+  });
+});
 
 describe("rule readiness", () => {
   it("requires a key, unless a complete amount/date pass is configured", () => {

@@ -80,6 +80,17 @@ export interface MatchingPass {
   respect_secondary_keys: boolean;
 }
 
+/** Differences small enough to accept, applied after matching. */
+export interface ToleranceBand {
+  /** A compared field (its source column(s), as mapped), or "*" for every compared field. */
+  field: string;
+  amount?: number | null;
+  percent?: number | null;
+  days?: number | null;
+  /** Text: accepted when at least this % similar (the report's Similarity). */
+  similarity?: number | null;
+}
+
 export interface NormalizationSettings {
   legal_forms: boolean;
   abbreviations: boolean;
@@ -109,6 +120,7 @@ export interface SheetRuleDraft {
   matchingPasses: MatchingPass[];
   normalization: NormalizationSettings;
   dateFormat: DateFormat;
+  tolerances: ToleranceBand[];
 }
 
 /** One sheet rule as sent to the API (canonical plan). */
@@ -130,6 +142,7 @@ export interface SheetRulePayload {
   include_columns_file_2: string[];
   transformations: TransformationStep[];
   date_format: DateFormat;
+  tolerances: ToleranceBand[];
   report_label: string;
 }
 
@@ -315,6 +328,9 @@ export interface ReconciliationSummary {
   destination_records?: number;
   matched_records?: number;
   fully_matched_records?: number;
+  /** Records whose only differences were within the rule's tolerance. */
+  within_tolerance_records?: number;
+  within_tolerance_fields?: number;
   exact_matches?: number;
   exception_matches?: number;
   ambiguous_matches?: number;

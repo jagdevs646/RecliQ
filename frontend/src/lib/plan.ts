@@ -11,7 +11,9 @@ import type {
   PrecheckResult,
   SecondaryMatchCondition,
   SheetRuleDraft,
+  RuleMapping,
   SheetRulePayload,
+  ToleranceBand,
   TransformationStep,
 } from "../types";
 
@@ -43,6 +45,7 @@ export function emptyDraft(file1Columns: string[], file2Columns: string[], analy
     matchingPasses: [],
     normalization: { ...DEFAULT_NORMALIZATION },
     dateFormat: "day_first",
+    tolerances: [],
   };
 }
 
@@ -153,6 +156,8 @@ export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft)
     .filter(([left, right]) => has1.has(left) && right !== undefined && has2.has(right));
   const passColumnsExist = (item: MatchingPass) => [item.amount_source, item.date_source, item.narrative_source].every((column) => !column || has1.has(column))
     && [item.amount_destination, item.date_destination, item.narrative_destination].every((column) => !column || has2.has(column));
+  const rules = copy.rules.filter((rule) => rule.file_1_fields.every((field) => has1.has(field)) && rule.file_2_fields.every((field) => has2.has(field)));
+  const fields = new Set(rules.map(comparedFieldLabel));
   return {
     ...withSteps,
     primaryKeySource: keyPairs.map(([left]) => left),
@@ -160,13 +165,85 @@ export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft)
     secondaryConditions: copy.secondaryConditions.filter((condition: SecondaryMatchCondition) => has1.has(condition.source_column) && has2.has(condition.destination_column)),
     similarityPolicy: copy.similarityPolicy,
     dateOnlyOverride: false,
-    rules: copy.rules.filter((rule) => rule.file_1_fields.every((field) => has1.has(field)) && rule.file_2_fields.every((field) => has2.has(field))),
+    rules,
     includeFile1: copy.includeFile1.filter((column) => has1.has(column)),
     includeFile2: copy.includeFile2.filter((column) => has2.has(column)),
     matchingPasses: copy.matchingPasses.filter(passColumnsExist),
     normalization: copy.normalization,
     dateFormat: copy.dateFormat,
+    tolerances: copy.tolerances.filter((band) => band.field === ALL_FIELDS || fields.has(band.field)),
   };
+}
+
+// ── Tolerance bands ─────────────────────────────────────────────────────
+export const ALL_FIELDS = "*";
+
+/** How a compared field is named: its source column(s), as the server labels it. */
+export function comparedFieldLabel(rule: RuleMapping): string {
+  return rule.file_1_fields.join(",");
+}
+
+export function comparedFields(config: Pick<SheetRuleDraft, "rules">): string[] {
+  return [...new Set(config.rules.filter((rule) => rule.file_1_fields.length && rule.file_2_fields.length).map(comparedFieldLabel))];
+}
+
+/** A band names a compared field (or all of them) and has at least one limit above 0. */
+export function toleranceIsComplete(band: ToleranceBand, config: Pick<SheetRuleDraft, "rules">): boolean {
+  const fieldExists = band.field === ALL_FIELDS || comparedFields(config).includes(band.field);
+  return fieldExists && [band.amount, band.percent, band.days, band.similarity].some((limit) => (limit ?? 0) > 0);
+}
+
+/** Step 4 is complete: fields are mapped and every tolerance band is usable. */
+export function mappingIsReady(config: SheetRuleDraft | undefined): boolean {
+  if (!config?.rules.length) return false;
+  return config.tolerances.every((band) => toleranceIsComplete(band, config));
+}
+
+/**
+ * The limits typed into step-3 matching passes, as tolerance bands. Pass
+ * limits only pair records the key did not find; people often expect them to
+ * accept differences on matched records too. Date limits need the dates to
+ * be compared, so their columns are added to the compared fields.
+ */
+export function limitsFromPasses(config: SheetRuleDraft): { tolerances: ToleranceBand[]; rules: RuleMapping[] } {
+  const rules = [...config.rules];
+  const tolerances: ToleranceBand[] = [];
+  const compare = (source: string, destination: string) => {
+    if (!rules.some((rule) => comparedFieldLabel(rule) === source)) rules.push({ file_1_fields: [source], file_2_fields: [destination] });
+  };
+  const add = (band: ToleranceBand) => {
+    const current = tolerances.find((item) => item.field === band.field);
+    if (current) Object.assign(current, Object.fromEntries(Object.entries(band).filter(([, value]) => value)));
+    else tolerances.push(band);
+  };
+  for (const item of config.matchingPasses) {
+    if (item.type === "amount_tolerance" && (item.amount_tolerance > 0 || item.amount_tolerance_percent > 0) && item.amount_source && item.amount_destination) {
+      compare(item.amount_source, item.amount_destination);
+      add({ field: item.amount_source, amount: item.amount_tolerance || null, percent: item.amount_tolerance_percent || null });
+    }
+    if (item.date_source && item.date_destination && item.date_window_days > 0) {
+      compare(item.date_source, item.date_destination);
+      add({ field: item.date_source, days: item.date_window_days });
+    }
+    if (item.narrative_source && item.narrative_destination && item.narrative_threshold > 0) {
+      compare(item.narrative_source, item.narrative_destination);
+      add({ field: item.narrative_source, similarity: item.narrative_threshold });
+    }
+  }
+  const limits = ["amount", "percent", "days", "similarity"] as const;
+  const covered = (band: ToleranceBand) => config.tolerances.some((existing) => existing.field === band.field
+    && limits.every((key) => !band[key] || existing[key] === band[key]));
+  return { tolerances: tolerances.filter((band) => !covered(band)), rules };
+}
+
+export function describeTolerance(band: ToleranceBand): string {
+  const limits = [
+    band.amount ? `±${band.amount}` : "",
+    band.percent ? `±${band.percent}%` : "",
+    band.days ? `±${band.days} day${band.days === 1 ? "" : "s"}` : "",
+    band.similarity ? `text at least ${band.similarity}% similar` : "",
+  ].filter(Boolean);
+  return `${band.field === ALL_FIELDS ? "Every compared field" : band.field}: ${limits.join(" or ") || "no limit set"}`;
 }
 
 /** One sheet rule of the canonical plan sent to the API. */
@@ -196,6 +273,13 @@ export function draftToSheetRule(config: SheetRuleDraft, ids: { sheetRuleId: str
     include_columns_file_2: config.includeFile2,
     transformations: config.transformations,
     date_format: config.dateFormat,
+    tolerances: config.tolerances.map((band) => ({
+      field: band.field,
+      amount: band.amount || null,
+      percent: band.percent || null,
+      days: band.days || null,
+      similarity: band.similarity || null,
+    })),
     report_label: ids.label,
   };
 }

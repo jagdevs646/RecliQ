@@ -1,6 +1,6 @@
 import { ArrowRight, Plus, X } from "lucide-react";
-import type { DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, TransformationStep } from "../types";
-import { availableColumns, newPass } from "../lib/plan";
+import type { DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
+import { ALL_FIELDS, availableColumns, comparedFields, describeTolerance, limitsFromPasses, newPass, toleranceIsComplete } from "../lib/plan";
 
 interface EditorProps {
   config: SheetRuleDraft;
@@ -35,16 +35,17 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
         <p>{keyed
           ? "Records still unmatched after the key are tried again, in order, on amount and date. A pair is only made when exactly one record qualifies on both sides; ties are listed for you to decide."
           : "No key chosen: records are matched on amount and date only. A pair is only made when exactly one record qualifies on both sides."}</p>
+        {keyed && <p className="field-hint">These limits only decide whether records the key did not find can be paired. To accept small differences on records that did match, set them under "Accept small differences" in step 4.</p>}
       </div>
       <div className="button-row">
         <button type="button" className="secondary" onClick={() => add("amount_date")}><Plus size={15} />Amount + date</button>
-        <button type="button" className="secondary" onClick={() => add("amount_tolerance")}><Plus size={15} />Amount within tolerance</button>
+        <button type="button" className="secondary" onClick={() => add("amount_tolerance")}><Plus size={15} />Amount within a range</button>
       </div>
     </div>
     {config.matchingPasses.length === 0 && <p className="rule-empty">No extra passes: unmatched records are listed as not found.</p>}
     {config.matchingPasses.map((item, index) => <div className="pass-card" key={`pass-${index}`}>
       <div className="pass-card-heading">
-        <strong>Pass {index + (keyed ? 2 : 1)} · {item.type === "amount_date" ? "Same amount, date within a window" : "Amount within a tolerance"}</strong>
+        <strong>Pass {index + (keyed ? 2 : 1)} · {item.type === "amount_date" ? "Same amount, date within a window" : "Amount within a range"}</strong>
         <button type="button" className="icon-button" onClick={() => remove(index)} title="Remove this pass" aria-label="Remove this pass"><X size={16} /></button>
       </div>
       <div className="key-pair-header"><span>{sourceLabel}</span><span /><span>{destinationLabel}</span><span /></div>
@@ -68,8 +69,8 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
       </div>
       <div className="advanced-grid">
         {item.date_source && <label><span>Date window (± days)</span><input type="number" min={0} max={366} value={item.date_window_days} onChange={(event) => update(index, { date_window_days: Math.max(0, Number(event.target.value)) })} /></label>}
-        {item.type === "amount_tolerance" && <label><span>Amount tolerance (±)</span><input type="number" min={0} step="0.01" value={item.amount_tolerance} onChange={(event) => update(index, { amount_tolerance: Math.max(0, Number(event.target.value)) })} /></label>}
-        {item.type === "amount_tolerance" && <label><span>or tolerance (± %)</span><input type="number" min={0} max={100} step="0.1" value={item.amount_tolerance_percent} onChange={(event) => update(index, { amount_tolerance_percent: Math.max(0, Number(event.target.value)) })} /></label>}
+        {item.type === "amount_tolerance" && <label><span>Amount range (±)</span><input type="number" min={0} step="0.01" value={item.amount_tolerance} onChange={(event) => update(index, { amount_tolerance: Math.max(0, Number(event.target.value)) })} /></label>}
+        {item.type === "amount_tolerance" && <label><span>or range (± %)</span><input type="number" min={0} max={100} step="0.1" value={item.amount_tolerance_percent} onChange={(event) => update(index, { amount_tolerance_percent: Math.max(0, Number(event.target.value)) })} /></label>}
         {item.narrative_source && <label><span>Reference similarity (%)</span><input type="number" min={50} max={100} value={item.narrative_threshold} onChange={(event) => update(index, { narrative_threshold: Math.min(100, Math.max(50, Number(event.target.value))) })} /></label>}
       </div>
       {config.secondaryConditions.length > 0 && <label className="checkbox-line"><input type="checkbox" checked={item.respect_secondary_keys} onChange={(event) => update(index, { respect_secondary_keys: event.target.checked })} />The "must also match" columns must still agree in this pass</label>}
@@ -144,6 +145,48 @@ export function TransformationsEditor({ config, onChange, sourceLabel, destinati
       </div>;
     })}
     <button type="button" className="text-command" onClick={add}><Plus size={15} />Add a preparation step</button>
+  </details>;
+}
+
+// ── Accepting small differences ─────────────────────────────────────────
+export function ToleranceEditor({ config, onChange, destinationLabel }: Omit<EditorProps, "sourceLabel">) {
+  const fields = comparedFields(config);
+  const update = (index: number, change: Partial<ToleranceBand>) => onChange({
+    ...config,
+    tolerances: config.tolerances.map((band, itemIndex) => itemIndex === index ? { ...band, ...change } : band),
+  });
+  const add = () => onChange({ ...config, tolerances: [...config.tolerances, { field: ALL_FIELDS, amount: null, percent: null, days: null }] });
+  const remove = (index: number) => onChange({ ...config, tolerances: config.tolerances.filter((_, itemIndex) => itemIndex !== index) });
+  const limit = (value: string) => value === "" ? null : Math.max(0, Number(value));
+  const incomplete = config.tolerances.some((band) => !toleranceIsComplete(band, config));
+  const fromPasses = limitsFromPasses(config);
+  const addedFields = fromPasses.rules.slice(config.rules.length).map((rule) => rule.file_1_fields.join(","));
+  const usePassLimits = () => onChange({ ...config, rules: fromPasses.rules, tolerances: [...config.tolerances, ...fromPasses.tolerances] });
+
+  return <details className="rule-advanced" open>
+    <summary>Accept small differences (tolerance){config.tolerances.length ? ` (${config.tolerances.length})` : ""}</summary>
+    <p>Applied after matching, before the report is written. A difference within the tolerance is not listed as a difference, and a record left with none moves to Matched with a comment saying which difference was accepted and why. Larger differences stay as they are, and which records are paired never changes.</p>
+    <p>Amounts: either limit is enough; % is of the value in {destinationLabel}. Dates: days apart. Text: at least as similar as you set (the Similarity shown in the report). Only compared fields can have a tolerance, so map the date columns above to accept date differences.</p>
+    {fromPasses.tolerances.length > 0 && <div className="tolerance-suggestion">
+      <p>Your step-3 matching pass has limits that only pair unmatched records: {fromPasses.tolerances.map(describeTolerance).join("; ")}.{addedFields.length ? ` Using them here also compares ${addedFields.join(" and ")}.` : ""}</p>
+      <button type="button" className="secondary" onClick={usePassLimits}>Accept these differences on matched records too</button>
+    </div>}
+    {config.tolerances.map((band, index) => <div className="tolerance-row" key={`tolerance-${index}`}>
+      <label><span>Field</span>
+        <select value={band.field} onChange={(event) => update(index, { field: event.target.value })}>
+          <option value={ALL_FIELDS}>Every compared field</option>
+          {fields.map((field) => <option key={field} value={field}>{field}</option>)}
+          {band.field !== ALL_FIELDS && !fields.includes(band.field) && <option value={band.field}>{band.field} (no longer compared)</option>}
+        </select>
+      </label>
+      <label><span>± Amount</span><input type="number" min={0} step="0.01" inputMode="decimal" value={band.amount ?? ""} placeholder="e.g. 0.05" onChange={(event) => update(index, { amount: limit(event.target.value) })} /></label>
+      <label><span>± %</span><input type="number" min={0} max={100} step="0.1" inputMode="decimal" value={band.percent ?? ""} placeholder="e.g. 0.5" onChange={(event) => update(index, { percent: limit(event.target.value) })} /></label>
+      <label><span>± Days</span><input type="number" min={0} max={366} step="1" inputMode="numeric" value={band.days ?? ""} placeholder="e.g. 3" onChange={(event) => update(index, { days: limit(event.target.value) === null ? null : Math.round(Number(event.target.value)) })} /></label>
+      <label><span>Text similar ≥ %</span><input type="number" min={0} max={100} step="1" inputMode="numeric" value={band.similarity ?? ""} placeholder="e.g. 75" onChange={(event) => update(index, { similarity: limit(event.target.value) === null ? null : Math.min(100, Math.round(Number(event.target.value))) })} /></label>
+      <button type="button" className="icon-button" onClick={() => remove(index)} title="Remove this tolerance" aria-label="Remove this tolerance"><X size={16} /></button>
+    </div>)}
+    {incomplete && <p className="field-hint is-warning">Give each tolerance a compared field and an amount, %, number of days or text similarity above 0.</p>}
+    <button type="button" className="text-command" onClick={add} disabled={fields.length === 0}><Plus size={15} />Add a tolerance</button>
   </details>;
 }
 
