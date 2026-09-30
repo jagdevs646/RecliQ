@@ -4,7 +4,7 @@ After the primary-key pass, each configured pass looks only at records that
 are still unmatched on both sides:
 
 * ``amount_date``      exact amount and a date within ±N days;
-* ``amount_tolerance`` amount within an absolute and/or percentage tolerance,
+* ``amount_tolerance`` amount within an absolute and/or percentage range,
                        optionally with a date window;
 * either pass can also require a similar narrative/reference (fuzzy score on
   normalized text, with a minimum score).
@@ -28,7 +28,7 @@ try:
 except Exception:  # pragma: no cover
     fuzz = None
 
-PASS_TYPES = {"amount_date": "Amount + date", "amount_tolerance": "Amount within tolerance"}
+PASS_TYPES = {"amount_date": "Amount + date", "amount_tolerance": "Amount within a range"}
 # Above this many candidates in an amount range a source record cannot be
 # resolved uniquely; it is reported as ambiguous without scoring each one.
 _MAX_CANDIDATES = 5000

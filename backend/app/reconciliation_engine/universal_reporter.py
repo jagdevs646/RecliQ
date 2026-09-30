@@ -442,8 +442,14 @@ class UniversalReporter:
             cell.font = self._font(10, True, self.colors["header_fg"])
             cell.fill = navy_fill
             cell.alignment = Alignment(horizontal="left" if column in "BD" else "center", vertical="center")
+        within = int(((self.data.get("metadata") or {}).get("tolerance_counts") or {}).get("records", 0) or 0) or sum(
+            1 for record in self.data.get("matched_records", []) if record.get("WITHIN TOLERANCE")
+        )
+        matched_meaning = "Found in both files and every compared field is the same." + (
+            f" Includes {within:,} whose differences are all within your tolerance (see the Comment column)." if within else ""
+        )
         results = [
-            ("Matched – all fields agree", counts["matched"], "Found in both files and every compared field is the same.", "matched", self.colors["pass"]),
+            ("Matched – all fields agree", counts["matched"], matched_meaning, "matched", self.colors["pass"]),
             ("Matched – values differ", counts["differ"], "Found in both files, but at least one compared field is different.", "differences", self.colors["exception"]),
             (f"Only in {self.file1}", counts["only_1"], f"In {self.file1} but no matching record was found in {self.file2}.", "only_1", self.colors["critical"]),
             (f"Only in {self.file2}", counts["only_2"], f"In {self.file2} but no matching record was found in {self.file1}.", "only_2", self.colors["critical"]),
@@ -611,6 +617,14 @@ class UniversalReporter:
                 ", ".join(f"{rule} ({count:,})" for rule, count in sorted(used.items(), key=lambda item: -item[1]))
                 + " — exceptions they explain are listed separately, never deleted.",
             ))
+        if meta.get("tolerance_bands"):
+            accepted = meta.get("tolerance_counts") or {}
+            description.append((
+                "Tolerance (after matching)",
+                "; ".join(meta["tolerance_bands"])
+                + f" — {accepted.get('fields', 0):,} difference(s) accepted; {accepted.get('records', 0):,} record(s) moved to "
+                f"'{self.sheet_names['matched']}' with a comment. Larger differences are left as they were.",
+            ))
         if meta.get("date_convention") and meta.get("date_convention", "").startswith("Month"):
             description.append(("Date format", meta["date_convention"]))
         combined = sum(
@@ -642,6 +656,7 @@ class UniversalReporter:
         has_secondary = any(row.get("Secondary Key") for row in records)
         has_groups = any(row.get("Grouped Rows") for row in records)
         has_similarity = any(row.get("Similarity") for row in records)
+        has_comment = any(row.get("Comment") for row in records)
 
         headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}"]
         headers += [f"Key in {self.file2}"] if has_matched_key else []
@@ -649,6 +664,7 @@ class UniversalReporter:
         headers += ["Field", f"{self.file1} value", f"{self.file2} value", "Difference", "Difference %"]
         headers += ["Similarity"] if has_similarity else []
         headers += ["Combined rows"] if has_groups else []
+        headers += ["Comment"] if has_comment else []
         headers += ["Reviewer notes"]
 
         def rows():
@@ -666,6 +682,8 @@ class UniversalReporter:
                     values.append(row.get("Similarity"))
                 if has_groups:
                     values.append(row.get("Grouped Rows"))
+                if has_comment:
+                    values.append(row.get("Comment"))
                 values.append(None)
                 yield values
 
@@ -779,11 +797,13 @@ class UniversalReporter:
         has_secondary = any(record.get("SECONDARY KEY") for record in records)
         has_groups = any(record.get("GROUPED ROWS") for record in records)
         has_normalization = any(record.get("NORMALIZATION APPLIED") for record in records)
+        has_tolerance = any(record.get("WITHIN TOLERANCE") for record in records)
         headers = (["Sheet"] if self.multi_rule else []) + [f"Key in {self.file1}", f"Key in {self.file2}"]
         headers += ["Secondary key"] if has_secondary else []
         headers += ["How matched"]
         headers += ["Normalization applied"] if has_normalization else []
         headers += ["Combined rows"] if has_groups else []
+        headers += ["Comment"] if has_tolerance else []
         headers += [f"Row in {self.file1}", f"Row in {self.file2}"]
 
         def rows():
@@ -804,13 +824,18 @@ class UniversalReporter:
                     values.append(record.get("NORMALIZATION APPLIED"))
                 if has_groups:
                     values.append(record.get("GROUPED ROWS"))
+                if has_tolerance:
+                    note = record.get("WITHIN TOLERANCE")
+                    values.append(f"Matched within tolerance: {note}" if note else None)
                 values += [_row_number(record, 1), _row_number(record, 2)]
                 yield values
 
         self._title(
             ws,
             "Matched — records that agree on every compared field",
-            "No action needed. Listed so every record can be traced back to its row in each file.",
+            "No action needed. Listed so every record can be traced back to its row in each file."
+            + (" Records whose only differences are within your tolerance are included; the Comment column says which and why."
+               if has_tolerance else ""),
             len(headers),
         )
         self._write_table(ws, headers, rows(), "MatchedRecordsTbl", "No record matched on every compared field.")
@@ -939,6 +964,7 @@ class UniversalReporter:
             or rule.get("date_only_override")
             or rule.get("transformations")
             or rule.get("matching_passes")
+            or rule.get("tolerances")
             for rule in rules
         )
 
@@ -959,6 +985,8 @@ class UniversalReporter:
             ("Only in source", "only_in_file_1"),
             ("Only in destination", "only_in_file_2"),
         ]
+        if any(rule.get("tolerances") for rule in self.data.get("sheet_rules") or []):
+            metric_columns.insert(8, ("Matched within tolerance", "within_tolerance_records"))
         last_col = get_column_letter(len(metric_columns))
         navy_fill = PatternFill("solid", fgColor=self.colors["primary"])
         accent_fill = PatternFill("solid", fgColor=self.colors["neutral_bg"])
@@ -996,6 +1024,11 @@ class UniversalReporter:
             if item.get("amount_tolerance_percent"):
                 tolerance.append(f"±{item['amount_tolerance_percent']}%")
             return pass_label(item, number) + (f" (amount {' / '.join(tolerance)})" if tolerance else "")
+
+        def describe_tolerance(item: dict) -> str:
+            from app.reconciliation_engine.tolerance import Band
+
+            return Band(**{key: item.get(key) for key in ("field", "amount", "percent", "days", "similarity")}).describe()
 
         def describe_similarity(policy: dict) -> str:
             matcher = policy.get("matcher_type_override") or "automatic by data type"
@@ -1035,6 +1068,7 @@ class UniversalReporter:
                 ("Compared fields", rule.get("mapping_count", 0)),
                 ("Prepared before matching", "; ".join(describe_transformation(step) for step in rule.get("transformations") or []) or "None"),
                 ("Additional matching passes", "; ".join(describe_pass(item, index) for index, item in enumerate(rule.get("matching_passes") or [], start=2)) or "None"),
+                ("Tolerance (after matching)", "; ".join(describe_tolerance(item) for item in rule.get("tolerances") or []) or "None"),
                 ("Date format", "Month first (MM/DD/YYYY)" if rule.get("date_format") == "month_first" else "Day first (DD/MM/YYYY)"),
                 ("Status", f"FAILED — {rule.get('error')}" if failed else "Completed"),
             ]

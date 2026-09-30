@@ -35,6 +35,7 @@ from app.reconciliation_engine.preprocessing import (
 )
 from app.reconciliation_engine.normalization import build_normalizer, normalize_dataframe, use_normalizer
 from app.reconciliation_engine.normalization.entities import active_normalizer
+from app.reconciliation_engine.tolerance import apply_tolerance_bands, prepare_bands
 from app.reconciliation_engine.transformations import apply_transformations, original_values
 from app.reconciliation_engine.learning import LearningContext
 from app.reconciliation_engine.resolution import Evaluator, describe_rule, referenced_values, resolution_fields
@@ -405,6 +406,7 @@ def run_generic_reconciliation(
     saved_aliases: list[tuple[str, str]] | None = None,
     resolution_rules: list[dict] | None = None,
     learning: LearningContext | None = None,
+    tolerances: list[dict] | None = None,
 ) -> dict:
     """Reconcile one sheet rule.
 
@@ -414,6 +416,8 @@ def run_generic_reconciliation(
     ``matching_passes`` the ordered keyless passes that run after the key pass.
     ``learning`` carries reviewers' earlier decisions and ``resolution_rules``
     the organization's auto-resolution rules for recurring exceptions.
+    ``tolerances`` are the differences to accept after matching (see
+    ``tolerance.py``).
     """
     normalizer = build_normalizer(normalization, saved_aliases or ())
     evaluator = Evaluator.from_config(resolution_rules, learning)
@@ -422,7 +426,7 @@ def run_generic_reconciliation(
             file_1_df, file_2_df, output_path, key_file_1, key_file_2, rules,
             include_columns_file_1, include_columns_file_2, progress_callback, file_1_name, file_2_name,
             is_cancelled, write_report, secondary_conditions, similarity_policy, date_only_override,
-            transformations, matching_passes, normalizer, date_dayfirst, evaluator, learning,
+            transformations, matching_passes, normalizer, date_dayfirst, evaluator, learning, tolerances,
         )
 
 
@@ -449,6 +453,7 @@ def _run_generic_reconciliation(
     date_dayfirst: bool,
     evaluator: Evaluator | None = None,
     learning: LearningContext | None = None,
+    tolerances: list[dict] | None = None,
 ) -> dict:
     tracker = ProgressTracker(progress_callback)
     tracker.reading_excel()
@@ -487,6 +492,8 @@ def _run_generic_reconciliation(
 
     if not normalized_rules:
         raise ValueError("At least one reconciliation rule is required.")
+    compared_labels = [(fields_label(left), fields_label(right)) for left, right in normalized_rules]
+    tolerance_bands = prepare_bands(tolerances, compared_labels)
 
     validate_columns(file_1_df, [*file_1_id_col, *file_1_extra], "File 1")
     validate_columns(file_2_df, [*file_2_id_col, *file_2_extra], "File 2")
@@ -1025,6 +1032,14 @@ def _run_generic_reconciliation(
         else:
             matched_records.append(reconciliation_result)
 
+    # Tolerance bands: accept small differences now that matching is done,
+    # before anything is counted or written.
+    tolerance = apply_tolerance_bands(
+        reconciliation_results, matched_records, tolerance_bands, compared_labels,
+        stays_in_review=lambda record: record["IDENTITY CLASSIFICATION"] == MatchClassification.EXCEPTION_MATCH.value,
+    )
+    field_discrepancy_count -= tolerance.cleared_records
+
     tracker.comparing_columns()
 
     if is_cancelled and is_cancelled():
@@ -1089,6 +1104,8 @@ def _run_generic_reconciliation(
             "date_convention": "Day first (DD/MM/YYYY)" if date_dayfirst else "Month first (MM/DD/YYYY)",
             "resolution_rules": [f"{rule.label()}: {describe_rule(rule)}" for rule in (evaluator.rules if evaluator else [])],
             "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
+            "tolerance_bands": [band.describe() for band in tolerance_bands],
+            "tolerance_counts": {"fields": tolerance.accepted_fields, "records": tolerance.moved_to_matched},
         },
     )
     universal_data["auto_resolved"] = auto_resolved
@@ -1121,6 +1138,8 @@ def _run_generic_reconciliation(
         "auto_resolved_only_in_file_2": sum(1 for item in auto_resolved if item["__KIND__"] == "only_in_destination"),
         "auto_resolved_differences": sum(1 for item in auto_resolved if item["__KIND__"] == "field_difference"),
         "auto_confirmed_matches": sum(1 for item in auto_resolved if item["__KIND__"] == "to_confirm"),
+        "within_tolerance_fields": tolerance.accepted_fields,
+        "within_tolerance_records": tolerance.moved_to_matched,
     }
 
     return {

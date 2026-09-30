@@ -43,6 +43,8 @@ def build_universal_data_model(
         if row.get("SECONDARY KEY"):
             record_context["Secondary Key"] = row["SECONDARY KEY"]
         trailing_context = {"Grouped Rows": row["GROUPED ROWS"]} if row.get("GROUPED ROWS") else {}
+        if row.get("WITHIN TOLERANCE"):
+            trailing_context["Comment"] = f"Other differences accepted within tolerance: {row['WITHIN TOLERANCE']}"
         
         # Determine specific field differences
         # Keys typically look like "FIELD (FILE 1)", "FIELD (FILE 2)", "FIELD DIFF", "FIELD STATUS"

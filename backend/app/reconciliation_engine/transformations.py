@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Callable
 
 import pandas as pd
@@ -84,6 +85,18 @@ def _text_function(operation: str, params: dict[str, Any]) -> Callable[[Any], An
     raise ValueError(f"Unsupported text operation: {operation}")
 
 
+def round_half_up(number: float, decimals: int) -> float:
+    """Round as accountants and ledgers do: halves go away from zero.
+
+    Python's round() works on the binary float, and 168064.55 is stored as
+    168064.54999…, so round(168064.55, 1) gives 168064.5 while the bank
+    statement shows 168064.6. The shortest decimal form (repr) is rounded
+    instead, so the value rounds as it is written.
+    """
+    quantum = Decimal(1).scaleb(-decimals)
+    return float(Decimal(repr(number)).quantize(quantum, rounding=ROUND_HALF_UP))
+
+
 def _number_function(operation: str, params: dict[str, Any]) -> Callable[[Any], Any]:
     def numeric(transform: Callable[[float], float]) -> Callable[[Any], Any]:
         def apply(value: Any) -> Any:
@@ -105,7 +118,7 @@ def _number_function(operation: str, params: dict[str, Any]) -> Callable[[Any], 
         decimals = int(params.get("decimals", 2))
         if not 0 <= decimals <= 6:
             raise ValueError("Round supports 0 to 6 decimal places.")
-        return numeric(lambda number: round(number, decimals))
+        return numeric(lambda number: round_half_up(number, decimals))
     raise ValueError(f"Unsupported number operation: {operation}")
 
 

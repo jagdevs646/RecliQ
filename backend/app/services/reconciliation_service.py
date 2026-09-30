@@ -162,7 +162,8 @@ def _label_multi_rule_report(universal_data: dict, rules: list[dict]) -> None:
     metadata["secondary_keys"] = []
     metadata["compared_fields"] = []
     # Per-rule preparation and passes are listed on the Sheet Rules tab.
-    for key in ("transformations", "matching_passes", "pass_counts", "normalization_rules_used", "date_convention"):
+    for key in ("transformations", "matching_passes", "pass_counts", "normalization_rules_used", "date_convention",
+                "tolerance_bands", "tolerance_counts"):
         metadata.pop(key, None)
 
 
@@ -494,6 +495,7 @@ def _process_claimed_job(job_id: str) -> None:
                 "date_only_override": bool(pair.get("date_only_override", False)),
                 "matching_passes": pair.get("matching_passes", []),
                 "transformations": pair.get("transformations", []),
+                "tolerances": pair.get("tolerances", []),
                 "normalization": pair.get("normalization", {}),
                 "date_format": "day_first" if pair.get("date_dayfirst", True) else "month_first",
                 "mapping_count": len(pair.get("rules", [])),
@@ -562,6 +564,7 @@ def _process_claimed_job(job_id: str) -> None:
                         saved_aliases=saved_aliases,
                         resolution_rules=resolution_rules,
                         learning=learning,
+                        tolerances=pair.get("tolerances", []),
                     )
 
                 for k, v in res["summary"].items():

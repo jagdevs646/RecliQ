@@ -167,7 +167,10 @@ def _cached_canonical_date_from_text(text: str, dayfirst: bool) -> date | None:
     if not text:
         return None
 
-    iso = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    # Year first is always year-month-day, with or without a time part
+    # ("2026-08-05 00:00:00" is how a spreadsheet date reads as text). Left
+    # to pandas with day-first on, it would become 8 May.
+    iso = re.fullmatch(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?", text)
     if iso:
         year, month, day = (int(part) for part in iso.groups())
         try:
@@ -175,7 +178,7 @@ def _cached_canonical_date_from_text(text: str, dayfirst: bool) -> date | None:
         except ValueError:
             return None
 
-    numeric = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})", text)
+    numeric = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?: \d{1,2}:\d{2}(?::\d{2})?)?", text)
     if numeric:
         first, second, year = (int(part) for part in numeric.groups())
         month, day = (second, first) if dayfirst else (first, second)

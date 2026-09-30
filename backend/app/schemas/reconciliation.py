@@ -103,6 +103,31 @@ class MatchingPass(BaseModel):
         return self
 
 
+class ToleranceBand(BaseModel):
+    """Differences small enough to accept, applied after matching.
+
+    A compared-field difference within the band is not reported as a
+    difference; a record left with none moves to Matched, with a comment
+    saying which differences were accepted and why. Pairing is unaffected.
+    """
+
+    # A compared field (source or destination column), or "*" for every one.
+    field: str = "*"
+    amount: float | None = Field(default=None, ge=0)
+    percent: float | None = Field(default=None, ge=0, le=100)
+    days: int | None = Field(default=None, ge=0, le=366)
+    # Text: accepted when at least this % similar (the report's Similarity).
+    similarity: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def check_limits(self) -> "ToleranceBand":
+        if not self.field.strip():
+            raise ValueError("Choose the compared field a tolerance applies to.")
+        if not any(limit for limit in (self.amount, self.percent, self.days, self.similarity)):
+            raise ValueError("A tolerance needs an amount, a percentage, a number of days or a text similarity above 0.")
+        return self
+
+
 class AliasEntry(BaseModel):
     canonical: str
     variants: list[str] = Field(default_factory=list)
@@ -162,6 +187,8 @@ class SheetRuleConfig(BaseModel):
     transformations: list[TransformationStep] = Field(default_factory=list)
     # How ambiguous numeric dates such as 03/04/2026 are read.
     date_format: Literal["day_first", "month_first"] = "day_first"
+    # Accepted differences in compared fields, applied after matching.
+    tolerances: list[ToleranceBand] = Field(default_factory=list)
 
 
 class FilePairConfig(BaseModel):
@@ -233,6 +260,7 @@ class ReconciliationPlan(BaseModel):
                         ],
                         "normalization": rule.matching_strategy.normalization.model_dump(),
                         "transformations": [step.model_dump() for step in rule.transformations],
+                        "tolerances": [band.model_dump() for band in rule.tolerances],
                         "date_dayfirst": rule.date_format == "day_first",
                         "file_pair_id": file_pair.file_pair_id or f"file-pair-{pair_index}",
                         "file_pair_label": file_pair_label,
