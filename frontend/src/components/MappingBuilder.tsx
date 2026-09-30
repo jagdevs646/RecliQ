@@ -1,5 +1,6 @@
-import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
+import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { filterColumns, matchRanges, searchTerms } from "../lib/columnSearch";
 import type { RuleMapping } from "../types";
 
 interface Props {
@@ -186,7 +187,9 @@ interface BoardProps {
 }
 
 function ColumnBoard({ title, columns, selected, mapped, onToggle, draggable, droppable, onDropColumn }: BoardProps) {
-  return <div className="column-board"><h3>{title}</h3><div>{columns.map((column) => <button key={column} type="button" draggable={draggable && !mapped.has(column)} className={`column-chip ${selected.includes(column) ? "is-selected" : ""} ${mapped.has(column) ? "is-mapped" : ""}`} onClick={() => onToggle(column)} onDragStart={(event) => event.dataTransfer.setData("text/plain", column)} onDragOver={(event) => { if (droppable && !mapped.has(column)) event.preventDefault(); }} onDrop={(event) => { if (droppable && !mapped.has(column)) onDropColumn?.(column, event.dataTransfer.getData("text/plain")); }}><span>{column}</span>{mapped.has(column) && <Check size={14} />}</button>)}</div></div>;
+  const [query, setQuery] = useState("");
+  const shown = filterColumns(columns, query);
+  return <div className="column-board"><h3>{title}</h3><ColumnSearch label={`Search ${title}`} query={query} total={columns.length} shown={shown.length} onChange={setQuery} onPickFirst={() => shown[0] && onToggle(shown[0])} /><div>{shown.map((column) => <button key={column} type="button" draggable={draggable && !mapped.has(column)} className={`column-chip ${selected.includes(column) ? "is-selected" : ""} ${mapped.has(column) ? "is-mapped" : ""}`} onClick={() => onToggle(column)} onDragStart={(event) => event.dataTransfer.setData("text/plain", column)} onDragOver={(event) => { if (droppable && !mapped.has(column)) event.preventDefault(); }} onDrop={(event) => { if (droppable && !mapped.has(column)) onDropColumn?.(column, event.dataTransfer.getData("text/plain")); }}><span><Highlighted text={column} query={query} /></span>{mapped.has(column) && <Check size={14} />}</button>)}</div><NoMatches query={query} shown={shown.length} onClear={() => setQuery("")} /></div>;
 }
 
 interface RowMappingEditorProps {
@@ -214,20 +217,74 @@ function RowMappingEditor({
   onAdd,
   onClear,
 }: RowMappingEditorProps) {
+  const [sourceQuery, setSourceQuery] = useState("");
+  const [destinationQuery, setDestinationQuery] = useState("");
+  const shownSource = filterColumns(sourceColumns, sourceQuery);
+  const shownDestination = filterColumns(destinationColumns, destinationQuery);
+  const clearSearch = () => { setSourceQuery(""); setDestinationQuery(""); };
+  const options = (columns: string[], selection: string[], query: string, onToggle: (column: string) => void) => <div className="row-mapping-options">{columns.map((column) => <label key={column} className="row-mapping-option"><input type="checkbox" checked={selection.includes(column)} onChange={() => onToggle(column)} /><span><Highlighted text={column} query={query} /></span></label>)}</div>;
+
   return <section className="row-mapping-editor">
     <div className="row-mapping-selection">
       <div className="row-mapping-selection-header"><div><h3>{sourceTitle}</h3><p>Choose one or more numeric fields to combine.</p></div><strong>{sourceSelection.length} selected</strong></div>
-      <div className="row-mapping-options">{sourceColumns.map((column) => <label key={column} className="row-mapping-option"><input type="checkbox" checked={sourceSelection.includes(column)} onChange={() => onSourceToggle(column)} /><span>{column}</span></label>)}</div>
+      <ColumnSearch label={`Search ${sourceTitle}`} query={sourceQuery} total={sourceColumns.length} shown={shownSource.length} onChange={setSourceQuery} onPickFirst={() => shownSource[0] && onSourceToggle(shownSource[0])} />
+      {options(shownSource, sourceSelection, sourceQuery, onSourceToggle)}
+      <NoMatches query={sourceQuery} shown={shownSource.length} onClear={() => setSourceQuery("")} />
       <SelectedFields fields={sourceSelection} />
     </div>
     <div className="row-mapping-arrow"><ArrowRight size={22} /><span>compare</span></div>
     <div className="row-mapping-selection">
       <div className="row-mapping-selection-header"><div><h3>{destTitle}</h3><p>Select every numeric component to add together.</p></div><strong>{destinationSelection.length} selected</strong></div>
-      <div className="row-mapping-options">{destinationColumns.map((column) => <label key={column} className="row-mapping-option"><input type="checkbox" checked={destinationSelection.includes(column)} onChange={() => onDestinationToggle(column)} /><span>{column}</span></label>)}</div>
+      <ColumnSearch label={`Search ${destTitle}`} query={destinationQuery} total={destinationColumns.length} shown={shownDestination.length} onChange={setDestinationQuery} onPickFirst={() => shownDestination[0] && onDestinationToggle(shownDestination[0])} />
+      {options(shownDestination, destinationSelection, destinationQuery, onDestinationToggle)}
+      <NoMatches query={destinationQuery} shown={shownDestination.length} onClear={() => setDestinationQuery("")} />
       <SelectedFields fields={destinationSelection} />
     </div>
-    <div className="row-mapping-actions"><button type="button" className="secondary" onClick={onClear} disabled={!sourceSelection.length && !destinationSelection.length}>Clear selection</button><button type="button" className="primary" onClick={onAdd} disabled={!sourceSelection.length || !destinationSelection.length}><Plus size={16} />Add mapping</button></div>
+    <div className="row-mapping-actions"><button type="button" className="secondary" onClick={() => { onClear(); clearSearch(); }} disabled={!sourceSelection.length && !destinationSelection.length}>Clear selection</button><button type="button" className="primary" onClick={() => { onAdd(); clearSearch(); }} disabled={!sourceSelection.length || !destinationSelection.length}><Plus size={16} />Add mapping</button></div>
   </section>;
+}
+
+interface ColumnSearchProps { label: string; query: string; total: number; shown: number; onChange: (query: string) => void; onPickFirst: () => void }
+
+/** Narrows a long header list. Enter selects the first match and clears the box for the next search; Escape clears it. */
+function ColumnSearch({ label, query, total, shown, onChange, onPickFirst }: ColumnSearchProps) {
+  // Short lists are easier to scan than to search.
+  if (total <= 8 && !query) return null;
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (query.trim() && shown) { onPickFirst(); onChange(""); }
+    } else if (event.key === "Escape" && query) {
+      event.preventDefault();
+      onChange("");
+    }
+  }
+  return <label className="search-field column-search">
+    <Search size={15} aria-hidden="true" />
+    <input type="search" value={query} onChange={(event) => onChange(event.target.value)} onKeyDown={onKeyDown} placeholder={`Search ${total} columns`} aria-label={label} title="Enter selects the first match" />
+    {query.trim() && <span className="column-search-count" aria-live="polite">{shown} of {total}</span>}
+  </label>;
+}
+
+function NoMatches({ query, shown, onClear }: { query: string; shown: number; onClear: () => void }) {
+  if (shown || !query.trim()) return null;
+  return <p className="column-search-empty">No columns match "{query.trim()}". <button type="button" className="text-command" onClick={onClear}>Clear search</button></p>;
+}
+
+/** The column name with the searched words marked. */
+function Highlighted({ text, query }: { text: string; query: string }) {
+  const terms = searchTerms(query);
+  const ranges = terms.length ? matchRanges(text, terms) : null;
+  if (!ranges) return <>{text}</>;
+  const parts: ReactNode[] = [];
+  let at = 0;
+  for (const [start, end] of ranges) {
+    if (start > at) parts.push(text.slice(at, start));
+    parts.push(<mark key={start}>{text.slice(start, end)}</mark>);
+    at = end;
+  }
+  parts.push(text.slice(at));
+  return <>{parts}</>;
 }
 
 function SelectedFields({ fields }: { fields: string[] }) {
