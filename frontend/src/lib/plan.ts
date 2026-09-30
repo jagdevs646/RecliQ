@@ -284,6 +284,33 @@ export function draftToSheetRule(config: SheetRuleDraft, ids: { sheetRuleId: str
   };
 }
 
+/** A saved sheet rule back in the editor, to change it and run again. The reverse of draftToSheetRule. */
+export function sheetRuleToDraft(rule: SheetRulePayload, file1Columns: string[], file2Columns: string[], analysis: AnalysisResponse | null): SheetRuleDraft {
+  const strategy = rule.matching_strategy;
+  return {
+    ...emptyDraft(file1Columns, file2Columns, analysis),
+    primaryKeySource: strategy.primary_key_source ?? [],
+    primaryKeyDestination: strategy.primary_key_destination ?? [],
+    secondaryConditions: strategy.secondary_conditions ?? [],
+    similarityPolicy: strategy.similarity_policy ?? {},
+    dateOnlyOverride: Boolean(strategy.date_only_override),
+    matchingPasses: (strategy.matching_passes ?? []).map((item) => ({
+      ...item,
+      date_source: item.date_source ?? "",
+      date_destination: item.date_destination ?? "",
+      narrative_source: item.narrative_source ?? "",
+      narrative_destination: item.narrative_destination ?? "",
+    })),
+    normalization: { ...DEFAULT_NORMALIZATION, ...strategy.normalization },
+    rules: rule.reconciliation_mapping ?? [],
+    includeFile1: rule.include_columns_file_1 ?? [],
+    includeFile2: rule.include_columns_file_2 ?? [],
+    transformations: rule.transformations ?? [],
+    dateFormat: rule.date_format ?? "day_first",
+    tolerances: rule.tolerances ?? [],
+  };
+}
+
 export function newPass(type: MatchingPass["type"], config: SheetRuleDraft): MatchingPass {
   const guess = (columns: string[], pattern: RegExp) => columns.find((column) => pattern.test(column)) ?? "";
   const source = availableColumns(config, "source");

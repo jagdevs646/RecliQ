@@ -6,10 +6,11 @@ from app.api.deps import get_actor, get_session_id
 from app.core.anonymous_session import websocket_session_id
 from app.database.session import SessionLocal, get_db
 from app.models.job import ReconciliationJob
-from app.schemas.job import JobListResponse, ReconciliationJobOut
+from app.schemas.file import UploadedFileOut
+from app.schemas.job import JobListResponse, JobPlanResponse, ReconciliationJobOut
 from app.storage import get_storage
 from app.services.audit_service import AuditActor, record_event
-from app.services.job_service import cancel_job, clear_all_jobs, delete_job, get_job, list_jobs
+from app.services.job_service import PlanUnavailable, cancel_job, clear_all_jobs, delete_job, get_job, job_plan, list_jobs
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -49,6 +50,28 @@ def job_detail(
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return job
+
+
+@router.get("/{job_id}/plan", response_model=JobPlanResponse)
+def job_setup(
+    job_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> JobPlanResponse:
+    """The run's files and rules, so they can be changed and run again."""
+    try:
+        found = job_plan(db, job_id, session_id)
+    except PlanUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    plan, files = found
+    return JobPlanResponse(
+        job_id=job_id,
+        orientation=plan.orientation,
+        file_pairs=[pair.model_dump(mode="json") for pair in plan.file_pairs],
+        files=[UploadedFileOut.model_validate(record) for record in files],
+    )
 
 
 @router.post("/{job_id}/cancel", response_model=ReconciliationJobOut)

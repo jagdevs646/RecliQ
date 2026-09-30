@@ -154,6 +154,14 @@ export interface FilePairPayload {
   sheet_rules: SheetRulePayload[];
 }
 
+/** A finished run's files and rules, reopened to change them and run again. */
+export interface JobPlan {
+  job_id: string;
+  orientation: string;
+  file_pairs: FilePairPayload[];
+  files: UploadedFile[];
+}
+
 export interface GenericPlanPayload {
   orientation: string;
   file_pairs: FilePairPayload[];

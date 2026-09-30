@@ -1,10 +1,14 @@
+import json
 from datetime import datetime, timezone
+
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
 from app.models.report import Report
+from app.schemas.reconciliation import ReconciliationPlan
 
 
 def list_jobs(db: Session, session_id: str, limit: int = 50) -> list[ReconciliationJob]:
@@ -15,6 +19,36 @@ def list_jobs(db: Session, session_id: str, limit: int = 50) -> list[Reconciliat
         .limit(limit)
         .all()
     )
+
+
+class PlanUnavailable(Exception):
+    """The run's setup cannot be reopened; the message says why."""
+
+
+def job_plan(db: Session, job_id: str, session_id: str) -> tuple[ReconciliationPlan, list[UploadedFile]] | None:
+    """The stored plan of a general run and its uploaded files, in the order the plan uses them."""
+    job = get_job(db, job_id, session_id)
+    if job is None:
+        return None
+    if job.job_type != "generic":
+        raise PlanUnavailable("Only general reconciliations can be changed and run again.")
+    try:
+        plan = ReconciliationPlan.model_validate(json.loads(job.settings_json or "{}"))
+    except (ValueError, ValidationError) as exc:
+        raise PlanUnavailable("This run's setup could not be read. Start a new reconciliation instead.") from exc
+    if not plan.file_pairs:
+        raise PlanUnavailable("This run has no saved setup. Start a new reconciliation instead.")
+
+    file_ids = list(dict.fromkeys(
+        source.file_id for pair in plan.file_pairs for source in [*pair.source_files, *pair.destination_files]
+    ))
+    records = {
+        record.id: record
+        for record in db.query(UploadedFile).filter(UploadedFile.id.in_(file_ids), UploadedFile.session_id == session_id)
+    }
+    if len(records) < len(file_ids):
+        raise PlanUnavailable("The files from this run are no longer stored. Upload them again to reconcile.")
+    return plan, [records[file_id] for file_id in file_ids]
 
 
 def get_job(db: Session, job_id: str, session_id: str) -> ReconciliationJob | None:

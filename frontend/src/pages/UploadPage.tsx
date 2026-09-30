@@ -11,7 +11,7 @@ import { FilePairingStep } from "../components/FilePairingStep";
 import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { DatesAndNamesSettings, MatchingPassesEditor, ToleranceEditor, TransformationsEditor } from "../components/RuleExtras";
-import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, ruleIsReady, ruleStatus } from "../lib/plan";
+import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, ruleIsReady, ruleStatus, sheetRuleToDraft } from "../lib/plan";
 import { UPLOAD_ACCEPT } from "../lib/formats";
 import { api } from "../services/api";
 import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
@@ -19,6 +19,9 @@ import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckRes
 
 interface Props {
   onJobCreated: (job: Job) => void;
+  /** A finished run to reopen with its files and rules, to change them and run again. */
+  rerunFrom?: Job | null;
+  onStartFresh?: () => void;
 }
 
 const GST_REPORT_SHEETS = ["Mismatched invoices", "Present in source only", "Present in destination only", "Match confidence review"];
@@ -47,7 +50,7 @@ function fileStem(filename: string): string {
   return filename.replace(/\.(xlsx|xls|csv)$/i, "");
 }
 
-export function UploadPage({ onJobCreated }: Props) {
+export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Props) {
   const [jobType, setJobType] = useState<"generic" | "gst">("generic");
   const [orientation, setOrientation] = useState("vertical");
   const [step, setStep] = useState(1);
@@ -76,6 +79,9 @@ export function UploadPage({ onJobCreated }: Props) {
   const [uploadStage, setUploadStage] = useState<Record<1 | 2, string>>({ 1: "", 2: "" });
   const [analysisStatus, setAnalysisStatus] = useState("");
   const analysisInFlight = useRef(new Set<string>());
+  const [restoring, setRestoring] = useState(Boolean(rerunFrom));
+  const [rerunOf, setRerunOf] = useState<Job | null>(null);
+  const restoreStarted = useRef(false);
   const [precheck, setPrecheck] = useState<PrecheckResult | null>(null);
   const [precheckLoading, setPrecheckLoading] = useState(false);
   const [precheckError, setPrecheckError] = useState("");
@@ -452,6 +458,75 @@ export function UploadPage({ onJobCreated }: Props) {
     }
   }
 
+  useEffect(() => {
+    if (!rerunFrom || restoreStarted.current) return;
+    restoreStarted.current = true;
+    restoreRun(rerunFrom).catch(() => undefined);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rerunFrom]);
+
+  /** Loads a finished run's files and rules and opens the matching step, ready to change and run again. */
+  async function restoreRun(job: Job) {
+    setRestoring(true);
+    setMessage("");
+    setAnalysisStatus("Loading the files and rules from your earlier run…");
+    try {
+      const setup = await api.getJobPlan(job.id);
+      const sheets = new Map(await Promise.all(setup.files.map(async (file) => [file.id, (await api.getFileMetadata(file.id)).sheets] as const)));
+      const sheetOf = (fileId: string, sheetId?: string | null): SheetMetadata => {
+        const available = sheets.get(fileId) ?? [];
+        return available.find((sheet) => sheet.id === sheetId) ?? available[0] ?? { id: sheetId ?? "", name: sheetId || "Sheet 1" };
+      };
+      const entries = setup.file_pairs.flatMap((pair) => pair.sheet_rules.map((rule) => {
+        const sourceFileId = pair.source_files[0].file_id;
+        const destinationFileId = pair.destination_files[0].file_id;
+        const pairing: SheetPairing = { sheet1: sheetOf(sourceFileId, rule.source_sheets[0]), sheet2: sheetOf(destinationFileId, rule.destination_sheets[0]), sourceFileId, destinationFileId };
+        return { pairing, rule };
+      }));
+      if (!entries.length) throw new Error("This run has no sheet rules to change.");
+      const drafts = await Promise.all(entries.map(async ({ pairing, rule }) => {
+        const source = { file_id: pairing.sourceFileId!, sheet_id: pairing.sheet1.id || null };
+        const destination = { file_id: pairing.destinationFileId!, sheet_id: pairing.sheet2.id || null };
+        const [sourceColumns, destinationColumns, analysis] = await Promise.all([
+          api.getColumns(source.file_id, setup.orientation, source.sheet_id),
+          api.getColumns(destination.file_id, setup.orientation, destination.sheet_id),
+          // Suggestions only; the saved rules do not depend on them.
+          api.analyzeFiles({ source_files_1: [source], source_files_2: [destination], orientation: setup.orientation }).catch(() => null),
+        ]);
+        return [pairId(pairing), sheetRuleToDraft(rule, sourceColumns, destinationColumns, analysis)] as const;
+      }));
+
+      const unique = (ids: string[]) => Array.from(new Set(ids));
+      const workbook = (id: string): WorkbookWithSheets => ({ file: setup.files.find((file) => file.id === id)!, sheets: sheets.get(id) ?? [] });
+      const [firstSource, ...moreSources] = unique(entries.map(({ pairing }) => pairing.sourceFileId!)).map(workbook);
+      const [firstDestination, ...moreDestinations] = unique(entries.map(({ pairing }) => pairing.destinationFileId!)).map(workbook);
+      const sheetsUsed = (side: "sheet1" | "sheet2", fileId: string) => unique(entries.filter(({ pairing }) => (side === "sheet1" ? pairing.sourceFileId : pairing.destinationFileId) === fileId).map(({ pairing }) => pairing[side].id));
+
+      setJobType("generic");
+      setOrientation(setup.orientation);
+      setFile1(firstSource.file);
+      setFile1Sheets(firstSource.sheets);
+      setSelectedSheets1(sheetsUsed("sheet1", firstSource.file.id));
+      setFile1Columns(drafts[0][1].file1Columns);
+      setFile2(firstDestination.file);
+      setFile2Sheets(firstDestination.sheets);
+      setSelectedSheets2(sheetsUsed("sheet2", firstDestination.file.id));
+      setFile2Columns(drafts[0][1].file2Columns);
+      setAdditionalSourceFiles(moreSources);
+      setAdditionalDestinationFiles(moreDestinations);
+      setFilePairings(setup.file_pairs.map((pair) => ({ sourceFileId: pair.source_files[0].file_id, destinationFileId: pair.destination_files[0].file_id })));
+      setPairings(entries.map(({ pairing }) => pairing));
+      setPairConfigs(Object.fromEntries(drafts));
+      setRerunOf(job);
+      setStep(3);
+    } catch (error) {
+      setMessage(`Could not reopen that run: ${error instanceof Error ? error.message : "unknown error"}. Upload the files to start again.`);
+    } finally {
+      setRestoring(false);
+      setAnalysisStatus("");
+    }
+  }
+
   async function downloadSample() {
     try {
       await api.downloadSampleTemplate(jobType);
@@ -461,10 +536,13 @@ export function UploadPage({ onJobCreated }: Props) {
   }
 
   return <section className="page workflow-page">
-    <div className="page-title workflow-title"><div><span className="eyebrow">New reconciliation</span><h1>Set up your comparison</h1><p>Six clear steps from Excel files to a downloadable reconciliation report.</p></div><span className="workflow-status">Step {step} of 6</span></div>
+    <div className="page-title workflow-title">{rerunOf
+      ? <div><span className="eyebrow">Run again</span><h1>Change the rules</h1><p>{rerunOf.input_file_1_name ?? "File 1"} vs {rerunOf.input_file_2_name ?? "File 2"}, loaded with the rules from your run of {new Date(rerunOf.completed_at ?? rerunOf.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}. Change what you need and run again; the earlier run stays in History.</p>{onStartFresh && <button type="button" className="text-command" onClick={onStartFresh}>Start with new files instead</button>}</div>
+      : <div><span className="eyebrow">New reconciliation</span><h1>Set up your comparison</h1><p>Six clear steps from Excel files to a downloadable reconciliation report.</p></div>}<span className="workflow-status">Step {step} of 6</span></div>
     <WorkflowSteps current={step} completedThrough={completedThrough} onSelect={setStep} />
     <div className="workflow-panel">
-      {step === 1 && <div className="step-content">
+      {restoring && <div className="step-content"><div className="loading-state" role="status"><Loader2 className="animate-spin" /> {analysisStatus || "Loading your earlier run…"}</div></div>}
+      {step === 1 && !restoring && <div className="step-content">
         <div className="section-heading"><div><h2>Upload your workbooks</h2><p>Choose the source and destination Excel files you want to compare.</p></div></div>
         <div className="setup-controls"><label>Reconciliation type<div className="segmented-control"><button type="button" className={jobType === "generic" ? "is-active" : ""} onClick={() => setJobType("generic")}>General</button><button type="button" className={jobType === "gst" ? "is-active" : ""} onClick={() => setJobType("gst")}>GST invoices</button></div></label><label>Data orientation<div className="segmented-control"><button type="button" className={orientation === "vertical" ? "is-active" : ""} onClick={() => setOrientation("vertical")}>Column headers</button><button type="button" className={orientation === "horizontal" ? "is-active" : ""} onClick={() => setOrientation("horizontal")}>Row headers</button></div></label><button type="button" className="secondary refresh-command" onClick={downloadSample}><Download size={16} />Download {jobType === "gst" ? "GST" : "General"} sample template</button><button type="button" className="secondary refresh-command" onClick={() => refreshColumns()} disabled={!hasBothFiles || busy}><RefreshCw size={16} />Refresh fields</button></div>
         <div className="upload-grid">

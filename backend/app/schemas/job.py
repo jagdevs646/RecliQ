@@ -1,6 +1,9 @@
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel
+
+from app.schemas.file import UploadedFileOut
 
 
 class ReportOut(BaseModel):
@@ -37,4 +40,13 @@ class ReconciliationJobOut(BaseModel):
 
 class JobListResponse(BaseModel):
     jobs: list[ReconciliationJobOut]
+
+
+class JobPlanResponse(BaseModel):
+    """A finished run's setup, to change its rules and run it again on the same files."""
+
+    job_id: str
+    orientation: str
+    file_pairs: list[dict[str, Any]]
+    files: list[UploadedFileOut]
 

@@ -16,6 +16,8 @@ import { LearningPage } from "./pages/LearningPage";
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [activeJob, setActiveJob] = useState<Job | null>(null);
+  // A finished run reopened in the wizard to change its rules and run again.
+  const [rerunJob, setRerunJob] = useState<Job | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
 
   useEffect(() => {
@@ -38,19 +40,28 @@ export default function App() {
     setPage(["completed", "completed_with_errors"].includes(job.status) ? "results" : "status");
   }
 
+  function navigate(next: Page) {
+    setRerunJob(null);
+    setPage(next);
+  }
+
   return (
-    <Shell activePage={page} onNavigate={setPage}>
-      {page === "dashboard" && <DashboardPage onNavigateUpload={() => setPage("upload")} onOpenJob={openJob} />}
+    <Shell activePage={page} onNavigate={navigate}>
+      {page === "dashboard" && <DashboardPage onNavigateUpload={() => navigate("upload")} onOpenJob={openJob} />}
       {page === "upload" && (
         <UploadPage
+          key={rerunJob?.id ?? "new"}
+          rerunFrom={rerunJob}
+          onStartFresh={() => setRerunJob(null)}
           onJobCreated={(job) => {
+            setRerunJob(null);
             setActiveJob(job);
             setPage("status");
           }}
         />
       )}
       {page === "status" && <StatusPage job={activeJob} onJobUpdate={setActiveJob} onViewResults={() => setPage("results")} />}
-      {page === "results" && <ResultsPage job={activeJob} onNewReconciliation={() => setPage("upload")} />}
+      {page === "results" && <ResultsPage job={activeJob} onNewReconciliation={() => navigate("upload")} onChangeRules={() => { setRerunJob(activeJob); setPage("upload"); }} />}
       {page === "history" && <HistoryPage onOpenJob={openJob} />}
       {page === "saved" && <SavedReconciliationsPage onJobCreated={(job) => { setActiveJob(job); setPage("status"); }} onNewReconciliation={() => setPage("upload")} />}
       {page === "aliases" && <AliasesPage />}

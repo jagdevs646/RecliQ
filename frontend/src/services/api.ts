@@ -1,4 +1,4 @@
-import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
+import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -313,6 +313,10 @@ export class ApiClient {
 
   async getJob(jobId: string): Promise<Job> {
     return this.request<Job>(`/jobs/${jobId}`);
+  }
+
+  async getJobPlan(jobId: string): Promise<JobPlan> {
+    return this.request<JobPlan>(`/jobs/${jobId}/plan`);
   }
 
   async cancelJob(jobId: string): Promise<Job> {

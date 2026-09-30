@@ -15,6 +15,7 @@ import {
   precheckSummary,
   ruleIsReady,
   ruleStatus,
+  sheetRuleToDraft,
   transformationIsComplete,
 } from "./plan";
 import type { PrecheckResult, SheetRuleDraft } from "../types";
@@ -145,6 +146,25 @@ describe("plan building", () => {
     expect(copied.primaryKeySource).toEqual(["INVOICE"]);
     expect(copied.matchingPasses).toEqual([]); // No DATE column in the target.
     expect(copied.dateFormat).toBe("month_first");
+  });
+});
+
+describe("changing a finished run", () => {
+  it("puts a saved sheet rule back in the editor unchanged", () => {
+    const config = draft({
+      primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"], dateFormat: "month_first",
+      rules: [{ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }],
+      tolerances: [{ field: "DEBIT", amount: 5, percent: null, days: null, similarity: null }],
+      secondaryConditions: [{ source_column: "VENDOR", destination_column: "VENDOR", comparison_method: "exact_text" }],
+      transformations: [{ operation: "trim", side: "both", columns: ["VENDOR"], params: {} }],
+    });
+    config.matchingPasses = [newPass("amount_date", config)];
+    const ids = { sheetRuleId: "rule-1-1", sourceSheet: "Books", destinationSheet: "Bank", label: "Books -> Bank" };
+    const saved = draftToSheetRule(config, ids);
+    const reopened = sheetRuleToDraft(saved, config.file1Columns, config.file2Columns, null);
+    expect(reopened).toMatchObject({ primaryKeySource: ["INVOICE"], dateFormat: "month_first", rules: config.rules, transformations: config.transformations });
+    expect(reopened.matchingPasses[0].narrative_source).toBe("");
+    expect(draftToSheetRule(reopened, ids)).toEqual(saved);
   });
 });
 
