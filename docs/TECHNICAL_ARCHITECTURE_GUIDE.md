@@ -1,204 +1,174 @@
-# RecliQ SaaS — Technical Architecture & Engineering Guide
+# RecliQ — Technical Architecture & Engineering Guide
 
-> **Project Name:** RecliQ (Web SaaS)  
-> **Source Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ)  
-> **Engineering Origin:** Re-architected from Python Desktop Application using **Codex** & **Antigravity IDE**
+> **Project:** RecliQ (web application)
+> **Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ) (proprietary; see [LICENSE](../LICENSE))
+> **Origin:** rebuilt from a Python desktop application with AI-assisted development
 
 ---
 
-## 1. System Overview & Architectural Paradigm
+## 1. System overview
 
-**RecliQ** is a high-performance, asynchronous data reconciliation platform designed as a web-native SaaS. It bridges the gap between raw, heterogeneous tabular datasets (Excel/CSV) and deterministic discrepancy analysis.
-
-### High-Level Architecture Diagram
+RecliQ is a reconciliation service: a React single-page app, a FastAPI backend, a durable job runner and a pandas-based matching engine. Records live in PostgreSQL (SQLite for local work) and files in Azure Blob Storage (local disk for development). Visitors are identified by an anonymous session, and everything they create is scoped to it.
 
 ```mermaid
 flowchart TB
-    subgraph ClientLayer["Frontend Layer (React 18 + TypeScript + Vite)"]
-        UI["Modern Glassmorphic SPA"]
-        Dashboard["Executive Dashboard & Metrics"]
-        Upload["File Upload & Column Selector"]
-        JobStatus["Asynchronous Job Poller"]
-        Results["Visual Exception & Diff Viewer"]
+    subgraph Client["Frontend: React 18 + TypeScript + Vite"]
+        Wizard["Six-step setup wizard"]
+        Results["Results dashboard and review"]
+        Manage["History, saved setups, aliases, auto-resolution, learning, audit"]
     end
 
-    subgraph APILayer["API & Orchestration Layer (FastAPI / ASGI)"]
-        Router["FastAPI REST Router (/api)"]
-        SessionMgr["Anonymous Session Manager (UUIDv4)"]
-        FileSvc["File Ingestion & Stream Service"]
-        JobOrch["Background Task Orchestrator"]
+    subgraph API["Backend: FastAPI"]
+        Session["Anonymous sessions"]
+        Files["Uploads and validation"]
+        Plan["Analysis and data-quality pre-check"]
+        Runs["Runs, jobs and reports"]
+        Controls["Templates, aliases, rules, learning, audit"]
     end
 
-    subgraph CoreEngine["Reconciliation & Analytics Engine (Python 3.12)"]
-        UniversalMapper["Universal Column & Orientation Mapper"]
-        GenericEngine["Generic Multi-Rule Engine"]
-        GSTEngine["GST & Tax Invoice Engine"]
-        Matcher["RapidFuzz / Levenshtein & Numeric Matchers"]
-        ExcelWriter["XlsxWriter / OpenPyXL Report Engine"]
+    subgraph Jobs["Job runner"]
+        Queue["Queue: in-process or Redis + RQ"]
+        Worker["Worker with heartbeat and recovery"]
     end
 
-    subgraph DataStorage["Persistence & Storage Layer"]
-        DB[("PostgreSQL / SQLite via SQLAlchemy 2.0")]
-        Storage[("Local Ephemeral Storage / Azure Blob Storage")]
+    subgraph Engine["Reconciliation engine: Python 3.12, pandas"]
+        Ingest["Ingestion: Excel, CSV, PDF/Word tables, MT940, BAI2, CAMT.053, GSTR-2B"]
+        Match["Transformations, key matching, passes"]
+        Tol["Tolerances and auto-resolution"]
+        Report["Universal data model and Excel report"]
     end
 
-    UI -->|HTTP / REST + JSON| Router
-    Router --> SessionMgr
-    Router --> FileSvc
-    Router --> JobOrch
-    FileSvc --> Storage
-    JobOrch --> DB
-    JobOrch --> CoreEngine
-    CoreEngine --> UniversalMapper
-    CoreEngine --> Matcher
-    CoreEngine --> ExcelWriter
-    ExcelWriter --> Storage
-    JobStatus -->|Poll /api/jobs/{id}| Router
+    DB[("PostgreSQL / SQLite")]
+    Store[("Azure Blob / local disk")]
+
+    Client -->|REST, WebSocket| API
+    Files --> Store
+    Runs --> Queue --> Worker --> Engine
+    Engine --> Store
+    API --> DB
+    Worker --> DB
 ```
 
 ---
 
-## 2. Engineering Genesis: Desktop-to-SaaS Re-engineering
+## 2. Engineering origin
 
-### The Legacy Baseline ("RecliQ Desktop")
-The initial software version was a standalone desktop application developed using Python with a wxPython/Tkinter GUI framework. While the math and matching heuristics were effective, the desktop architecture had architectural limits:
-- **Tight Coupling:** UI event loops were entangled with heavy data processing routines.
-- **Single-Thread Bottlenecks:** Large datasets blocked the UI rendering thread.
-- **Client-Side Footprint:** Required local execution environments and lacked centralized telemetry or automated update pipelines.
+The first RecliQ was a wxPython desktop application. Its matching worked, but the interface and the data processing were tangled together, large files froze the window, and every user needed a local install.
 
-### The Conversion using Codex & Antigravity IDE
-The transition from a monolithic desktop codebase to a modern, decoupled cloud SaaS was accelerated using **AI-assisted engineering with Codex** and the **Antigravity IDE**:
-1. **Domain-Driven Decoupling:** The proprietary reconciliation algorithms in `matchers.py` and `engine.py` were extracted into a stateless, framework-agnostic Python library.
-2. **RESTful Contract Design:** Defined strict Pydantic schemas for column mapping, rule configurations, job states, and result payloads.
-3. **Async Web Architecture:** Wrapped processing logic in FastAPI's asynchronous task pipelines to ensure non-blocking I/O during heavy dataframe operations.
-4. **Modern Frontend Scaffolding:** Generated a type-safe TypeScript React frontend using Vite and custom CSS token systems.
+The rebuild separated the two:
+1. **The engine became a library.** Matching, invoice merging and report writing (`matchers.py`, the generic and GST engines) were moved out of the GUI into code with no interface dependencies.
+2. **A typed contract.** Pydantic schemas define the plan (file pairs and sheet rules), jobs, previews and reports; the TypeScript types mirror them.
+3. **Background execution.** Runs moved off the request path into a job queue with progress reporting.
+4. **A new frontend.** A React and TypeScript single-page app with its own design tokens and no UI framework.
+
+Since then the engine has been extended well beyond the desktop version: several sheets and workbooks per run, keyless matching passes, preparation steps, company-name normalization, tolerances after matching, learning from reviewers, auto-resolution rules, bank statement and GST return formats, and an append-only audit log.
 
 ---
 
-## 3. Technology Stack & Language Ecosystem
+## 3. Technology stack
 
-| Layer | Technology | Language | Purpose / Rationale |
-| :--- | :--- | :--- | :--- |
-| **Frontend Framework** | React 18 | TypeScript | Component-driven UI with strong compile-time type safety. |
-| **Build & Tooling** | Vite 5 | TypeScript / JS | Instant Hot Module Replacement (HMR) and optimized rollup bundle builds. |
-| **Icons & Styling** | Lucide React + Vanilla CSS | CSS3 / TSX | Ultra-responsive, lightweight custom glassmorphic styling without bloated frameworks. |
-| **Backend Framework** | FastAPI 0.111 | Python 3.12 | Ultra-fast ASGI async framework with automatic OpenAPI documentation. |
-| **Data Processing** | Pandas 2.2 | Python | Vectorized tabular operations, matrix slicing, and dataframe transformations. |
-| **Fuzzy Matching** | RapidFuzz 3.9 | C++ / Python | C++ accelerated Levenshtein, Token Sort, and Partial Ratio calculations. |
-| **Database & ORM** | SQLAlchemy 2.0 + Alembic | Python | Declarative ORM with automated schema migrations; supports SQLite & PostgreSQL. |
-| **Spreadsheet Engine** | XlsxWriter + OpenPyXL | Python | High-performance multi-tab Excel generation with custom formatting and styles. |
-| **Cloud Storage** | Azure Storage Blob SDK | Python | Scalable object storage for enterprise deployments (pluggable with local storage). |
-| **Containers & Deploy** | Docker, Render, Azure | YAML / Bash | Multi-stage containerization with one-click deployment pipelines. |
+| Layer | Technology | Purpose |
+| :--- | :--- | :--- |
+| Frontend | React 18, TypeScript 5.5 | Component UI with compile-time checks |
+| Build and tests | Vite 7, Vitest 4, pnpm 9 | Dev server, production build, unit tests |
+| Icons and styling | Lucide, plain CSS with design tokens, Inter font | Light, responsive, accessible UI |
+| API | FastAPI 0.141, Pydantic Settings, Uvicorn | Async REST API with OpenAPI docs at `/docs` |
+| Data processing | pandas 2.2 | Tabular operations |
+| Fuzzy matching | RapidFuzz 3.9 | Token and Levenshtein similarity |
+| File reading | openpyxl, xlrd, pdfplumber, python-docx, defusedxml | Excel, PDF and Word tables, safe XML for CAMT.053 |
+| Reports | openpyxl, XlsxWriter | Multi-sheet Excel output |
+| Database | SQLAlchemy 2.0, Alembic, psycopg 3 | ORM and migrations; PostgreSQL 16 or SQLite |
+| Jobs | RQ 1.16 on Redis 7, or an in-process pool | Durable background runs |
+| Storage | Azure Storage Blob SDK, or local disk | Uploads, caches and reports |
+| Observability | JSON logs, request IDs, Sentry | Tracing a request or run end to end |
+| Delivery | Docker, GitHub Actions, Azure Container Apps | Images, CI, hosting |
 
 ---
 
-## 4. Deep Dive: Reconciliation Engine & Matching Heuristics
+## 4. The reconciliation engine
 
-### 4.1 Data Ingestion & Universal Column Mapper
-RecliQ handles diverse and chaotic real-world spreadsheets:
-- **Orientation Normalization:** Detects whether data is arranged in standard vertical rows or horizontal time-series columns, transposing internal matrices seamlessly.
-- **Dynamic Header Detection:** Parses multi-line headers, strips blank rows, and handles encoding irregularities (UTF-8, Latin-1, CP1252).
-- **Universal Data Model (`universal_mapper.py`):** Converts mismatched data into standardized exception schemas with severity classification (`Critical`, `High`, `Medium`), variance calculations, and percentage differentials.
+### 4.1 The plan
 
-```python
-# Conceptual Architecture: Universal Data Normalization
-def build_universal_data_model(
-    job_type: str,
-    reconciliation_results: list[dict],
-    file_1_not_found: list[dict],
-    file_2_not_found: list[dict],
-    ...
-) -> dict:
-    # Extracts field-level discrepancies, classifies exception severity,
-    # and computes absolute/relative numerical variances.
-```
+Every run is described by a **plan**: one or more file pairs, each with one or more independent sheet rules. A sheet rule holds the keys, "must also match" conditions, matching passes, column mappings, preparation steps, tolerances, date convention and name-normalization settings. The wizard, saved setups, re-runs and the API all produce this same structure (see [api.md](api.md)), and the plan is stored with the job so a run can be reproduced or reopened.
 
-### 4.2 Intelligent Matching Strategies (`matchers.py`)
+### 4.2 Processing order per sheet rule
 
 ```mermaid
 flowchart TD
-    InputVal["Source vs Target Value Pair"] --> TypeCheck{"Determine Value Type"}
-    
-    TypeCheck -->|Text / Strings| TextMatch["RapidFuzz Token Sort & Normalized Levenshtein"]
-    TypeCheck -->|Numbers / Currency| NumMatch["Absolute Tolerance & Percentage Delta Matcher"]
-    TypeCheck -->|Dates / Timestamps| DateMatch["Multi-Format Parser (ISO, UK, US, Epoch)"]
-    TypeCheck -->|Identifiers| IDMatch["Sanitizer (GSTIN, PAN, Invoice Number Strip)"]
-
-    TextMatch --> ScoreEval{"Score >= Threshold?"}
-    NumMatch --> ScoreEval
-    DateMatch --> ScoreEval
-    IDMatch --> ScoreEval
-
-    ScoreEval -->|Yes (100%)| Exact["Exact Match"]
-    ScoreEval -->|80% - 99%| Partial["Partial / Fuzzy Match (Flagged)"]
-    ScoreEval -->|No| Mismatch["Discrepancy / Exception"]
+    A["Read the two sheets (cached after the first read)"] --> B["Preparation steps on working copies"]
+    B --> C["Key matching"]
+    C --> D{"Matched by key?"}
+    D -->|Yes| E["Compare mapped fields"]
+    D -->|No| F["Matching passes: amount + date, amount within a range"]
+    F --> E
+    E --> G["Tolerance bands"]
+    G --> H["Auto-resolution rules"]
+    H --> I["Universal data model"]
+    I --> J["Excel report"]
 ```
 
-1. **Exact & Normalized Text Matching:** Strips non-alphanumeric noise, normalizes unicode characters, and applies case folding.
-2. **RapidFuzz Levenshtein & Token Matching:**
-   $$\text{Ratio}(s_1, s_2) = \frac{2 \cdot M}{|s_1| + |s_2|}$$
-   Calculates similarity indices to handle vendor typos (e.g., `"Microsoft Corporation"` vs `"Microsoft Corp"`).
-3. **Numeric & Currency Tolerances:** Supports both absolute tolerances (e.g., $\pm \$0.50$ for rounding differences) and relative percentage deviations.
-4. **GST Tax Invoice Subsystem:**
-   - Handles **1-to-1**, **1-to-many**, and **many-to-many** invoice line items.
-   - Reconciles taxable values, IGST, CGST, and SGST breakdowns.
-   - Computes eligible vs. ineligible Input Tax Credit (ITC) discrepancies.
+1. **Ingestion** (`ingestion/`). Workbooks are parsed once per file and sheet and cached (the cache name includes a reader version, so changes to reading invalidate old caches). PDF tables are read from character positions: cells that overflow into a neighbouring column are split correctly, tables that continue across pages are joined, and repeated headers are dropped. MT940, BAI2 and CAMT.053 statements become Transactions and Balances sheets; GSTR-2B JSON becomes the column layout the GST reconciliation expects.
+2. **Preparation** (`transformations.py`). A fixed list of operations: trim, change case, remove characters, prefixes or suffixes, replace text, strip leading zeros, keep letters and digits, invert sign, absolute value, multiply, round (half up, so 2.675 becomes 2.68), and debit/credit to a signed amount. They apply to working copies; the report shows original values.
+3. **Key matching** (`matching/`, `normalization/`). Keys are compared exactly, then in a normalized form: case, spacing and punctuation removed; for company names, legal forms (Pvt/Private, Ltd/Limited), common abbreviations, honorifics (M/s) and word order are normalized, and approved aliases apply. Fuzzy similarity (RapidFuzz) runs only after these rules fail, and a fuzzy key match is never treated as exact: it becomes a **match to confirm**. "Must also match" columns can reject a key match. Pairings a reviewer rejected earlier are not proposed again.
+4. **Matching passes** (`matching/pass_matcher.py`). On records still unmatched: same amount with dates within a window, or an amount within an absolute or percentage range, optionally requiring a similar narrative. A pair is made only when it is unique on both sides; otherwise the candidates are reported as "several possible matches".
+5. **Field comparison** (`engine.py`). Mapped fields are compared by type: numbers by difference, dates as calendar dates (year-first always; day-first or month-first for ambiguous numeric dates, per rule), text by similarity.
+6. **Tolerances** (`tolerance.py`). After matching and before the report, each difference is checked against the rule's bands: an amount, a percentage of the destination value, a number of days, or a minimum text similarity. Accepted differences are removed; a record with none left moves to Matched, and its comment explains why (for example "NARRATION is 85% similar, at least 75% required; AMOUNT differs by 3.98, within ±5"). Matches still to confirm stay in review.
+7. **Auto-resolution** (`resolution.py`). The session's rules, in order, label recurring exceptions with a resolution, reason code and GL account.
+8. **Report** (`universal_mapper.py`, `universal_reporter.py`). All sheet rules are merged into one data model, then written as the Summary, Differences, Only in File 1, Only in File 2, Match Review, Matched, Checks, Sheet Rules and Auto-resolved sheets. The Checks sheet proves every input record is accounted for.
+
+### 4.3 GST reconciliation
+
+A dedicated flow (`run_gst_reconciliation` in `reconciliation_engine/engine.py`, called through `app/reconciliation/gst.py`) merges duplicate invoice lines, compares taxable value, IGST, CGST, SGST, cess and invoice value between the purchase register and GSTR-2B, and reports mismatches, invoices present on one side only, and a confidence review of near matches.
+
+### 4.4 Learning
+
+Reviewers' confirm/reject decisions are stored with the method and score that proposed the match. RecliQ reports, per method and score band, the share of proposals confirmed and a conservative estimate (lower bound of the 95% Wilson interval), and turns that into suggestions. Learning never confirms a match by itself: aliases need approval, and rules need a person to create them.
 
 ---
 
-## 5. REST API Architecture & Data Flow
+## 5. API and data flow
 
-### Key API Routes
+The full endpoint list is in [api.md](api.md). A run follows this path:
 
-```text
-POST /api/files/upload                # Upload source files (multipart/form-data)
-GET  /api/files/{id}/columns          # Inspect column headers & data orientation
-POST /api/reconciliation/generic     # Trigger generic multi-column reconciliation job
-POST /api/reconciliation/gst         # Trigger GST invoice specific reconciliation
-GET  /api/jobs/{id}                   # Poll real-time job status & execution metrics
-GET  /api/reports/job/{id}/download   # Stream generated Excel workbook to client
-GET  /health                          # Service health check & uptime probe
-```
-
-### Asynchronous Execution Pipeline
-
-1. **File Upload:** The client uploads two tabular files (`File 1` and `File 2`). The backend writes them to session-scoped storage and returns file metadata.
-2. **Column Inspection:** The frontend queries `/api/files/{id}/columns` to populate mapping interfaces dynamically.
-3. **Job Initiation:** The user configures primary matching keys and comparison rules. Upon submission, FastAPI spawns a background thread/task worker and returns a `job_id`.
-4. **Processing & Status Polling:** The frontend polls `/api/jobs/{id}` displaying progress status (`pending` $\rightarrow$ `processing` $\rightarrow$ `completed` / `failed`).
-5. **Report Compilation:** Upon engine completion, multi-sheet Excel reports with custom styling, summary KPI tables, and side-by-side discrepancy views are persisted in storage.
-6. **Delivery:** The user downloads the generated workbook via a direct streaming endpoint.
+1. **Upload** (`POST /api/files/upload`): content is checked against the extension, size and row limits are enforced while streaming, and the file's SHA-256 is recorded in the audit log.
+2. **Set up**: sheets and headers are read (`/files/{id}/metadata`, `/files/{id}/columns`), and `POST /api/analysis/` suggests keys and column pairs.
+3. **Pre-check** (`POST /api/analysis/precheck`): the sheets are read exactly as the run will read them; blockers must be fixed and warnings confirmed.
+4. **Start** (`POST /api/reconciliation/generic`): the plan is validated, stored with a new job, and the job is queued.
+5. **Run**: a worker claims the job with a conditional update, refreshes a heartbeat, and reports progress (`GET /api/jobs/{id}`, `WS /api/jobs/{id}/ws`).
+6. **Review**: `GET /api/reports/job/{id}/summary` and `/preview` feed the dashboard; `/download` returns the workbook.
+7. **Repeat**: `GET /api/jobs/{id}/plan` returns the stored plan and files for "Change rules and run again".
 
 ---
 
-## 6. Deployment & Environment Setup
+## 6. Data, jobs and reliability
 
-### Prerequisites
-- Python 3.12+
-- Node.js 18+ / pnpm
-- Docker & Docker Compose (Optional for containerized run)
-
-### Running with Docker (Recommended)
-```bash
-# Clone the repository
-git clone https://github.com/jagdevs646/RecliQ.git
-cd RecliQ
-
-# Launch multi-container stack
-docker compose up --build
-```
-- **Frontend Application:** `http://localhost:5173`
-- **Backend API Docs:** `http://localhost:8000/docs`
-
-### Cloud Deployment Profiles
-- **Render (`render.yaml`):** Automated deployment configuration with managed PostgreSQL database, gunicorn/uvicorn workers, and persistent disk support.
-- **Azure Container Apps (`./scripts/deploy-azure.ps1`):** Enterprise Azure deployment script with Azure Container Registry (ACR) and Azure Blob Storage integrations.
+- **Database.** Files, jobs and their history, reports, saved setups and versions, aliases and decisions, auto-resolution rules and versions, and the audit log. Alembic migrations run on start in containers.
+- **Durable jobs.** The job row is the source of truth. With Redis, workers run separately (`python -m app.jobs.worker`); without it, a thread pool in the API runs them. A sweeper re-queues runs whose heartbeat has stopped, up to `JOB_MAX_ATTEMPTS`, then fails them with an explanation. Infrastructure errors are retried; data errors are not.
+- **Retention.** Each session keeps its 20 most recent runs; older ones are removed with their reports.
+- **Timestamps.** Stored in UTC and returned with an offset, so browsers show local time correctly.
 
 ---
 
-## 7. Project Summary & Source Code Access
+## 7. Security and compliance
 
-The complete source code, test suites, API specifications, and deployment manifests are open for review and contributions:
+- **No secrets in the repository.** Configuration comes from environment variables and a secret store; CI scans the full history with gitleaks.
+- **Upload safety.** Content sniffing, password-protected and ZIP-bomb detection, `defusedxml` for XML, and size and row limits.
+- **Session isolation.** Every query is filtered by the session; the session cookie is HttpOnly and `Secure` over HTTPS.
+- **Append-only audit log.** The ORM and database triggers refuse updates and deletes, entries are hash-chained, and `GET /api/audit/verify` detects tampering.
 
-- **GitHub Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ)
-- **Primary Maintainer:** Jagdev / @jagdevs646
+Details: [operations-and-security.md](operations-and-security.md).
+
+---
+
+## 8. Testing and delivery
+
+- **Backend**: pytest suite in `tests/backend`, run against SQLite locally; CI also runs the migrations on PostgreSQL and checks the audit log stays append-only.
+- **Frontend**: TypeScript type-check, Vitest unit tests for the plan logic, and a production build.
+- **CI** (`.github/workflows/ci.yml`): secret scan, both test suites, dependency audits (`pip-audit`, `pnpm audit`) and all Docker image builds on every push.
+- **Deployment**: Docker Compose for a local production-like stack ([installation.md](installation.md)); Azure Container Apps through `scripts/deploy-azure.ps1` ([azure-deployment.md](azure-deployment.md)).
+
+---
+
+## 9. Ownership
+
+RecliQ is proprietary software owned by Jagdev Singh (@jagdevs646). The source is visible for reference only; it may not be copied, modified, distributed or used without written permission. See [LICENSE](../LICENSE).

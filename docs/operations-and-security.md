@@ -2,8 +2,9 @@
 
 This page covers how RecliQ keeps secrets out of the code, how jobs survive
 restarts, how it is monitored, and the controls added for finance use:
-saved reconciliations, the audit log, the data-quality pre-check, keyless
-matching, transformations and name normalization.
+saved reconciliations and re-runs, the audit log, the data-quality
+pre-check, keyless matching, transformations, tolerances and name
+normalization.
 
 ## Secrets
 
@@ -63,6 +64,9 @@ git push --force --all origin && git push --force --tags origin
   and attempt.
 - `GET /health` is liveness; `GET /health/ready` checks the database and
   (with the Redis backend) the queue, returning 503 when either is down.
+- Timestamps are stored in UTC and returned with an offset
+  (`2026-09-30T18:52:11Z`); the frontend shows them in the viewer's time
+  zone.
 
 ## Uploads
 
@@ -70,6 +74,12 @@ git push --force --all origin && git push --force --tags origin
   `.tsv`, `.txt`, `.pdf` (tables) and `.docx` (tables), plus bank
   statements and GST returns (below). `.doc` and `.md` were listed before
   but never worked, so they are refused.
+- PDF tables are read from character positions, so text that overflows
+  into the next column stays in its own cell. A table that continues on
+  the next page is joined to it (a repeated header row is dropped), and a
+  row counts as a header only when most value columns carry labels.
+- Parsed sheets are cached per file; the cache name includes a reader
+  version, so a change to how files are read never reuses old results.
 - Content is checked against the extension (ZIP/OOXML, OLE2, `%PDF`, no
   binary in text files); password-protected workbooks and ZIP bombs are
   refused with a clear message.
@@ -146,6 +156,16 @@ accounting synonym (only if one column qualifies) → very similar name (only
 if it clearly wins). Anything else is shown for the user to choose; nothing
 is guessed. The run is linked to the template and version it used.
 
+### Change rules and run again
+
+"Change rules and run again" on a finished general reconciliation reopens
+the setup wizard at the matching-key step with the same files and every
+setting of the stored plan (`GET /api/jobs/{id}/plan`). The new run is a
+separate job; the earlier run and its report are unchanged. A run can be
+reopened while its files are stored: uploads are kept until the last run
+that uses them is deleted or pruned (each session keeps its 20 most recent
+runs).
+
 ## Audit log
 
 Append-only record of uploads (with SHA-256), rejected uploads, pre-checks,
@@ -180,16 +200,34 @@ Per sheet rule, in order:
 
 1. **Transformations** (optional) prepare values: trim, case, remove
    prefix/suffix/characters, replace text, leading zeros, keep letters and
-   digits, flip or drop the sign, multiply, round, and Debit/Credit → one
-   signed amount. Only this fixed list exists (no expressions). The report
+   digits, flip or drop the sign, multiply, round (half up: 2.675 → 2.68),
+   and Debit/Credit → one signed amount. Only this fixed list exists (no expressions). The report
    shows the original next to every changed value.
 2. **Primary key** (with mandatory secondary keys, as before).
 3. **Extra passes** (optional), each only on records still unmatched:
-   amount + date within ±N days, or amount within an absolute/percentage
-   tolerance (optionally with a date window), each optionally requiring a
+   amount + date within ±N days, or an amount within a range (absolute or
+   percentage, optionally with a date window), each optionally requiring a
    similar reference/narrative. A pair is made only when it is mutually
    unique; otherwise every candidate is listed as "several possible
    matches". A rule may have no key at all (for example a bank statement).
+   Pass limits only decide which unmatched records are paired; they do not
+   accept differences on records the key matched (that is what tolerances
+   are for).
+4. **Compare** the mapped fields: numbers by difference, dates as calendar
+   dates, text by similarity. Year-first dates (`2026-08-05`, also with a
+   time) are always year-month-day; ambiguous numeric dates (`05/08/2026`)
+   follow the rule's day-first or month-first setting.
+5. **Tolerances** (optional), after matching and before the report. Each
+   band names a compared field (or every field) and one or more limits: an
+   amount, a percentage of the destination value (either limit is enough),
+   a number of days for dates, or a minimum text similarity. A difference
+   within a band is accepted; a record with no differences left moves to
+   Matched with a comment giving the reason for each field ("AMOUNT differs
+   by 3.98, within ±5"). Records still to be confirmed stay in review. The
+   Summary and Sheet Rules tabs list the bands and how many differences and
+   records they accepted. Step 4 of the wizard offers to copy limits typed
+   into a step-3 pass into tolerances, since people often expect them to
+   apply there too.
 
 ### Name normalization and aliases
 

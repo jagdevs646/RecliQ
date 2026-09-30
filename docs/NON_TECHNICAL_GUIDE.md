@@ -1,149 +1,164 @@
-# RecliQ SaaS — Business & Non-Technical Guide
+# RecliQ — Business & Non-Technical Guide
 
-> **Tagline:** *One Click Reconciliation*  
-> **Official Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ)
-
----
-
-## 1. Executive Summary
-
-**RecliQ** is an intelligent, cloud-native Software-as-a-Service (SaaS) platform engineered to automate, accelerate, and simplify data reconciliation. Whether reconciling financial ledgers, GST tax filings, vendor invoices, bank statements, or complex multi-format spreadsheets, RecliQ transforms hours of error-prone, manual spreadsheet manipulation into a seamless **one-click automated process**.
-
-RecliQ removes all traditional friction: there is **no complex software to install**, **no registration barriers**, and **no steep learning curve**. Users simply upload their datasets via a web browser, define or auto-map their comparison rules, and receive comprehensive, audit-ready discrepancy reports within seconds.
+> **Tagline:** *One Click Reconciliation*
+> **Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ)
+> **Owner:** Jagdev Singh. RecliQ is proprietary software; see [LICENSE](../LICENSE).
 
 ---
 
-## 2. The Origin Story: From Desktop Software to Cloud SaaS
+## 1. Summary
 
-### The Initial Prototype: "RecliQ Desktop"
-The journey of RecliQ began with a desktop software application built using Python (wxPython/Tkinter). While the desktop version was functional and demonstrated the power of automated reconciliation logic, it faced significant real-world constraints:
-- **System Installation Requirements:** Every team member had to install Python runtimes or bulky executable bundles on their local machines.
-- **Operating System Incompatibilities:** Running the app across Windows, macOS, or Linux required separate builds, patches, and configurations.
-- **Collaboration Bottlenecks:** Files and outputs were locked inside individual computers, making team reviews and multi-device access difficult.
-- **Update Distribution Lag:** Any new matching algorithm or bug fix required distributing an entirely new installer to all users.
+**RecliQ** compares two sets of financial records and tells you, record by record, what matches, what differs and what is missing on either side. Typical uses are books against a bank statement, a purchase register against GSTR-2B, a ledger against a vendor statement, or sales against a payment gateway's settlement report.
 
-### The Transformation with Codex & Antigravity IDE
-To unlock the true potential of the application, the author embarked on converting the desktop tool into an accessible, enterprise-grade web application. 
+It runs in a web browser. There is nothing to install and no account to create: you upload the two files, tell RecliQ how to recognise the same record in both, and download an Excel report that is ready for review and audit.
 
-Using **AI-powered development with Codex** and the **Antigravity IDE**, the core matching algorithms, invoice merging logic, and report-generation pipelines were re-architected from the ground up:
-1. **Separation of Logic & UI:** The desktop GUI components were decoupled from the mathematical reconciliation engine.
-2. **Modern Web Re-engineering:** The user interface was rebuilt into a modern, responsive single-page web application (SPA), while the backend was structured into high-performance asynchronous microservices.
-3. **Continuous Iteration:** Day by day, with continuous refinements assisted by Antigravity and Codex, the platform evolved into a full-featured, zero-install SaaS platform now hosted and maintained on GitHub.
+---
+
+## 2. The origin story: from desktop software to a web application
+
+### The first version: RecliQ Desktop
+RecliQ began as a desktop application written in Python (wxPython). Its matching logic worked well, but the desktop form held it back:
+- **Installation on every machine**, with Python or a large installer on each computer.
+- **Separate builds for each operating system.**
+- **Files and results stuck on one computer**, which made team review hard.
+- **Every fix needed a new installer** sent to every user.
+
+### The rebuild with AI-assisted development
+The author rebuilt RecliQ as a web application with AI-assisted development (Codex and the Antigravity IDE at first, and later Claude Code):
+1. **Logic separated from the screen.** The matching engine was taken out of the desktop interface so it could run on a server.
+2. **A modern web app.** The interface was rebuilt as a browser application talking to a web API.
+3. **Steady improvement.** Features were added step by step: more file formats, several sheets per run, smarter matching, tolerances, saved setups, learning from reviewers and a full audit trail.
 
 ```mermaid
 journey
     title Evolution of RecliQ
-    section Desktop Era
-      Python Desktop App: 3: Local installation required, OS dependency
-      Manual Distribution: 2: Hard to update, isolated on one PC
-    section AI-Driven Transformation
-      Codex & Antigravity IDE: 5: Code refactoring, architecture re-design
-      Web Decoupling: 5: Web APIs + Modern Frontend
-    section SaaS Era
-      Cloud-Native RecliQ: 5: Zero-install, universal browser access, GitHub hosted
+    section Desktop era
+      Python desktop app: 3: Installed on each PC
+      Manual distribution: 2: Hard to update
+    section Rebuild
+      AI-assisted re-engineering: 5: Engine separated from the interface
+      Web app and API: 5: Works in any browser
+    section Today
+      RecliQ web application: 5: No install, guided setup, audit-ready reports
 ```
 
 ---
 
-## 3. Why RecliQ Was Created & Problems It Solves
+## 3. The problem RecliQ solves
 
-### The Real-World Problem: "Spreadsheet Hell"
-In modern organizations, data lives in multiple disparate systems: ERPs, CRM databases, accounting portals (like Tally, SAP, QuickBooks), bank portals, and government tax databases (like GSTN). Periodically, finance and operations teams must compare two sets of records to ensure they match.
+Finance teams regularly compare records from different systems: accounting software (Tally, SAP, QuickBooks), bank portals, marketplaces and the GST portal. Done by hand, this means:
 
-Traditionally, this meant:
-1. **Manual VLOOKUP & Excel Formulas:** Writing brittle formulas that break if column orders change or row formats differ.
-2. **Hundreds of Lost Hours:** Highly paid accountants and analysts spending days cross-referencing row by row.
-3. **Severe Human Errors:** Typos, minor spelling variations ("ABC Pvt Ltd" vs. "ABC Private Limited"), floating-point currency differences, and date format mismatches leading to missed discrepancies.
-4. **GST & Tax Compliance Risks:** Failing to reconcile purchase registers with government tax portals (GSTR-2B) leads to lost Input Tax Credit (ITC), cash flow penalties, and legal notices.
+1. **VLOOKUPs and formulas** that break when columns move or formats change.
+2. **Days of row-by-row checking** by skilled staff.
+3. **Missed differences** caused by small variations: "ABC Pvt Ltd" against "ABC Private Limited", a reference with a prefix, a date written differently, a few rupees of rounding.
+4. **Compliance risk**: an unreconciled purchase register against GSTR-2B can mean lost input tax credit.
 
-### How RecliQ Solves These Problems
-
-| Traditional Manual Reconciliation | RecliQ Automated SaaS |
+| Doing it by hand | With RecliQ |
 | :--- | :--- |
-| **Hours or Days** of manual spreadsheet work. | **Seconds** with one-click automated execution. |
-| Breaks on minor spelling typos or format changes. | **Intelligent Fuzzy Matching** accommodates text variations & format differences. |
-| Rigid column structure required. | **Universal Mapping** supporting vertical, horizontal, and multi-key mappings. |
-| Hard-to-trace discrepancies across large workbooks. | **Color-Coded Multi-Sheet Excel Reports** with full audit logs and severity levels. |
-| Complex local installations and software licenses. | **Instant Browser Access** — open the link and start reconciling. |
+| Hours or days of spreadsheet work | A guided setup, then the run takes seconds to minutes |
+| Breaks on spelling, spacing and format differences | Names, references and dates are compared the way a person would read them |
+| One layout, one sheet at a time | Several workbooks and sheets in one run, each with its own rules |
+| Differences hard to trace or explain | An Excel report with a sheet per outcome and a comment on every decision |
+| Rules rebuilt every month | Saved setups, re-runs with changed rules, and rules that clear recurring items |
 
 ---
 
-## 4. Who Can Use RecliQ? (Target Personas)
-
-RecliQ is built for anyone whose workflow involves comparing and verifying tabular data:
+## 4. Who uses RecliQ
 
 ```mermaid
 mindmap
-  root((Who Uses RecliQ?))
-    Finance & Accounting
-      Chartered Accountants (CAs)
-      CPAs & Bookkeepers
-      Tax Compliance Officers
-    Operations & E-commerce
-      Marketplace Settlement Teams
-      Payment Gateway Auditors
-      Vendor Payout Managers
-    Procurement & Supply Chain
-      PO vs Invoice Verification
-      Inventory vs Warehouse Logs
-      Logistics Billing Checkers
-    Audit & Compliance
-      Internal Financial Auditors
-      Data Quality Analysts
-      Enterprise Risk Teams
+  root((Who uses RecliQ?))
+    Finance and accounting
+      Chartered Accountants
+      Accounts teams
+      Tax compliance
+    Banking and treasury
+      Bank reconciliation
+      Payment and settlement teams
+    Operations and e-commerce
+      Marketplace settlements
+      Payment gateway payouts
+    Audit and control
+      Internal auditors
+      Finance controllers
 ```
 
-1. **Chartered Accountants (CAs), CPAs & Tax Consultants:**
-   - Instantly reconcile client purchase registers with GST portal data (GSTR-2B / GSTR-2A).
-   - Identify uncredited tax amounts, duplicate invoices, and vendor mismatches before filing.
-2. **Finance & Accounts Payable (AP) Teams:**
-   - Verify vendor invoices against Purchase Orders (POs) and Good Receipts Notes (GRNs).
-   - Ensure accurate payments without double-billing or value discrepancies.
-3. **E-Commerce & Operations Teams:**
-   - Reconcile internal sales logs against Amazon, Flipkart, Shopify, or payment gateway (Stripe, Razorpay, PayPal) settlement sheets.
-4. **Banking & Audit Professionals:**
-   - Run daily or monthly ledger vs. bank statement reconciliations with custom tolerance levels.
-5. **Business Owners & SMEs:**
-   - Achieve enterprise-level financial accuracy without needing costly ERP custom setups.
+1. **Chartered Accountants and tax consultants**: reconcile a client's purchase register with GSTR-2B, spot missing or mismatched invoices before filing.
+2. **Accounts teams**: books against bank statements every month, with bank charges and similar items cleared automatically.
+3. **Accounts payable**: vendor statements against the ledger; invoices against purchase orders.
+4. **E-commerce and operations**: internal sales against Amazon, Flipkart, Shopify or payment gateway (Razorpay, Stripe, PayPal) settlements.
+5. **Auditors and controllers**: a documented, repeatable reconciliation with an audit trail of who did what.
 
 ---
 
-## 5. Key Business Benefits & Operational Efficiency
-
-- **🚀 95%+ Reduction in Processing Time:** Tasks that previously took an entire workday are completed before your coffee gets cold.
-- **🎯 Elimination of Human Error:** Algorithmic matching tests exact matches, fuzzy similarities, date alignments, and numerical differences with mathematical precision.
-- **💰 Financial Risk Mitigation:** Prevents revenue leakage, duplicate payments to vendors, and loss of tax credits.
-- **📊 Executive-Ready Reporting:** Instantly outputs professional Excel files formatted with executive summary dashboards, discrepancy breakdowns, and side-by-side mismatch logs.
-- **🔒 Privacy & Isolation:** Every session is isolated with unique anonymous session tokens, ensuring data confidentiality.
-
----
-
-## 6. How It Works in 5 Simple Steps
+## 5. How it works: six steps
 
 ```mermaid
 flowchart LR
-    A["1. Upload Files"] --> B["2. Auto-Map Columns"]
-    B --> C["3. Set Rules & Tolerances"]
-    C --> D["4. Click Reconcile"]
-    D --> E["5. Download Audit Report"]
+    A["1. Upload files"] --> B["2. Pair sheets"]
+    B --> C["3. Matching key"]
+    C --> D["4. Map columns"]
+    D --> E["5. Report setup"]
+    E --> F["6. Run"]
 ```
 
-1. **Upload Datasets:** Drag and drop your two Excel (`.xlsx`, `.xls`) or CSV files into the web application.
-2. **Choose Orientation & Columns:** RecliQ automatically reads available columns, supporting both standard vertical tables and transposed horizontal layouts.
-3. **Define Match Keys:** Select the primary matching identifiers (e.g., Invoice Number, Order ID, Transaction Reference) and comparison columns (Amount, Date, Tax, Vendor).
-4. **Run Engine:** RecliQ processes the reconciliation in the background while displaying real-time progress indicators.
-5. **Review & Download:** Inspect visual summaries on the interactive web dashboard or download a formatted, multi-tab Excel workbook with highlighted differences.
+1. **Upload files.** Excel, CSV or text files, tables inside PDF or Word documents, bank statements in MT940, BAI2 or CAMT.053 format, or GSTR-2B downloaded from the GST portal. You can add more than one workbook on each side.
+2. **Pair sheets.** Choose which sheet is compared with which. Each pair is reconciled on its own.
+3. **Matching key.** Choose the column (or columns) that identify the same record in both files, such as an invoice number or a UTR. RecliQ suggests likely keys. You can also require other columns to agree, and add extra passes that pair leftover records by amount and date when there is no common reference.
+4. **Map columns.** Choose the fields to compare (amount, date, narration and so on). A search box helps with long header lists. Here you can also clean values first (remove a prefix, turn debit and credit into one amount, round), and set **tolerances**: differences small enough to accept, such as ₹5, 1%, 3 days, or narration that is 75% similar.
+5. **Report setup.** Choose which extra columns appear in the report.
+6. **Run.** RecliQ first checks the data (blank keys, text in amount columns, keys that barely overlap) and tells you before anything runs. Then it reconciles and shows progress.
 
 ---
 
-## 7. How to Access & Use the Application
+## 6. What you get
 
-- **Official GitHub Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ)
-- **Deployment Status:** RecliQ is pre-configured for instant cloud deployment on platforms like Render, Vercel, and Azure Container Apps, as well as local execution via Docker.
-- **Quick Run locally:**
-  ```bash
-  git clone https://github.com/jagdevs646/RecliQ.git
-  cd RecliQ
-  docker compose up --build
-  ```
-  *Open your browser and navigate to `http://localhost:5173` to start reconciling.*
+### The results dashboard
+- Counts for each outcome: fully matched, values differ, only in one file, matches to confirm, several possible matches, auto-resolved.
+- A preview of every list, with a filter. Columns can be widened and long comments wrapped.
+- **Matches to confirm**: where RecliQ found a likely but not certain match (a similar key, or an amount and date without a reference), you confirm or reject it with one click.
+
+### The Excel report
+| Sheet | Shows |
+|---|---|
+| Summary | Totals, the rules used and what each outcome means |
+| Differences | Matched records where a compared field differs, with the difference |
+| Only in File 1 / Only in File 2 | Records with no partner on the other side |
+| Match Review | Likely matches to confirm and records with several candidates |
+| Matched | Records that agree, including those accepted within your tolerances, with the reason |
+| Checks | Control totals showing that every record is accounted for |
+| Sheet Rules | The setup of each sheet pair and its results |
+| Auto-resolved | Exceptions cleared by your rules, with the rule, reason code and GL account |
+
+You can also download a customised version with only the sheets you need and your preferred date and number formats.
+
+### Change and repeat
+- **Change rules and run again**: open a finished run with its files and rules already loaded, adjust anything (a key, a mapping, a tolerance) and run again. Each run is kept separately, so you can compare.
+- **Saved setups**: save the rules once and run them on next month's files; RecliQ matches the new files' sheets and columns to the saved ones and asks only when it is unsure.
+
+---
+
+## 7. Learning and control
+
+- **Name aliases.** When reviewers confirm the same pair (for example "IBM" and "International Business Machines") in more than one reconciliation, RecliQ suggests remembering it. It is used only after someone approves it.
+- **Learning from decisions.** A pairing a reviewer rejected is never proposed again. RecliQ shows how often each matching method is confirmed, so teams can see which ones to trust.
+- **Auto-resolution rules.** Describe items your team clears the same way every period, such as bank charges below ₹500 or TDS, with a GL account. Matching exceptions are labelled automatically and listed separately. Rules can be tested on an earlier run before saving, and RecliQ suggests rules for wording that keeps recurring.
+- **Audit log.** Every upload, run, decision, rule change, download and deletion is recorded, with a tamper check. It can be exported.
+- Nothing is accepted silently: likely matches need confirmation, aliases need approval, and tolerances write their reason into the report.
+
+---
+
+## 8. Benefits
+
+- **Time**: work that takes hours by hand becomes a short setup and a run, and repeat reconciliations reuse the setup.
+- **Accuracy**: the same rules are applied to every record, and every decision is explained.
+- **Fewer financial risks**: duplicates, missing entries and lost tax credit are easier to catch.
+- **Ready for review**: the report is structured for managers and auditors, with totals that reconcile.
+- **Privacy**: each browser session sees only its own files and results.
+
+---
+
+## 9. Access and ownership
+
+- **Repository:** [https://github.com/jagdevs646/RecliQ](https://github.com/jagdevs646/RecliQ). The code is visible for reference only; using, copying or deploying it needs written permission from the owner (see [LICENSE](../LICENSE)).
+- **Hosting:** RecliQ is prepared for Azure Container Apps, and can run on a single computer with Docker. Technical setup is described in [installation.md](installation.md) and [azure-deployment.md](azure-deployment.md).
