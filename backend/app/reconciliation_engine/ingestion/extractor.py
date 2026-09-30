@@ -9,11 +9,6 @@ from typing import List, Dict, Any, Optional
 import pandas as pd
 
 try:
-    import pdfplumber
-except ImportError:
-    pdfplumber = None
-
-try:
     import docx
 except ImportError:
     docx = None
@@ -99,24 +94,11 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
         return [{"id": "default", "name": "Main Data"}]
         
     elif ext == '.pdf':
-        if pdfplumber is None:
-            raise ImportError("pdfplumber is required to parse PDFs. Please install it.")
-        tables = []
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                for i, page in enumerate(pdf.pages):
-                    page_tables = page.find_tables()
-                    for j, _ in enumerate(page_tables):
-                        tables.append({
-                            "id": f"page_{i+1}_table_{j+1}",
-                            "name": f"Page {i+1} - Table {j+1}"
-                        })
-        except Exception as e:
-            raise ValueError(f"Failed to parse PDF: {e}")
-            
-        if not tables:
-            raise ValueError("No tables detected in PDF.")
-        return tables
+        # One entry per logical table: a table that runs over several pages is
+        # merged into one (see pdf_tables), not listed once per page.
+        from app.reconciliation_engine.ingestion.pdf_tables import extract_tables
+
+        return [{"id": table.id, "name": table.name} for table in extract_tables(file_path)]
         
     elif ext == '.docx':
         if docx is None:
@@ -146,16 +128,20 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
 # with openpyxl), and one reconciliation reads each sheet several times
 # (analysis, columns, execution). Each sheet is parsed once, kept in a small
 # in-memory LRU and in a pickle beside the upload so other workers reuse it.
-_CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv", ".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json"}
+_CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv", ".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json", ".pdf"}
 _MEMORY_CACHE_SIZE = 6
 _memory_cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
 _cache_guard = threading.Lock()
 _parse_locks: dict[tuple, threading.Lock] = {}
+# Bump whenever a reader changes what it returns, so pickles parsed by the old
+# code are not served for files uploaded before the change.
+# 2: PDF tables merged across pages; text overflowing a cell kept in its cell.
+_READER_VERSION = 2
 
 
 def _cache_path(file_path: Path, sheet_id: str) -> Path:
     digest = hashlib.sha1(str(sheet_id).encode("utf-8")).hexdigest()[:12]
-    return file_path.with_name(f"{file_path.name}.sheet-{digest}.pkl")
+    return file_path.with_name(f"{file_path.name}.sheet-{digest}-r{_READER_VERSION}.pkl")
 
 
 def _cache_key(file_path: Path, sheet_id: str) -> tuple | None:
@@ -332,31 +318,10 @@ def _parse_table_unchecked(file_path: Path, filename: str, sheet_id: str) -> pd.
         return pd.read_csv(file_path, sep='\t')
         
     elif ext == '.pdf':
-        if pdfplumber is None:
-            raise ImportError("pdfplumber is required")
-            
-        try:
-            # sheet_id format: page_{i}_table_{j}
-            parts = sheet_id.split('_')
-            page_idx = int(parts[1]) - 1
-            table_idx = int(parts[3]) - 1
-            
-            with pdfplumber.open(file_path) as pdf:
-                page = pdf.pages[page_idx]
-                tables = page.extract_tables()
-                if table_idx < len(tables):
-                    table_data = tables[table_idx]
-                    if not table_data or len(table_data) < 2:
-                        return pd.DataFrame() # empty or no headers
-                    
-                    # Assume first row is header
-                    df = pd.DataFrame(table_data[1:], columns=table_data[0])
-                    return df
-                else:
-                    raise ValueError(f"Table index {table_idx} out of range for page {page_idx+1}")
-        except Exception as e:
-            raise ValueError(f"Failed to extract PDF table: {e}")
-            
+        from app.reconciliation_engine.ingestion.pdf_tables import extract_tables, find_table
+
+        return find_table(extract_tables(file_path), sheet_id).to_dataframe()
+
     elif ext == '.docx':
         if docx is None:
             raise ImportError("python-docx is required")
