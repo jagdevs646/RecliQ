@@ -257,8 +257,14 @@ class UniversalReporter:
         ws.append([])  # Row 3 spacer (rows 1-2 hold the title).
         ws.append(headers)
         count = 0
+        # Columns with fractional numbers are shown to 2 decimals; the cells keep the exact value.
+        decimal_columns: set[int] = set()
         for row in rows:
-            ws.append([_cell_value(value) for value in row])
+            values = [_cell_value(value) for value in row]
+            for col_idx, value in enumerate(values, start=1):
+                if isinstance(value, float) and math.isfinite(value) and not value.is_integer():
+                    decimal_columns.add(col_idx)
+            ws.append(values)
             count += 1
         ws.freeze_panes = "A5"
         if count == 0:
@@ -276,14 +282,15 @@ class UniversalReporter:
             table = Table(displayName=name, ref=f"A4:{last}{count + 4}")
             table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
             ws.add_table(table)
-            for col_idx in number_columns:
+            percent_columns = set(percent_columns)
+            for col_idx in (set(number_columns) | decimal_columns) - percent_columns:
                 for (cell,) in ws.iter_rows(min_row=5, max_row=count + 4, min_col=col_idx, max_col=col_idx):
                     if _is_number(cell.value):
                         cell.number_format = self.config.number_format
             for col_idx in percent_columns:
                 for (cell,) in ws.iter_rows(min_row=5, max_row=count + 4, min_col=col_idx, max_col=col_idx):
                     if _is_number(cell.value):
-                        cell.number_format = "0.0%"
+                        cell.number_format = "0.00%"
         self._fit_columns(ws, headers, count)
         return count
 

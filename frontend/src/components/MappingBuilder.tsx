@@ -1,7 +1,9 @@
 import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
 import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { filterColumns, matchRanges, searchTerms } from "../lib/columnSearch";
-import type { RuleMapping } from "../types";
+import { TOLERANCE_KINDS, TOLERANCE_LIMITS, clearTolerance, comparedFieldLabel, guessToleranceKind, setToleranceLimit, toleranceFor, toleranceIsComplete, toleranceKind, toleranceLimit, type ToleranceKind } from "../lib/plan";
+import type { AnalysisResponse, RuleMapping, ToleranceBand } from "../types";
+import { ToleranceHelp } from "./RuleExtras";
 
 interface Props {
   file1Columns: string[];
@@ -14,6 +16,13 @@ interface Props {
   file2Name?: string;
   /** Column pairs RecliQ thinks belong together; offered, never auto-applied. */
   suggestions?: Array<{ source: string; target: string }>;
+  /** Accepted differences, set per mapped field next to its mapping. */
+  tolerances?: ToleranceBand[];
+  onTolerancesChange?: (tolerances: ToleranceBand[]) => void;
+  /** Shown above the mapped fields, e.g. tolerances on offer from the matching step. */
+  toleranceNotice?: ReactNode;
+  /** What RecliQ learned about the columns, to pick each field's type of data. */
+  analysis?: AnalysisResponse | null;
 }
 
 type MappingMode = "drag" | "rows";
@@ -38,7 +47,9 @@ function matchConfidence(source: string, destination: string) {
   return Math.round((common.length / Math.max(left.length, right.length)) * 90);
 }
 
-export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name, suggestions = [] }: Props) {
+export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name, suggestions = [], tolerances = [], onTolerancesChange: editTolerances, toleranceNotice, analysis }: Props) {
+  // A type of data the user picked over the detected one, by compared field.
+  const [pickedKinds, setPickedKinds] = useState<Record<string, ToleranceKind>>({});
   const [mode, setMode] = useState<MappingMode>("drag");
   const [left, setLeft] = useState<string[]>([]);
   const [right, setRight] = useState<string[]>([]);
@@ -169,10 +180,28 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
       onAdd={() => addRule()}
       onClear={() => { setLeft([]); setRight([]); }}
     />}
-    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className="mapping-row" key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}><span>{rule.file_1_fields.join(" + ")}</span><ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span><button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button></div>)}</div>
+    {toleranceNotice}
+    {editTolerances && rules.length > 0 && <div className="mapping-list-heading"><span>Mapped fields</span><span>Tolerance (optional) <ToleranceHelp destinationLabel={file2Name ?? "the destination file"} /></span></div>}
+    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}><span>{rule.file_1_fields.join(" + ")}</span><ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>{editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}<button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button></div>)}</div>
+    {editTolerances && tolerances.some((band) => !toleranceIsComplete(band, { rules })) && <p className="field-hint is-warning">A tolerance of 0 accepts nothing: enter a value above 0, or clear the box for no tolerance.</p>}
     {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
     <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button><button type="button" className="icon-button" title="Importing templates is planned for a future release" disabled><Upload size={16} /></button></div>
   </section>;
+}
+
+/** One mapped field's tolerance: the type of data, then the limit boxes that type takes. Empty boxes mean no tolerance. */
+function RuleTolerance({ field, kind, guessed, tolerances, onKind, onChange }: { field: string; kind: ToleranceKind; guessed: ToleranceKind; tolerances: ToleranceBand[]; onKind: (kind: ToleranceKind) => void; onChange: (tolerances: ToleranceBand[]) => void }) {
+  const band = toleranceFor(tolerances, field);
+  const limits = TOLERANCE_KINDS.find((item) => item.value === kind)?.limits ?? [];
+  return <div className="rule-tolerance">
+    <select value={kind} aria-label={`Type of data in ${field}`} title={kind === guessed ? "Detected from the column. Change it if it is wrong." : "Type of data in this field"} onChange={(event) => { onKind(event.target.value as ToleranceKind); if (band) onChange(clearTolerance(tolerances, field)); }}>
+      {TOLERANCE_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+    </select>
+    {limits.map((limit) => {
+      const settings = TOLERANCE_LIMITS[limit];
+      return <input key={limit} type="number" min={0} max={settings.max} step={settings.step} inputMode={settings.whole ? "numeric" : "decimal"} value={band?.[limit] ?? ""} placeholder={settings.placeholder} title={settings.label} aria-label={`${settings.label} for ${field}`} onChange={(event) => onChange(setToleranceLimit(tolerances, field, kind, limit, toleranceLimit(limit, event.target.value)))} />;
+    })}
+  </div>;
 }
 
 interface BoardProps {

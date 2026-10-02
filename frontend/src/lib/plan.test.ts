@@ -13,9 +13,17 @@ import {
   precheckBlocked,
   precheckNeedsAcknowledgement,
   precheckSummary,
+  pruneTolerances,
   ruleIsReady,
+  clearTolerance,
+  guessToleranceKind,
+  setToleranceLimit,
+  toleranceFor,
+  toleranceKind,
+  toleranceLimit,
   ruleStatus,
   sheetRuleToDraft,
+  suggestSheetPair,
   transformationIsComplete,
 } from "./plan";
 import type { PrecheckResult, SheetRuleDraft } from "../types";
@@ -70,10 +78,66 @@ describe("tolerance bands", () => {
     expect(limitsFromPasses({ ...config, rules, tolerances }).tolerances).toEqual([]);
   });
 
+  it("are set on a mapped field one limit at a time, amount and % together", () => {
+    const amount = setToleranceLimit([], "DEBIT", "amount", "amount", toleranceLimit("amount", "0.05"));
+    expect(amount).toEqual([{ field: "DEBIT", amount: 0.05 }]);
+    const both = setToleranceLimit([...amount, { field: "DATE", days: 3 }], "DEBIT", "amount", "percent", 1);
+    expect(both).toEqual([{ field: "DEBIT", amount: 0.05, percent: 1 }, { field: "DATE", days: 3 }]);
+    expect(toleranceKind(toleranceFor(both, "DEBIT"))).toBe("amount");
+    expect(mappingIsReady({ ...mapped(), tolerances: both })).toBe(true);
+    // Emptying the last box leaves the field with no tolerance.
+    const onlyPercent = setToleranceLimit(both, "DEBIT", "amount", "amount", null);
+    expect(onlyPercent[0]).toEqual({ field: "DEBIT", percent: 1 });
+    expect(setToleranceLimit(onlyPercent, "DEBIT", "amount", "percent", null)).toEqual([{ field: "DATE", days: 3 }]);
+    // Limits of another kind do not survive a change of kind.
+    expect(setToleranceLimit(both, "DEBIT", "text", "similarity", 80)[0]).toEqual({ field: "DEBIT", similarity: 80 });
+    expect(clearTolerance(both, "DEBIT")).toEqual([{ field: "DATE", days: 3 }]);
+    expect(toleranceKind({ field: "X", amount: null, percent: null, days: 2, similarity: null })).toBe("date");
+  });
+
+  it("guess the kind of data a mapping compares", () => {
+    const analysis = { recommended_keys_1: [], recommended_keys_2: [], key_confidence: 0, is_composite_key: false, recommended_mappings: [], date_columns_1: ["POSTED"], date_columns_2: [] };
+    expect(guessToleranceKind({ file_1_fields: ["POSTED"], file_2_fields: ["BOOKED ON"] }, analysis)).toBe("date");
+    expect(guessToleranceKind({ file_1_fields: ["VALUE DATE"], file_2_fields: ["DATE"] }, null)).toBe("date");
+    expect(guessToleranceKind({ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }, null)).toBe("amount");
+    expect(guessToleranceKind({ file_1_fields: ["BASIC", "HRA"], file_2_fields: ["PAY"] }, null)).toBe("amount");
+    expect(guessToleranceKind({ file_1_fields: ["NARRATION"], file_2_fields: ["DESCRIPTION"] }, null)).toBe("text");
+  });
+
+  it("read typed limits: whole days and similarity, nothing for an empty box", () => {
+    expect(toleranceLimit("amount", "")).toBeNull();
+    expect(toleranceLimit("amount", "0.05")).toBe(0.05);
+    expect(toleranceLimit("days", "2.6")).toBe(3);
+    expect(toleranceLimit("similarity", "140")).toBe(100);
+    expect(toleranceLimit("percent", "-4")).toBe(0);
+  });
+
+  it("go when their mapping is removed", () => {
+    const tolerances = [{ field: "DEBIT", amount: 1 }, { field: "DATE", days: 2 }, { field: "*", days: 1 }];
+    expect(pruneTolerances(tolerances, [{ file_1_fields: ["DATE"], file_2_fields: ["DATE"] }])).toEqual([{ field: "DATE", days: 2 }, { field: "*", days: 1 }]);
+  });
+
   it("are described in words", () => {
     expect(describeTolerance({ field: "NARRATION", similarity: 75 })).toBe("NARRATION: text at least 75% similar");
     expect(describeTolerance({ field: "DEBIT", amount: 0.05, percent: 1 })).toBe("DEBIT: ±0.05 or ±1%");
     expect(describeTolerance({ field: "*", days: 1 })).toBe("Every compared field: ±1 day");
+  });
+});
+
+describe("one workbook per sheet", () => {
+  const sheets = (...names: string[]) => names.map((name) => ({ id: name, name }));
+
+  it("pairs a single-sheet workbook with the sheet named like it", () => {
+    const many = sheets("North", "South", "East");
+    expect(suggestSheetPair(many, sheets("Sheet1"), "Regions.xlsx", "South.xlsx")).toEqual({ sheet1: many[1], sheet2: { id: "Sheet1", name: "Sheet1" } });
+    expect(suggestSheetPair(many, sheets("east"), "Regions.xlsx", "export.csv")?.sheet1.name).toBe("East");
+    expect(suggestSheetPair(sheets("Data"), many, "Sales North 2026.xlsx", "Regions.xlsx")?.sheet2.name).toBe("North");
+  });
+
+  it("suggests nothing when no sheet, or more than one, fits", () => {
+    expect(suggestSheetPair(sheets("North", "South"), sheets("Sheet1"), "Regions.xlsx", "West.xlsx")).toBeNull();
+    expect(suggestSheetPair(sheets("North", "North 2"), sheets("Sheet1"), "Regions.xlsx", "North 2 final.xlsx")).toBeNull();
+    expect(suggestSheetPair(sheets("A", "B"), sheets("C", "D"), "x.xlsx", "y.xlsx")).toBeNull();
   });
 });
 

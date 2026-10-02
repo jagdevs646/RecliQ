@@ -1,6 +1,6 @@
-import { ArrowRight, Plus, X } from "lucide-react";
+import { ArrowRight, Info, Plus, X } from "lucide-react";
 import type { DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
-import { ALL_FIELDS, availableColumns, comparedFields, describeTolerance, limitsFromPasses, newPass, toleranceIsComplete } from "../lib/plan";
+import { ALL_FIELDS, availableColumns, describeTolerance, limitsFromPasses, newPass } from "../lib/plan";
 
 interface EditorProps {
   config: SheetRuleDraft;
@@ -35,7 +35,7 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
         <p>{keyed
           ? "Records still unmatched after the key are tried again, in order, on amount and date. A pair is only made when exactly one record qualifies on both sides; ties are listed for you to decide."
           : "No key chosen: records are matched on amount and date only. A pair is only made when exactly one record qualifies on both sides."}</p>
-        {keyed && <p className="field-hint">These limits only decide whether records the key did not find can be paired. To accept small differences on records that did match, set them under "Accept small differences" in step 4.</p>}
+        {keyed && <p className="field-hint">These limits only decide whether records the key did not find can be paired. To accept small differences on records that did match, set a tolerance next to the mapped field in step 4.</p>}
       </div>
       <div className="button-row">
         <button type="button" className="secondary" onClick={() => add("amount_date")}><Plus size={15} />Amount + date</button>
@@ -149,45 +149,52 @@ export function TransformationsEditor({ config, onChange, sourceLabel, destinati
 }
 
 // ── Accepting small differences ─────────────────────────────────────────
-export function ToleranceEditor({ config, onChange, destinationLabel }: Omit<EditorProps, "sourceLabel">) {
-  const fields = comparedFields(config);
-  const update = (index: number, change: Partial<ToleranceBand>) => onChange({
-    ...config,
-    tolerances: config.tolerances.map((band, itemIndex) => itemIndex === index ? { ...band, ...change } : band),
-  });
-  const add = () => onChange({ ...config, tolerances: [...config.tolerances, { field: ALL_FIELDS, amount: null, percent: null, days: null }] });
-  const remove = (index: number) => onChange({ ...config, tolerances: config.tolerances.filter((_, itemIndex) => itemIndex !== index) });
-  const limit = (value: string) => value === "" ? null : Math.max(0, Number(value));
-  const incomplete = config.tolerances.some((band) => !toleranceIsComplete(band, config));
+/** What a tolerance does, shown from the ⓘ beside the "Tolerance" heading of the mapped fields. */
+export function ToleranceHelp({ destinationLabel }: { destinationLabel: string }) {
+  return <span className="info-tip">
+    <button type="button" className="info-tip-trigger" aria-label="How tolerance works"><Info size={15} /></button>
+    <span className="info-tip-body" role="tooltip">
+      <strong>Accept small differences (tolerance)</strong>
+      <ul>
+        <li>Applied after matching, before the report is written.</li>
+        <li>A difference within the tolerance is not listed as a difference.</li>
+        <li>A record left with no differences moves to Matched, with a comment saying which difference was accepted and why.</li>
+        <li>Larger differences stay exactly as they are.</li>
+        <li>Tolerance never changes which records are paired.</li>
+      </ul>
+      <ul>
+        <li><b>Type</b>: RecliQ picks Amount, Date or Text from the column; change it if it is wrong. Leave the boxes empty for no tolerance.</li>
+        <li><b>Amount</b>: ± a fixed amount, or ± a percentage of the value in {destinationLabel}. Fill either or both; either one is enough to accept a difference.</li>
+        <li><b>Date</b>: ± days apart.</li>
+        <li><b>Text</b>: at least this % similar (the Similarity shown in the report).</li>
+      </ul>
+    </span>
+  </span>;
+}
+
+/** Tolerances the mapped-field rows cannot show: step-3 pass limits on offer, and "every compared field" tolerances from older setups. */
+export function ToleranceNotices({ config, onChange }: Omit<EditorProps, "sourceLabel" | "destinationLabel">) {
   const fromPasses = limitsFromPasses(config);
   const addedFields = fromPasses.rules.slice(config.rules.length).map((rule) => rule.file_1_fields.join(","));
-  const usePassLimits = () => onChange({ ...config, rules: fromPasses.rules, tolerances: [...config.tolerances, ...fromPasses.tolerances] });
+  const usePassLimits = () => onChange({
+    ...config,
+    rules: fromPasses.rules,
+    tolerances: [...config.tolerances.filter((band) => !fromPasses.tolerances.some((item) => item.field === band.field)), ...fromPasses.tolerances],
+  });
+  const general = config.tolerances.filter((band) => band.field === ALL_FIELDS);
+  const removeGeneral = (band: ToleranceBand) => onChange({ ...config, tolerances: config.tolerances.filter((item) => item !== band) });
 
-  return <details className="rule-advanced" open>
-    <summary>Accept small differences (tolerance){config.tolerances.length ? ` (${config.tolerances.length})` : ""}</summary>
-    <p>Applied after matching, before the report is written. A difference within the tolerance is not listed as a difference, and a record left with none moves to Matched with a comment saying which difference was accepted and why. Larger differences stay as they are, and which records are paired never changes.</p>
-    <p>Amounts: either limit is enough; % is of the value in {destinationLabel}. Dates: days apart. Text: at least as similar as you set (the Similarity shown in the report). Only compared fields can have a tolerance, so map the date columns above to accept date differences.</p>
+  if (!fromPasses.tolerances.length && !general.length) return null;
+  return <>
     {fromPasses.tolerances.length > 0 && <div className="tolerance-suggestion">
       <p>Your step-3 matching pass has limits that only pair unmatched records: {fromPasses.tolerances.map(describeTolerance).join("; ")}.{addedFields.length ? ` Using them here also compares ${addedFields.join(" and ")}.` : ""}</p>
       <button type="button" className="secondary" onClick={usePassLimits}>Accept these differences on matched records too</button>
     </div>}
-    {config.tolerances.map((band, index) => <div className="tolerance-row" key={`tolerance-${index}`}>
-      <label><span>Field</span>
-        <select value={band.field} onChange={(event) => update(index, { field: event.target.value })}>
-          <option value={ALL_FIELDS}>Every compared field</option>
-          {fields.map((field) => <option key={field} value={field}>{field}</option>)}
-          {band.field !== ALL_FIELDS && !fields.includes(band.field) && <option value={band.field}>{band.field} (no longer compared)</option>}
-        </select>
-      </label>
-      <label><span>± Amount</span><input type="number" min={0} step="0.01" inputMode="decimal" value={band.amount ?? ""} placeholder="e.g. 0.05" onChange={(event) => update(index, { amount: limit(event.target.value) })} /></label>
-      <label><span>± %</span><input type="number" min={0} max={100} step="0.1" inputMode="decimal" value={band.percent ?? ""} placeholder="e.g. 0.5" onChange={(event) => update(index, { percent: limit(event.target.value) })} /></label>
-      <label><span>± Days</span><input type="number" min={0} max={366} step="1" inputMode="numeric" value={band.days ?? ""} placeholder="e.g. 3" onChange={(event) => update(index, { days: limit(event.target.value) === null ? null : Math.round(Number(event.target.value)) })} /></label>
-      <label><span>Text similar ≥ %</span><input type="number" min={0} max={100} step="1" inputMode="numeric" value={band.similarity ?? ""} placeholder="e.g. 75" onChange={(event) => update(index, { similarity: limit(event.target.value) === null ? null : Math.min(100, Math.round(Number(event.target.value))) })} /></label>
-      <button type="button" className="icon-button" onClick={() => remove(index)} title="Remove this tolerance" aria-label="Remove this tolerance"><X size={16} /></button>
+    {general.map((band, index) => <div className="tolerance-general" key={`general-${index}`}>
+      <span>{describeTolerance(band)}. Applies to mapped fields without a tolerance of their own.</span>
+      <button type="button" className="icon-button" onClick={() => removeGeneral(band)} title="Remove this tolerance" aria-label="Remove this tolerance"><X size={16} /></button>
     </div>)}
-    {incomplete && <p className="field-hint is-warning">Give each tolerance a compared field and an amount, %, number of days or text similarity above 0.</p>}
-    <button type="button" className="text-command" onClick={add} disabled={fields.length === 0}><Plus size={15} />Add a tolerance</button>
-  </details>;
+  </>;
 }
 
 // ── Dates and names ─────────────────────────────────────────────────────

@@ -91,6 +91,62 @@ def test_multiple_file_pairs_download_as_zip_with_independent_workbooks():
             assert archive.namelist() == ["North_report.xlsx", "South_report.xlsx"]
 
 
+def test_one_workbook_with_several_sheets_against_one_workbook_per_sheet():
+    """Each sheet of one source workbook is reconciled against its own single-sheet destination workbook."""
+    excel = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    with TestClient(app) as client:
+        def upload(name: str, sheets: dict[str, list[dict]]) -> str:
+            response = client.post("/api/files/upload", files={"file": (name, _workbook_bytes(sheets), excel)})
+            assert response.status_code == 201
+            return response.json()["id"]
+
+        source_id = upload("Regions.xlsx", {
+            "North": [{"Invoice": "N-001", "Amount": 10}, {"Invoice": "N-002", "Amount": 15}],
+            "South": [{"Invoice": "S-001", "Amount": 20}],
+        })
+        destinations = {
+            "North": upload("North.xlsx", {"Sheet1": [{"Invoice": "N-001", "Amount": 10}, {"Invoice": "N-002", "Amount": 99}]}),
+            "South": upload("South.xlsx", {"Sheet1": [{"Invoice": "S-001", "Amount": 20}]}),
+        }
+        payload = {
+            "orientation": "vertical",
+            "file_pairs": [
+                {
+                    "file_pair_id": f"pair-{index}",
+                    "source_files": [{"file_id": source_id}],
+                    "destination_files": [{"file_id": destination_id}],
+                    "report_metadata": {"label": f"Regions vs {sheet}"},
+                    "sheet_rules": [{
+                        "sheet_rule_id": f"rule-{index}-1",
+                        "source_sheets": [sheet],
+                        "destination_sheets": ["Sheet1"],
+                        "matching_strategy": {"primary_key_source": ["Invoice"], "primary_key_destination": ["Invoice"]},
+                        "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+                        "report_label": f"{sheet} -> Sheet1",
+                    }],
+                }
+                for index, (sheet, destination_id) in enumerate(destinations.items(), start=1)
+            ],
+        }
+        started = client.post("/api/reconciliation/generic", json=payload)
+        assert started.status_code == 200
+        job = started.json()
+        for _ in range(40):
+            job = client.get(f"/api/jobs/{job['id']}").json()
+            if job["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.1)
+        assert job["status"] == "completed", job.get("error_message")
+
+        summary = client.get(f"/api/reports/job/{job['id']}/summary").json()
+        by_pair = {pair["file_pair_id"]: pair["summary"] for pair in summary["file_pairs"]}
+        assert by_pair["pair-1"]["report_rows"] == 1  # N-002 differs, in the North sheet only.
+        assert by_pair["pair-2"]["report_rows"] == 0
+        report = client.get(f"/api/reports/job/{job['id']}/download")
+        with zipfile.ZipFile(io.BytesIO(report.content)) as archive:
+            assert len(archive.namelist()) == 2
+
+
 def test_one_failed_sheet_rule_keeps_successful_results_available():
     with TestClient(app) as client:
         source = _workbook_bytes({

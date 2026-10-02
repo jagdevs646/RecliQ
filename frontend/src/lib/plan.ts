@@ -78,6 +78,33 @@ export function isDateOnlyKey(config: SheetRuleDraft): boolean {
   return dateValued || DATE_COLUMN_HINT.test(source) || DATE_COLUMN_HINT.test(destination);
 }
 
+/**
+ * When one workbook has a single sheet and the other several (one workbook
+ * per sheet), the sheet it belongs to: the only one whose name matches the
+ * single sheet's name or its workbook's file name. Null when unclear.
+ */
+export function suggestSheetPair<Sheet extends { id: string; name: string }>(
+  sourceSheets: Sheet[], destinationSheets: Sheet[], sourceFilename: string, destinationFilename: string,
+): { sheet1: Sheet; sheet2: Sheet } | null {
+  const plain = (text: string) => text.replace(/\.[a-z0-9]+$/i, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const alike = (left: string, right: string) => left.length >= 3 && right.length >= 3 && (left.includes(right) || right.includes(left));
+  const pick = (many: Sheet[], single: Sheet, filename: string) => {
+    const names = [plain(single.name), plain(filename)];
+    const exact = many.filter((sheet) => names.includes(plain(sheet.name)));
+    const close = exact.length ? exact : many.filter((sheet) => names.some((name) => alike(plain(sheet.name), name)));
+    return close.length === 1 ? close[0] : null;
+  };
+  if (destinationSheets.length === 1 && sourceSheets.length > 1) {
+    const sheet1 = pick(sourceSheets, destinationSheets[0], destinationFilename);
+    return sheet1 ? { sheet1, sheet2: destinationSheets[0] } : null;
+  }
+  if (sourceSheets.length === 1 && destinationSheets.length > 1) {
+    const sheet2 = pick(destinationSheets, sourceSheets[0], sourceFilename);
+    return sheet2 ? { sheet1: sourceSheets[0], sheet2 } : null;
+  }
+  return null;
+}
+
 export function passIsComplete(item: MatchingPass): boolean {
   if (!item.amount_source || !item.amount_destination) return false;
   if (item.type === "amount_date" && (!item.date_source || !item.date_destination)) return false;
@@ -191,6 +218,90 @@ export function comparedFields(config: Pick<SheetRuleDraft, "rules">): string[] 
 export function toleranceIsComplete(band: ToleranceBand, config: Pick<SheetRuleDraft, "rules">): boolean {
   const fieldExists = band.field === ALL_FIELDS || comparedFields(config).includes(band.field);
   return fieldExists && [band.amount, band.percent, band.days, band.similarity].some((limit) => (limit ?? 0) > 0);
+}
+
+export type ToleranceKind = "amount" | "date" | "text";
+export type ToleranceLimit = "amount" | "percent" | "days" | "similarity";
+
+/** The limit boxes each kind of data offers, in the order they are shown. */
+export const TOLERANCE_KINDS: Array<{ value: ToleranceKind; label: string; limits: ToleranceLimit[] }> = [
+  { value: "amount", label: "Amount", limits: ["amount", "percent"] },
+  { value: "date", label: "Date", limits: ["days"] },
+  { value: "text", label: "Text", limits: ["similarity"] },
+];
+
+export const TOLERANCE_LIMITS: Record<ToleranceLimit, { label: string; placeholder: string; step: string; max?: number; whole?: boolean }> = {
+  amount: { label: "± Amount", placeholder: "± amount", step: "0.01" },
+  percent: { label: "± %", placeholder: "± %", step: "0.1", max: 100 },
+  days: { label: "± Days", placeholder: "± days", step: "1", max: 366, whole: true },
+  similarity: { label: "Text similar ≥ %", placeholder: "similar ≥ %", step: "1", max: 100, whole: true },
+};
+
+const AMOUNT_COLUMN_HINT = /amount|amt|value|debit|credit|total|balance|price|rate|qty|quantity|tax|gst|salary|gross|\bnet\b|paid|payment|fee|cost|charge|\bdr\b|\bcr\b/i;
+
+/** The tolerance set on one mapped field. */
+export function toleranceFor(tolerances: ToleranceBand[], field: string): ToleranceBand | undefined {
+  return tolerances.find((band) => band.field === field);
+}
+
+/** The kind of data a band's limits are for, from the limits it holds. */
+export function toleranceKind(band: ToleranceBand | undefined): ToleranceKind | null {
+  if (!band) return null;
+  const holds = (test: (value: unknown) => boolean) => TOLERANCE_KINDS.find((kind) => kind.limits.some((limit) => test(band[limit])))?.value;
+  return holds((value) => Number(value ?? 0) > 0) ?? holds((value) => typeof value === "number") ?? null;
+}
+
+/**
+ * The kind of data a mapping compares, so its tolerance boxes fit without
+ * asking: several columns added together are an amount, date columns are
+ * known by their values or name, amounts by name, anything else is text.
+ */
+export function guessToleranceKind(rule: RuleMapping, analysis: AnalysisResponse | null | undefined): ToleranceKind {
+  if (rule.file_1_fields.length > 1 || rule.file_2_fields.length > 1) return "amount";
+  const dateValued = rule.file_1_fields.some((column) => analysis?.date_columns_1?.includes(column))
+    || rule.file_2_fields.some((column) => analysis?.date_columns_2?.includes(column));
+  if (dateValued) return "date";
+  const columns = [...rule.file_1_fields, ...rule.file_2_fields];
+  // Dates first: "Value date" is a date, not a value.
+  if (columns.some((column) => DATE_COLUMN_HINT.test(column))) return "date";
+  return columns.some((column) => AMOUNT_COLUMN_HINT.test(column)) ? "amount" : "text";
+}
+
+/** What was typed as a limit: empty is no limit, days and similarity are whole numbers. */
+export function toleranceLimit(limit: ToleranceLimit, text: string): number | null {
+  if (text.trim() === "" || Number.isNaN(Number(text))) return null;
+  const { max, whole } = TOLERANCE_LIMITS[limit];
+  const value = Math.max(0, Number(text));
+  const capped = max === undefined ? value : Math.min(max, value);
+  return whole ? Math.round(capped) : capped;
+}
+
+/**
+ * Sets one limit of a mapped field's tolerance, keeping the other limits of
+ * the same kind (amount and % go together). With no limit left the field has
+ * no tolerance.
+ */
+export function setToleranceLimit(tolerances: ToleranceBand[], field: string, kind: ToleranceKind, limit: ToleranceLimit, value: number | null): ToleranceBand[] {
+  const at = tolerances.findIndex((item) => item.field === field);
+  const band: ToleranceBand = { field };
+  for (const key of TOLERANCE_KINDS.find((item) => item.value === kind)?.limits ?? []) {
+    const next = key === limit ? value : tolerances[at]?.[key];
+    if (typeof next === "number") band[key] = next;
+  }
+  const others = tolerances.filter((item) => item.field !== field);
+  if (Object.keys(band).length === 1) return others;
+  return at < 0 ? [...others, band] : [...others.slice(0, at), band, ...others.slice(at)];
+}
+
+/** Removes one mapped field's tolerance. */
+export function clearTolerance(tolerances: ToleranceBand[], field: string): ToleranceBand[] {
+  return tolerances.filter((item) => item.field !== field);
+}
+
+/** Drops tolerances whose field is no longer mapped, so removing a mapping removes its tolerance. */
+export function pruneTolerances(tolerances: ToleranceBand[], rules: RuleMapping[]): ToleranceBand[] {
+  const fields = new Set(comparedFields({ rules }));
+  return tolerances.filter((band) => band.field === ALL_FIELDS || fields.has(band.field));
 }
 
 /** Step 4 is complete: fields are mapped and every tolerance band is usable. */
