@@ -69,6 +69,44 @@ tests/backend/                 backend test suite
 
 ## Run it locally
 
+### Quick start: clone and run
+The simplest way to try RecliQ on your own computer. It needs no Docker, database server or settings file: the backend uses a local SQLite file, keeps uploads in `backend/storage` and runs reconciliations in-process.
+
+You need [Git](https://git-scm.com/downloads), [Python 3.12](https://www.python.org/downloads/) and [Node.js 22](https://nodejs.org/) (any version from 20.19 works).
+
+**1. Get the code**
+
+```bash
+git clone https://github.com/jagdevs646/RecliQ.git
+cd RecliQ
+```
+
+**2. Start the backend** (first terminal)
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Leave it running. The API is up when the terminal shows `Application startup complete` (check http://localhost:8000/health).
+
+**3. Start the frontend** (second terminal, from the `RecliQ` folder)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+**4. Open RecliQ** at http://localhost:5173, or type `o` and press Enter in the frontend terminal to open it in your browser.
+
+Next time, skip the install steps: activate the virtual environment and run `uvicorn app.main:app --reload` in `backend`, then `npm run dev` in `frontend`. Press `Ctrl+C` in each terminal to stop.
+
+> If PowerShell says running scripts is disabled when you activate the virtual environment, use Command Prompt instead, or run `.venv\Scripts\python -m uvicorn app.main:app --reload` without activating it.
+
 ### With Docker
 Starts the API, a job worker, Redis, PostgreSQL and the frontend:
 
