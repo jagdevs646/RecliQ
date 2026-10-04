@@ -1,0 +1,4 @@
+# Generated benchmark data, outputs and result logs.
+data/
+out/
+*.jsonl
