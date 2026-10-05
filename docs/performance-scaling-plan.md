@@ -136,6 +136,22 @@ A profile of the 20,000-row run (`bench.py 20000 keyed --profile`):
 | 8% | Building the index of File 2 | Dictionaries per row |
 | 6% | `to_dict('records')` | Turning the frames into Python dicts |
 
+### 3.4 Phase 0 baseline (5 October 2026)
+
+Re-recorded in one session for Phase 0, on the same laptop on mains power and kept awake, at `4e6f981` (the engine code is the same as at `4197f58`). Commands: `bench.py <rows> read keyed keyless` for 10,000, 50,000 and 100,000 rows, one after another. Phase 1 is measured against these numbers.
+
+| Rows per file | Read two `.xlsx` | Keyed: match and compare | Excel report | Result data | Keyed total from `.xlsx` | Keyless: match and compare | Peak memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 4.3 s | 5.8 s | 1.3 s | 1.2 s | 12.6 s | 2.0 s | not recorded |
+| 50,000 | 22.1 s | 25.2 s | 7.8 s | 6.1 s | 61 s | 18.9 s | 0.48 GB |
+| 100,000 | 36.8 s | 49.6 s | 13.4 s | 10.6 s | 110 s | 36.4 s | 0.83 GB |
+
+- The outcome counts match section 3.1 and 8.2 (at 100,000 rows: 12,181 with differences, 10,999 within tolerance, 3,756 and 3,000 unmatched), so the results are unchanged.
+- The keyed match and compare at 100,000 rows took 49.6 s, against 59.5 s in section 3.1. The two figures come from different sessions; Phase 1 is compared with 49.6 s. The Phase 1 end-to-end target (under 65 s from `.xlsx`) stands.
+- `.xlsx` reading now falls on a straight line (about 37 s per 100,000 rows of both files).
+- Peak memory at 10,000 rows is missing because `psutil` was not installed in the backend environment until that run had finished.
+- The keyless run at 10,000 rows (2.0 s) is much faster than section 3.1's 4.4 s, and grows faster than the row count (18.9 s at 50,000). This was not investigated.
+
 ## 4. Why it is slow: the causes, in order of cost
 
 ### 4.1 The type of a compared field is guessed again for every row
@@ -358,6 +374,16 @@ Each phase ends with the same check: the complete output of the old and the new 
 | Size the live container | `az containerapp show` for the backend; write down CPU and memory |
 
 Done when: the baseline is re-recorded; the nightly workflow fails above 1.5 times the time it recorded on its own runner or above 1.2 GB peak memory; two runs of the unchanged engine give byte-identical result data.
+
+**Status (5 October 2026):**
+
+| Task | State |
+|---|---|
+| Keep the record | Done in `da50fd0` |
+| Re-record the baseline | Done: section 3.4 |
+| A speed test that fails loudly | `.github/workflows/perf-nightly.yml`, every night and on demand. `scripts/perf/nightly_check.py` records the runner's first time as the baseline (in the Actions cache), then fails above 1.5 times that time or above 1,200 MB peak memory. To record a new baseline after an intended speed-up, set the repository variable `PERF_BASELINE_VERSION` to a new value. `bench.py` now reports peak memory on Linux too |
+| Make output repeatable | Done: `universal_mapper.py` sorts the fields of `field_exception_summary`. `scripts/perf/repeatability.py` runs a scenario in two processes with different hash seeds and compares the result data byte for byte; it fails on the old code and passes on keyed, keyless and exact-text "must also match" at 2,000 rows |
+| Size the live container | Open: `az` reports `SubscriptionNotFound` for the saved subscription, and the `containerapp` extension cannot be loaded (access denied under `~/.azure/cliextensions`). Needs `az login` by the owner |
 
 ### Phase 1. Quick wins in the current engine (about 1 week)
 

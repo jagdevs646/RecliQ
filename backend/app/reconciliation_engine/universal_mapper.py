@@ -112,7 +112,7 @@ def build_universal_data_model(
     ]
     
     field_exception_summary = []
-    all_fields = set(field_mismatch_counts.keys()).union(set(field_match_counts.keys()))
+    all_fields = sorted(set(field_mismatch_counts.keys()).union(set(field_match_counts.keys())))
     # Estimate total matches for a field based on fully matched records
     fully_matched_count = len(matched_records)
     

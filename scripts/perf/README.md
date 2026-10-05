@@ -21,6 +21,8 @@ backend/.venv/Scripts/python scripts/perf/bench.py 100000 read keyed
 | `proto_keyless.py` | The keyless "amount + date window" pass as a join in DuckDB. |
 | `proto_text_scores.py` | Scores the differing texts of matched pairs in one batch and checks every score against the engine's. |
 | `io_checks.py` | Compares the calamine and openpyxl readers cell by cell, and measures what one results page costs today. |
+| `repeatability.py` | Runs a scenario in two processes with different hash seeds and checks that the result data is byte-identical. |
+| `nightly_check.py` | Used by `.github/workflows/perf-nightly.yml`: fails when the latest `bench.py` run is above 1.5 times the runner's baseline or above 1,200 MB peak memory. |
 
 `bench.py` needs nothing beyond the backend's own packages (`psutil` adds peak memory to the
 output). The prototypes need the packages in `requirements.txt` here, which are **not**

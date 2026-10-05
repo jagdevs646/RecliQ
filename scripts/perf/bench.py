@@ -38,7 +38,10 @@ PARTIES = ["Sharma Traders Pvt Ltd", "ACME Industries Limited", "Orbit Telecom",
 
 
 def peak_memory_mb() -> float:
-    """Peak memory of this process (Windows) or current memory elsewhere; -1 without psutil."""
+    """Peak memory of this process; on Windows -1 without psutil."""
+    if sys.platform != "win32":
+        import resource
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == "darwin" else 1024) / 1e6, 1)
     try:
         import psutil
     except ImportError:

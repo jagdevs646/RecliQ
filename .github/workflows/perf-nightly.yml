@@ -1,0 +1,60 @@
+name: Nightly speed test
+
+# Times the engine on 100,000 rows per file (docs/performance-scaling-plan.md, Phase 0).
+# The first run records its own time as the baseline in the Actions cache; later runs fail
+# above 1.5 times that time or above 1,200 MB peak memory. To record a new baseline (for
+# example after an intended speed-up), set the repository variable PERF_BASELINE_VERSION
+# to a new value.
+
+on:
+  schedule:
+    - cron: "17 21 * * *" # Every night at 21:17 UTC (02:47 IST).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-nightly
+  cancel-in-progress: false
+
+jobs:
+  speed:
+    name: Engine speed, 100,000 rows
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASELINE_FILE: perf-baseline/keyed-100000.json
+      BASELINE_KEY: perf-baseline-keyed-100000-v${{ vars.PERF_BASELINE_VERSION || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt psutil==7.2.2
+      - name: Restore the baseline
+        id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: perf-baseline
+          key: ${{ env.BASELINE_KEY }}
+      - name: Run the benchmark
+        run: python scripts/perf/bench.py 100000 keyed
+      - name: Compare with the baseline
+        run: python scripts/perf/nightly_check.py 100000 keyed "$BASELINE_FILE"
+      - name: Save the first baseline
+        if: steps.baseline.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: perf-baseline
+          key: ${{ env.BASELINE_KEY }}
+      - name: Keep the measurement
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: scripts/perf/results.jsonl
+          if-no-files-found: ignore
