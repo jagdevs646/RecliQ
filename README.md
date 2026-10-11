@@ -36,7 +36,7 @@ RecliQ supports anonymous guest workspaces and optional registered accounts. Gue
 - **GST reconciliation**: a dedicated invoice flow with duplicate-invoice merging, amount comparison and confidence review.
 
 ### Optional accounts and administration
-- Registration uses username, email verification and password; sign-in uses an HttpOnly session cookie. Guests can continue without an account.
+- Registration uses username, email verification and password; sign-in uses an HttpOnly session cookie. Guests can continue without an account; guest files, runs and settings are deleted after one day (`GUEST_RETENTION_HOURS`).
 - Google, Facebook and LinkedIn sign-in are integrated but remain unavailable until provider credentials are configured.
 - Account settings include security sessions, MFA, theme and notifications. Guests retain local theme preferences.
 - Super Admin access requires explicit provisioning and MFA. Feature policy, account restrictions, upload formats and quotas are enforced by the API.
@@ -172,6 +172,7 @@ Settings come from environment variables; see [backend/.env.example](backend/.en
 | `STORAGE_BACKEND`, `LOCAL_STORAGE_PATH`, `AZURE_STORAGE_*` | where uploads and reports are kept |
 | `JOB_QUEUE_BACKEND`, `REDIS_URL` | `local` or `redis` job queue |
 | `MAX_UPLOAD_MB`, `MAX_ROWS_PER_SHEET` | upload limits (50 MB by default) |
+| `GUEST_RETENTION_HOURS` | hours guest data is kept before it is deleted (24 by default) |
 | `FRONTEND_ORIGIN` | allowed browser origin |
 | `AUTH_CSRF_SECRET`, `AUTH_SESSION_DAYS`, `SESSION_COOKIE_SECURE` | CSRF signing, account-session duration and HTTPS-only cookies |
 | `REGISTRATION_ENABLED`, `EMAIL_BACKEND`, `SMTP_*` | registration, account verification, password recovery and report delivery |

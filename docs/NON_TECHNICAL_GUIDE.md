@@ -10,7 +10,7 @@
 
 **RecliQ** compares two sets of financial records and tells you, record by record, what matches, what differs and what is missing on either side. Typical uses are books against a bank statement, a purchase register against GSTR-2B, a ledger against a vendor statement, or sales against a payment gateway's settlement report.
 
-It runs in a web browser. There is nothing to install and no account is needed: you upload the two files, tell RecliQ how to recognise the same record in both, and download an Excel report that is ready for review and audit. You can also register an account, which keeps your work across browsers and devices.
+It runs in a web browser. There is nothing to install and no account is needed: you upload the two files, tell RecliQ how to recognise the same record in both, and download an Excel report that is ready for review and audit. As a guest, your files and results are deleted after one day; register an account to keep your work across browsers and devices.
 
 ---
 

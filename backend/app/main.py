@@ -27,24 +27,31 @@ async def lifespan(app: FastAPI):
         migrate_legacy_owner_columns()
         Base.metadata.create_all(bind=engine)
         add_missing_sqlite_columns()
+    from app.services.guest_retention import start_guest_cleanup, stop_guest_cleanup
     from app.services.platform_service import initialize_platform_state
 
     initialize_platform_state()
-    if settings.job_queue_backend.lower() != "redis":
-        # In-process jobs die with the process: pick up what a restart left
-        # behind, and keep checking for stalled jobs. Redis workers do this
-        # themselves (app.jobs.worker).
-        from app.jobs.recovery import recover_orphaned_jobs, start_sweeper, stop_sweeper
+    # Guest workspaces are temporary; their data is deleted after
+    # GUEST_RETENTION_HOURS. Only the web API runs this, never the desktop app.
+    start_guest_cleanup()
+    try:
+        if settings.job_queue_backend.lower() != "redis":
+            # In-process jobs die with the process: pick up what a restart left
+            # behind, and keep checking for stalled jobs. Redis workers do this
+            # themselves (app.jobs.worker).
+            from app.jobs.recovery import recover_orphaned_jobs, start_sweeper, stop_sweeper
 
-        try:
-            recover_orphaned_jobs(requeue_all_queued=True)
-        except Exception:
-            logger.exception("Startup job recovery failed")
-        start_sweeper()
-        yield
-        stop_sweeper()
-    else:
-        yield
+            try:
+                recover_orphaned_jobs(requeue_all_queued=True)
+            except Exception:
+                logger.exception("Startup job recovery failed")
+            start_sweeper()
+            yield
+            stop_sweeper()
+        else:
+            yield
+    finally:
+        stop_guest_cleanup()
 
 
 def create_app() -> FastAPI:

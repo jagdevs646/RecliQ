@@ -117,7 +117,7 @@ export function AuthDialog({ onClose, onAuthenticated, initialMode = "login", re
       <div className="auth-dialog-heading">
         <span className="eyebrow">Account access</span>
         <h2 id="auth-title">{title}</h2>
-        <p>{mode === "register" ? "Your guest workspace stays separate until you choose to import it." : mode === "login" ? mfaRequired ? "Your credentials are verified. Enter your authenticator code to finish signing in." : "Sign in for a persistent workspace, or keep using RecliQ as a guest." : mode === "resend" ? "Verification links only confirm your email address. They do not change your password." : "We will send instructions if the address belongs to an account."}</p>
+        <p>{mode === "register" ? "Your guest workspace stays separate until you choose to import it. Guest data is deleted after one day." : mode === "login" ? mfaRequired ? "Your credentials are verified. Enter your authenticator code to finish signing in." : "Sign in for a persistent workspace, or keep using RecliQ as a guest." : mode === "resend" ? "Verification links only confirm your email address. They do not change your password." : "We will send instructions if the address belongs to an account."}</p>
       </div>
 
       {mode === "login" && providers.some((provider) => provider.enabled) && <div className="oauth-buttons">

@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     max_upload_mb: int = 50
     max_rows_per_sheet: int = 500_000
 
+    # Guest workspaces are temporary: their uploads, runs, reports, saved
+    # setups and learning are deleted this many hours after they were created.
+    # Registered accounts keep their data.
+    guest_retention_hours: int = 24
+
     # Job execution. "redis" runs jobs in durable RQ workers; "local" runs them
     # in an in-process thread pool (development and tests only).
     job_queue_backend: str = "local"
@@ -90,6 +95,8 @@ class Settings(BaseSettings):
     def validate_deployment_security(self) -> "Settings":
         if self.max_upload_mb < 1 or self.max_rows_per_sheet < 1:
             raise ValueError("Upload size and row limits must be positive integers.")
+        if self.guest_retention_hours < 1:
+            raise ValueError("GUEST_RETENTION_HOURS must be a positive integer.")
         if self.auth_max_attempts < 1 or self.auth_attempt_window_minutes < 1 or self.auth_session_days < 1:
             raise ValueError("Authentication limits and session duration must be positive integers.")
         if self.auth_csrf_secret and len(self.auth_csrf_secret.strip()) < 32:

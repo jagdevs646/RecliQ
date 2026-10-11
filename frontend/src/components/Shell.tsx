@@ -99,7 +99,7 @@ export function Shell({ activePage, activeAdminSection, onNavigate, onNavigateAd
           })}
         </nav>
         <div className="sidebar-account">
-          <div className="account-summary"><span className="account-avatar">{identity.user?.display_name?.slice(0, 1).toUpperCase() || "G"}</span><div><strong>{identity.user?.display_name || "Guest workspace"}</strong><small>{identity.user?.email || "This browser only"}</small></div></div>
+          <div className="account-summary"><span className="account-avatar">{identity.user?.display_name?.slice(0, 1).toUpperCase() || "G"}</span><div><strong>{identity.user?.display_name || "Guest workspace"}</strong><small>{identity.user?.email || "This browser, kept for one day"}</small></div></div>
           {identity.authenticated ? <button type="button" className="sidebar-account-action" onClick={onSignOut}><LogOut size={16} /><span>Sign out</span></button> : <button type="button" className="sidebar-account-action" onClick={onSignIn}><LogIn size={16} /><span>Sign in or create account</span></button>}
         </div>
       </aside>

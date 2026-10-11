@@ -146,7 +146,7 @@ export function SettingsPage({ identity, theme, onThemeChange, onIdentityChange,
     {message && <p className="success-text" role="status">{message}</p>}{error && <p className="error-text" role="alert">{error}</p>}
 
     <section className="settings-section">
-      <div className="settings-heading"><UserRound size={19} /><div><h2>Profile</h2><p>{user ? "Account identity and contact details." : "Guest workspaces stay in this browser."}</p></div></div>
+      <div className="settings-heading"><UserRound size={19} /><div><h2>Profile</h2><p>{user ? "Account identity and contact details." : "Guest workspaces stay in this browser, and their files and runs are deleted after one day."}</p></div></div>
       {user ? <div className="settings-grid">
         <form className="settings-form" noValidate onSubmit={saveDisplayName}><label>Username<input value={user.username} readOnly /></label><label>Email<input value={user.email} readOnly /></label><label>Display name<input maxLength={120} value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></label><button className="primary" type="submit" disabled={busy}>Save profile</button></form>
         <form className="settings-form" noValidate onSubmit={saveEmail}><h3>Change email</h3><label>New email<input type="email" value={newEmail} onChange={(event) => setNewEmail(event.target.value)} required /></label><label>Current password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><button className="secondary" type="submit" disabled={busy}><Mail size={16} />Send verification link</button></form>

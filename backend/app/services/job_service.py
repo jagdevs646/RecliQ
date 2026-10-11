@@ -6,11 +6,12 @@ from sqlalchemy import or_
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
 
-from app.models.account import User
+from app.models.account import ReportAccessToken, ReportEmailDelivery, User
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
 from app.models.report import Report
+from app.models.review import ReviewOutcome
 from app.schemas.reconciliation import ReconciliationPlan
 
 
@@ -160,8 +161,14 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
 
         release_job_slot(db, job.id)
 
-    # Delete history
+    # Delete history, review outcomes and report emails: they reference the
+    # job, and PostgreSQL refuses to delete a job they still point at.
     db.query(ReconciliationHistory).filter(ReconciliationHistory.job_id == job.id).delete(synchronize_session=False)
+    db.query(ReviewOutcome).filter(ReviewOutcome.job_id == job.id).delete(synchronize_session=False)
+    delivery_ids = [row.id for row in db.query(ReportEmailDelivery.id).filter(ReportEmailDelivery.job_id == job.id)]
+    if delivery_ids:
+        db.query(ReportAccessToken).filter(ReportAccessToken.delivery_id.in_(delivery_ids)).delete(synchronize_session=False)
+        db.query(ReportEmailDelivery).filter(ReportEmailDelivery.id.in_(delivery_ids)).delete(synchronize_session=False)
 
     # Delete job record first to detach FK relationships
     db.delete(job)

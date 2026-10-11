@@ -144,7 +144,7 @@ The full endpoint list is in [api.md](api.md). A run follows this path:
 
 - **Database.** Files, jobs and their history, reports, saved setups and versions, aliases and decisions, auto-resolution rules and versions, account identities/sessions/preferences, feature and quota policies, email deliveries, and workspace/platform audit logs.
 - **Durable jobs.** The job row is the source of truth. With Redis, workers run separately (`python -m app.jobs.worker`); without it, a thread pool in the API runs them. A sweeper re-queues runs whose heartbeat has stopped, up to `JOB_MAX_ATTEMPTS`, then fails them with an explanation. Infrastructure errors are retried; data errors are not.
-- **Retention.** Guest workspaces keep their 20 most recent runs. Registered accounts use the configured report-retention period; files are removed only when no retained run needs them.
+- **Retention.** Guest workspaces keep their 20 most recent runs, and their data is deleted one day after it was created (`GUEST_RETENTION_HOURS`). Registered accounts use the configured report-retention period; files are removed only when no retained run needs them.
 - **Timestamps.** Stored in UTC and returned with an offset, so browsers show local time correctly.
 
 ---

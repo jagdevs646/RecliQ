@@ -188,8 +188,24 @@ stored files, sheet selections, orientation and confidence threshold
 (`GET /api/jobs/{id}/gst-plan`). The new run is a separate job; the earlier
 run and its report are unchanged. A run can be reopened while its files are
 stored: uploads are kept until the last run that uses them is deleted or
-pruned. Guests keep their latest 20 runs;
-registered accounts use the configured report-retention period.
+pruned. Guests keep at most their latest 20 runs, and only for one day
+(below); registered accounts use the configured report-retention period.
+
+### Guest data is kept for one day
+
+Guest workspaces are temporary. Once a guest's upload, run, report, saved
+setup, alias, review decision, auto-resolution rule or recurring pattern is
+older than `GUEST_RETENTION_HOURS` (default 24), it is deleted, together with
+its stored files and parsed-sheet caches; a run still queued or processing
+waits, and an upload a newer run uses stays with that run. A workspace left
+with nothing loses its usage counters too. The API checks a minute after
+start-up and then every hour; each workspace cleaned gets one
+`workspace.guest_data_expired` audit event with the counts.
+
+Registered accounts are never affected. A guest who registers and imports
+the workspace before then keeps it, because the import moves it to the
+account. The audit log (append-only) and support tickets are kept. The
+desktop app does not run this cleanup.
 
 ## Audit log
 

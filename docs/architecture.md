@@ -73,7 +73,7 @@ flowchart TD
 
 - **Database**: files, jobs and their history, reports, saved setups and their versions, aliases and decisions, auto-resolution rules and the audit log. Migrations are managed with Alembic (`backend/alembic`). The audit log is append-only: the ORM and database triggers refuse updates and deletes.
 - **Storage**: uploads, parsed-sheet caches, reports and report data are stored under a workspace-specific scope. Guests retain session-scoped paths; accounts use a stable `user-<UUID>` scope.
-- **Retention**: guests keep their latest 20 runs. Registered workspaces use the configured report-retention period; zero means no time-based pruning. Files are removed only when no retained run needs them.
+- **Retention**: guests keep their latest 20 runs, and all guest data is deleted one day after it was created (`GUEST_RETENTION_HOURS`; see [operations-and-security.md](operations-and-security.md#guest-data-is-kept-for-one-day)). Registered workspaces use the configured report-retention period; zero means no time-based pruning. Files are removed only when no retained run needs them.
 - **Migration**: Alembic revisions `20261009_0001` and `20261010_0001` add account/policy/email records and widen storage counters without rewriting guest ownership. Review the backup and upgrade guidance before a production migration.
 
 ## Design choices
