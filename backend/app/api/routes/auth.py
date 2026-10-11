@@ -559,7 +559,14 @@ def current_identity(request: Request, db: Session = Depends(get_db)) -> dict:
     features = effective_features(db, db.get(User, user_id) if user_id else None)
     notifications_enabled = bool(email_transport_status(db)["ready"])
     if not user_id:
-        return {"authenticated": False, "user": None, "workspace": {"type": "guest", "id": guest_id, "label": "Guest Workspace"}, "features": features, "capabilities": {"report_email": features.get("report_email", False), "email_notifications": notifications_enabled}}
+        # Sign-up needs registration allowed and a working verification email
+        # (see register()); the frontend offers "Create account" only then.
+        capabilities = {
+            "report_email": features.get("report_email", False),
+            "email_notifications": notifications_enabled,
+            "registration": bool(features.get("registration", False) and notifications_enabled),
+        }
+        return {"authenticated": False, "user": None, "workspace": {"type": "guest", "id": guest_id, "label": "Guest Workspace"}, "features": features, "capabilities": capabilities}
     user = db.get(User, user_id)
     preference = db.get(UserPreference, user_id)
     return {

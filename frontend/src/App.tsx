@@ -321,6 +321,6 @@ export default function App() {
       {route.page === "support" && <SupportPage />}
       {route.page === "admin" && currentIdentity.user?.role === "super_admin" && currentIdentity.user.mfa_enabled && <AdminPage section={route.adminSection ?? "dashboard"} userIdFilter={route.adminUserId} onNavigate={goAdmin} />}
     </Shell>
-    {authOpen && <AuthDialog key={`${authMode}:${resetToken}`} initialMode={authMode} resetToken={resetToken} notice={notice} onClose={() => { setAuthOpen(false); setResetToken(""); setAuthMode("login"); }} onAuthenticated={changeIdentity} />}
+    {authOpen && <AuthDialog key={`${authMode}:${resetToken}`} initialMode={authMode} resetToken={resetToken} notice={notice} registrationOpen={currentIdentity.capabilities?.registration !== false} onClose={() => { setAuthOpen(false); setResetToken(""); setAuthMode("login"); }} onAuthenticated={changeIdentity} />}
   </>;
 }

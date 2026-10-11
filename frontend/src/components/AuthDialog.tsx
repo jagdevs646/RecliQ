@@ -13,10 +13,12 @@ interface Props {
   initialMode?: AuthMode;
   resetToken?: string;
   notice?: string;
+  /** False when the server cannot create accounts (registration off or no verification email). */
+  registrationOpen?: boolean;
 }
 
-export function AuthDialog({ onClose, onAuthenticated, initialMode = "login", resetToken = "", notice = "" }: Props) {
-  const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : initialMode);
+export function AuthDialog({ onClose, onAuthenticated, initialMode = "login", resetToken = "", notice = "", registrationOpen = true }: Props) {
+  const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : initialMode === "register" && !registrationOpen ? "login" : initialMode);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -149,7 +151,7 @@ export function AuthDialog({ onClose, onAuthenticated, initialMode = "login", re
         <button type="submit" className="primary full-width" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? "Create account" : mode === "forgot" ? "Send reset instructions" : mode === "resend" ? "Send verification link" : mode === "reset" ? "Update password" : mfaRequired ? "Verify and sign in" : "Sign in"}</button>
       </form>
       <div className="auth-dialog-footer">
-        {mode === "login" && <><span><button className="text-command" type="button" onClick={() => changeMode("forgot")}>Forgot password?</button> · <button className="text-command" type="button" onClick={() => changeMode("resend")}>Resend verification</button></span><span>New to RecliQ? <button className="text-command" type="button" onClick={() => changeMode("register")}>Create account</button></span></>}
+        {mode === "login" && <><span><button className="text-command" type="button" onClick={() => changeMode("forgot")}>Forgot password?</button> · <button className="text-command" type="button" onClick={() => changeMode("resend")}>Resend verification</button></span>{registrationOpen ? <span>New to RecliQ? <button className="text-command" type="button" onClick={() => changeMode("register")}>Create account</button></span> : <span>New accounts are not open yet.</span>}</>}
         {mode === "resend" && <button className="text-command" type="button" onClick={() => changeMode("forgot")}>Need to change your password? Request a reset</button>}
         {mode !== "login" && <button className="text-command" type="button" onClick={() => changeMode("login")}><ArrowLeft size={15} /> Back to sign in</button>}
       </div>

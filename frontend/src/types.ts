@@ -19,7 +19,7 @@ export interface AccountIdentity {
   };
   workspace: { type: "guest" | "account"; id: string | null; label?: string };
   features?: Record<string, boolean>;
-  capabilities?: { report_email: boolean; email_notifications: boolean };
+  capabilities?: { report_email: boolean; email_notifications: boolean; registration?: boolean };
 }
 
 export interface WorkspaceOverview {
