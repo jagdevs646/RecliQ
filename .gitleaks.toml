@@ -28,6 +28,7 @@ regexes = [
   '''^\$[({]''',             # a shell or PowerShell variable, not a literal password
   '''<password>''',
   '''<key-vault-secret>''',
+  '''^rotated-mfa-key-for-tests-0123456789abcdef$''',  # fixed key in backend/tests/test_mfa_encryption.py
 ]
 paths = [
   '''tests/Data to recon/.*\.xlsx''',
