@@ -32,6 +32,10 @@ normalization.
   [azure-deployment.md](azure-deployment.md)). CI needs no secrets.
 - `backend/.env.example` lists the main settings with safe placeholders
   only; every setting is in `backend/app/core/config.py`.
+- Docker builds never include local `.env` files, databases, uploads or
+  virtual environments (`.dockerignore` for the Azure images built from the
+  repository root, `backend/.dockerignore` for Compose and CI), so an image
+  built on a developer's machine carries no local secrets or data.
 - CI runs [gitleaks](https://github.com/gitleaks/gitleaks) over the full
   history on every push and pull request (`.gitleaks.toml`). A finding fails
   the build.

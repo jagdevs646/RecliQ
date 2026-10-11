@@ -1,0 +1,14 @@
+# Build context of docker/backend.Dockerfile (Docker Compose and CI build from
+# backend/). Keep local settings with secrets, databases, uploads, virtual
+# environments and caches out of the image; Compose passes settings at runtime.
+.env
+.env.*
+**/*.db
+**/*.db-journal
+storage
+venv
+.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+node_modules

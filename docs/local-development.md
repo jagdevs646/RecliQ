@@ -62,4 +62,4 @@ Migrations must run on both SQLite and PostgreSQL. The audit log's triggers are 
 - **Plans are the contract.** A new rule setting is added in `backend/app/schemas/reconciliation.py`, read by the engine, and produced by `frontend/src/lib/plan.ts` (`draftToSheetRule`, and its reverse `sheetRuleToDraft` for re-runs). Saved setups and re-runs then carry it automatically.
 - **Messages are for finance users.** Errors and report comments say what happened and what to do, in plain words.
 - **Frontend files use CRLF line endings**; keep them when editing.
-- **Secrets never go in the code.** `backend/.env` is ignored by git; CI's gitleaks scan fails on anything that looks like a credential.
+- **Secrets never go in the code.** `backend/.env` is ignored by git and by Docker builds (`.dockerignore`, `backend/.dockerignore`); CI's gitleaks scan fails on anything that looks like a credential.
