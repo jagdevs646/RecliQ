@@ -20,10 +20,18 @@ normalization.
 
 ## Secrets
 
-- No secret is committed. Configuration comes from environment variables
-  (`backend/.env` locally, which git ignores; a secret store in production:
-  Azure Key Vault references in Container Apps, GitHub Actions secrets in CI).
-- `backend/.env.example` lists every setting with safe placeholders only.
+- No secret is in the current files. Credentials committed earlier were
+  removed from the history; as the next section says, a secret that was ever
+  pushed must still be rotated.
+- Configuration comes from environment variables: `backend/.env` locally
+  (git ignores it) and the hosting platform's settings in production.
+  Render generates `AUTH_CSRF_SECRET` and keeps the other secrets entered in
+  its dashboard (`render.yaml`); `scripts/deploy-azure.ps1` stores the
+  database URL, storage connection string and registry password as Container
+  App secrets. Azure Key Vault is not used yet (see
+  [azure-deployment.md](azure-deployment.md)). CI needs no secrets.
+- `backend/.env.example` lists the main settings with safe placeholders
+  only; every setting is in `backend/app/core/config.py`.
 - CI runs [gitleaks](https://github.com/gitleaks/gitleaks) over the full
   history on every push and pull request (`.gitleaks.toml`). A finding fails
   the build.
@@ -58,7 +66,7 @@ git push --force --all origin && git push --force --tags origin
 | Job | What it checks |
 | --- | --- |
 | Secret scan | gitleaks over the whole history |
-| Backend tests | `pytest tests/backend`; Alembic upgrade/downgrade on PostgreSQL; audit log refuses UPDATE/DELETE/TRUNCATE |
+| Backend tests | `pytest tests/backend` and, from `backend/`, `pytest tests`; Alembic upgrade/downgrade on PostgreSQL; audit log refuses UPDATE/DELETE/TRUNCATE |
 | Frontend | `pnpm typecheck`, `pnpm test` (Vitest), `pnpm build` |
 | Dependency audit | `pip-audit` on `backend/requirements.txt`, `pnpm audit` |
 | Docker | builds all four images (`docker/*.Dockerfile`) |

@@ -68,7 +68,7 @@ pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
-Open http://localhost:5173. The app opens on the Dashboard; there is no sign-up or login.
+Open http://localhost:5173. The app opens on the Dashboard in a guest workspace, so no account is needed. Registering is optional: locally (`EMAIL_BACKEND=log`) no email is sent, and the verification link is shown after registration. Account and first-administrator setup are in [backend/README.md](../backend/README.md#local-account-and-administrator-setup).
 
 ## Checking the install
 
@@ -77,5 +77,5 @@ Open http://localhost:5173. The app opens on the Dashboard; there is no sign-up 
 
 ## Next steps
 
-- Settings: [backend/.env.example](../backend/.env.example) lists every variable, and [operations-and-security.md](operations-and-security.md) explains them.
+- Settings: [backend/.env.example](../backend/.env.example) lists the main variables (all of them are in `backend/app/core/config.py`), and [operations-and-security.md](operations-and-security.md) explains them.
 - Deploying to Azure: [azure-deployment.md](azure-deployment.md).

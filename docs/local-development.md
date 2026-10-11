@@ -29,6 +29,7 @@ The dev server calls the API at `VITE_API_BASE_URL` (`http://localhost:8000/api`
 | What | Command |
 |---|---|
 | Backend tests | `python -m pytest tests/backend` (from the repository root; install `backend/requirements-dev.txt` first) |
+| Account, support and security tests | `python -m pytest tests` (from `backend/`) |
 | Frontend type-check | `pnpm typecheck` (in `frontend/`) |
 | Frontend tests | `pnpm test` (Vitest) |
 | Frontend production build | `pnpm build` |
@@ -54,7 +55,7 @@ Migrations must run on both SQLite and PostgreSQL. The audit log's triggers are 
 
 - A local SQLite database and `backend/storage` hold everything; delete both to start clean.
 - Parsed sheets are cached next to each upload (`*.sheet-<hash>-r<version>.pkl`). Changes to how files are read must bump `_READER_VERSION` in `ingestion/extractor.py`, or old caches will be reused.
-- Each browser is its own anonymous session. A private window starts a new, empty one.
+- Each browser is its own anonymous guest session. A private window starts a new, empty one. Signing in switches to the account's workspace.
 
 ## Conventions
 

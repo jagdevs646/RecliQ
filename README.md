@@ -156,6 +156,7 @@ Set `VITE_API_BASE_URL` (e.g. `http://localhost:8000/api`) if the API runs elsew
 
 ```bash
 python -m pytest tests/backend          # backend, from the repository root
+(cd backend && python -m pytest tests)  # account, support and security tests
 cd frontend && pnpm typecheck && pnpm test
 ```
 
@@ -178,7 +179,7 @@ Settings come from environment variables; see [backend/.env.example](backend/.en
 | `BOOTSTRAP_ADMIN_USERNAME/EMAIL/PASSWORD/TOTP_SECRET` | secure first Super Admin provisioning; provide real secret values outside source control |
 | `SENTRY_DSN`, `LOG_LEVEL`, `LOG_FORMAT` | error tracking and logging |
 
-Secrets are never committed. Real deployments read them from a secret store such as Azure Key Vault or GitHub Actions secrets; see [docs/operations-and-security.md](docs/operations-and-security.md).
+Secrets stay out of the repository: locally in `backend/.env` (ignored by git), and in production in the hosting platform's settings (Render's environment, or Container App secrets from the Azure script). Azure Key Vault is not used yet. CI's gitleaks scan fails the build if a secret is committed; see [docs/operations-and-security.md](docs/operations-and-security.md).
 
 ## Deployment
 

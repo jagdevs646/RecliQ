@@ -49,6 +49,9 @@ jobs:
         run: pip install -r backend/requirements-dev.txt
       - name: Run tests
         run: python -m pytest tests/backend -q
+      - name: Run account, support and security tests
+        working-directory: backend
+        run: python -m pytest tests -q
       - name: Migrate PostgreSQL and verify the audit log is append-only
         working-directory: backend
         env:

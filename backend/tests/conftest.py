@@ -11,11 +11,22 @@ os.environ["LOCAL_STORAGE_PATH"] = str(_TEST_ROOT / "storage")
 os.environ["ENVIRONMENT"] = "test"
 os.environ["AUTH_CSRF_SECRET"] = "test-only-auth-csrf-secret-0123456789"
 os.environ["EMAIL_BACKEND"] = "log"
+# Blank anything a developer's backend/.env may set, so local runs match CI.
 for _key in (
     "BOOTSTRAP_ADMIN_USERNAME",
     "BOOTSTRAP_ADMIN_EMAIL",
     "BOOTSTRAP_ADMIN_PASSWORD",
     "BOOTSTRAP_ADMIN_TOTP_SECRET",
+    "SMTP_HOST",
+    "SMTP_USERNAME",
+    "SMTP_PASSWORD",
+    "SMTP_FROM_EMAIL",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "FACEBOOK_CLIENT_ID",
+    "FACEBOOK_CLIENT_SECRET",
+    "LINKEDIN_CLIENT_ID",
+    "LINKEDIN_CLIENT_SECRET",
 ):
     os.environ[_key] = ""
 os.environ["JOB_QUEUE_BACKEND"] = "sync"

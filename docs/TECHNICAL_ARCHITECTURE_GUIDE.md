@@ -151,7 +151,7 @@ The full endpoint list is in [api.md](api.md). A run follows this path:
 
 ## 7. Security and compliance
 
-- **No secrets in the repository.** Configuration comes from environment variables and a secret store; CI scans the full history with gitleaks.
+- **Secrets outside the repository.** Configuration comes from environment variables, set in the hosting platform in production (Render's environment, or Container App secrets from the Azure script; Azure Key Vault is not used yet). CI scans the full history with gitleaks.
 - **Upload safety.** Content sniffing, password-protected and ZIP-bomb detection, `defusedxml` for XML, and size and row limits.
 - **Workspace isolation.** Guest sessions use a UUID. Accounts use a stable `user-<UUID>` workspace resolved from an opaque HttpOnly cookie; only the token hash is stored. Authenticated ownership cannot be overridden by `X-Session-ID`. State-changing cookie requests require CSRF validation.
 - **Account security.** Email verification, password hashing, rate-limited login, reset and recovery tokens, session revocation, and optional OAuth providers. Super Admin routes require an active administrator and MFA; the bootstrap credentials come from deployment secrets.
@@ -165,7 +165,7 @@ Details: [operations-and-security.md](operations-and-security.md).
 
 ## 8. Testing and delivery
 
-- **Backend**: pytest suite in `tests/backend`, run against SQLite locally; CI also runs the migrations on PostgreSQL and checks the audit log stays append-only.
+- **Backend**: pytest suites in `tests/backend` (engine and API) and `backend/tests` (accounts, support and security), run against SQLite locally; CI also runs the migrations on PostgreSQL and checks the audit log stays append-only.
 - **Frontend**: TypeScript type-check, Vitest unit tests for the plan logic, and a production build.
 - **CI** (`.github/workflows/ci.yml`): secret scan, both test suites, dependency audits (`pip-audit`, `pnpm audit`) and all Docker image builds on every push.
 - **Deployment**: Docker Compose for a local production-like stack ([installation.md](installation.md)); Azure Container Apps through `scripts/deploy-azure.ps1` ([azure-deployment.md](azure-deployment.md)).
