@@ -26,9 +26,9 @@ Optional parameters: `-Location` (default `centralindia`), `-ResourceGroup` (def
 | Backend Container App | Port 8000, 1 to 2 replicas. Runs `alembic upgrade head` on start, then the API |
 | Frontend Container App | Nginx serving the built app, 1 to 2 replicas, built with the backend's address |
 
-The database URL, the storage connection string and the registry password are stored as **Container App secrets** and passed to the backend by reference (`secretref:`), never as plain environment values. The backend is configured with `SESSION_COOKIE_SECURE=true` and a `FRONTEND_ORIGIN` pointing at the frontend app.
+The database URL, the storage connection string, the registry password and a CSRF key the script generates (`AUTH_CSRF_SECRET`, 96 random hex characters) are stored as **Container App secrets** and passed to the backend by reference (`secretref:`), never as plain environment values. The backend runs with `ENVIRONMENT=production`, so it refuses to start without `SESSION_COOKIE_SECURE=true` and that key, and with a `FRONTEND_ORIGIN` pointing at the frontend app.
 
-The provisioning example predates account workspaces: it does not configure `AUTH_CSRF_SECRET`, an email provider, a bootstrap administrator, or a durable Redis worker. Production accounts therefore remain unavailable until the operator supplies those secrets. Do not enable registration until email verification is configured. The script also uses `az acr build`; if ACR Tasks are unavailable in the subscription, build images locally with Docker and push them with `az acr login` / `docker push` instead.
+Registration and email stay off (`REGISTRATION_ENABLED=false`, `EMAIL_BACKEND=disabled`): visitors use guest workspaces. The script does not configure an email provider, a bootstrap administrator or a durable Redis worker; add them as described below, and do not enable registration until email verification works. The script also uses `az acr build`; if ACR Tasks are unavailable in the subscription, build images locally with Docker and push them with `az acr login` / `docker push` instead.
 
 ## Making it production-grade
 
@@ -40,7 +40,7 @@ The script gives a working deployment. For real customer data, add:
 4. **Network rules.** The script opens PostgreSQL to Azure services (`0.0.0.0`). Restrict it with a virtual network or private endpoint.
 5. **Monitoring.** Send container logs to Log Analytics, set `SENTRY_DSN` for error tracking, and alert on `/health/ready` failures. Logs are JSON with a request ID and job ID on every line.
 6. **Limits and retention.** Review `MAX_UPLOAD_MB`, `MAX_ROWS_PER_SHEET` and `JOB_TIMEOUT_SECONDS` for your customers' file sizes.
-7. **Authentication and email.** Store `AUTH_CSRF_SECRET` (at least 32 random characters), `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` and a base32 `BOOTSTRAP_ADMIN_TOTP_SECRET` as Container App secrets. Set `EMAIL_BACKEND=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `PUBLIC_APP_URL` and `PUBLIC_API_URL`; then enable `REGISTRATION_ENABLED=true`. Configure OAuth client secrets and exact callback URLs only for providers you intend to offer. `EMAIL_BACKEND=log` is for local development only.
+7. **Authentication and email.** The script already stores `AUTH_CSRF_SECRET`. Store `BOOTSTRAP_ADMIN_USERNAME`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD` and a base32 `BOOTSTRAP_ADMIN_TOTP_SECRET` as Container App secrets. Set `EMAIL_BACKEND=smtp`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `PUBLIC_APP_URL` and `PUBLIC_API_URL`; then enable `REGISTRATION_ENABLED=true`. Configure OAuth client secrets and exact callback URLs only for providers you intend to offer. `EMAIL_BACKEND=log` is for local development only.
 8. **Migration safety.** Back up PostgreSQL and Blob Storage, test `alembic upgrade head` on a copy, then apply the migration once before shifting production traffic. The current backend container command runs Alembic on startup; with multiple replicas, coordinate the rollout so multiple instances do not race to migrate. Revisions `20261009_0001` and `20261010_0001` add account/policy structures and widen counters; `20261011_0002` adds the editable platform email sender setting. These migrations do not rewrite guest workspace ownership.
 
 ## Environment variables
@@ -48,6 +48,7 @@ The script gives a working deployment. For real customer data, add:
 The backend reads these (full list in [backend/.env.example](../backend/.env.example)):
 
 ```env
+ENVIRONMENT=production
 DATABASE_URL=postgresql+psycopg://<user>:<password>@<server>.postgres.database.azure.com:5432/recliq?sslmode=require
 STORAGE_BACKEND=azure
 AZURE_STORAGE_CONNECTION_STRING=<from a secret>
@@ -85,6 +86,15 @@ az acr login --name <acr-name>
 docker build -f docker/backend.azure.Dockerfile -t <acr-name>.azurecr.io/recliq-backend:<reviewed-tag> .
 docker push <acr-name>.azurecr.io/recliq-backend:<reviewed-tag>
 az containerapp update --name <backend-app> --resource-group <resource-group> --image <acr-name>.azurecr.io/recliq-backend:<reviewed-tag>
+```
+
+A backend created by an earlier version of the script has no `ENVIRONMENT`, so it runs in development mode: the production checks are skipped and the CSRF key falls back to a fixed development value. Add the missing settings once:
+
+```powershell
+$bytes = New-Object byte[] 48; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$csrf = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+az containerapp secret set --name <backend-app> --resource-group <resource-group> --secrets "auth-csrf-secret=$csrf"
+az containerapp update --name <backend-app> --resource-group <resource-group> --set-env-vars "ENVIRONMENT=production" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled"
 ```
 
 Do the same for the frontend (`docker/frontend.azure.Dockerfile`, passing `--build-arg VITE_API_BASE_URL=https://<backend-address>/api`). Review the Alembic changes and take a database backup before the new backend starts, because its container command runs migrations automatically. To roll back, point the app at the previous image tag or revision (`az containerapp revision list`); a code rollback does not automatically reverse database migrations.

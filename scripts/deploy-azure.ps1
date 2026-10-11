@@ -21,6 +21,13 @@ function Get-PlainTextSecret([string]$Prompt) {
     }
 }
 
+function New-RandomSecret([int]$Bytes = 48) {
+    $buffer = New-Object byte[] $Bytes
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($buffer) } finally { $generator.Dispose() }
+    return -join ($buffer | ForEach-Object { $_.ToString("x2") })
+}
+
 function Invoke-AzJson([string[]]$Arguments) {
     $result = & az @Arguments --output json
     if ($LASTEXITCODE -ne 0) { throw "Azure CLI command failed: az $($Arguments -join ' ')" }
@@ -97,6 +104,10 @@ $acr = Invoke-AzJson @("acr", "show", "--resource-group", $ResourceGroup, "--nam
 $acrCredentials = Invoke-AzJson @("acr", "credential", "show", "--resource-group", $ResourceGroup, "--name", $acrName)
 $acrPassword = $acrCredentials.passwords[0].value
 $databaseUrl = "postgresql+psycopg://${databaseAdmin}:$([uri]::EscapeDataString($databasePassword))@$postgresName.postgres.database.azure.com:5432/recliq?sslmode=require"
+# Production mode makes the backend refuse to start without HTTPS-only cookies
+# and a CSRF key. The key is generated here and kept only as a Container App
+# secret. Registration and email stay off until SMTP is configured.
+$csrfSecret = New-RandomSecret
 
 Invoke-Az @("containerapp", "env", "create", "--name", $containerEnv, "--resource-group", $ResourceGroup, "--location", $Location, "--only-show-errors")
 
@@ -112,8 +123,8 @@ az containerapp create `
     --ingress external `
     --min-replicas 1 `
     --max-replicas 2 `
-    --secrets "database-url=$databaseUrl" "acr-password=$acrPassword" "storage-connection=$storageConnection" `
-    --env-vars "DATABASE_URL=secretref:database-url" "STORAGE_BACKEND=azure" "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection" "AZURE_STORAGE_CONTAINER=recliq" "SESSION_COOKIE_SECURE=true" `
+    --secrets "database-url=$databaseUrl" "acr-password=$acrPassword" "storage-connection=$storageConnection" "auth-csrf-secret=$csrfSecret" `
+    --env-vars "ENVIRONMENT=production" "DATABASE_URL=secretref:database-url" "STORAGE_BACKEND=azure" "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection" "AZURE_STORAGE_CONTAINER=recliq" "SESSION_COOKIE_SECURE=true" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled" `
     --only-show-errors | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Unable to create the RecliQ backend Container App" }
 

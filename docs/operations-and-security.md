@@ -27,8 +27,8 @@ normalization.
   (git ignores it) and the hosting platform's settings in production.
   Render generates `AUTH_CSRF_SECRET` and keeps the other secrets entered in
   its dashboard (`render.yaml`); `scripts/deploy-azure.ps1` stores the
-  database URL, storage connection string and registry password as Container
-  App secrets. Azure Key Vault is not used yet (see
+  database URL, storage connection string, registry password and a generated
+  `AUTH_CSRF_SECRET` as Container App secrets. Azure Key Vault is not used yet (see
   [azure-deployment.md](azure-deployment.md)). CI needs no secrets.
 - `backend/.env.example` lists the main settings with safe placeholders
   only; every setting is in `backend/app/core/config.py`.
