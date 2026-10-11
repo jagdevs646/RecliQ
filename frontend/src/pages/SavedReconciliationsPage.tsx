@@ -9,6 +9,7 @@ import type { GenericPlanPayload, Job, PrecheckResult, TemplateResolution, Templ
 interface Props {
   onJobCreated: (job: Job) => void;
   onNewReconciliation: () => void;
+  initialTemplateId?: string | null;
 }
 
 type Overrides = Record<string, Record<string, Record<string, string>>>;
@@ -17,7 +18,7 @@ function formatDate(value: string | null): string {
   return formatServerTime(value, undefined, "Never");
 }
 
-export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation }: Props) {
+export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation, initialTemplateId = null }: Props) {
   const [templates, setTemplates] = useState<TemplateSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState("");
@@ -26,7 +27,9 @@ export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation }: 
   async function load() {
     setLoading(true);
     try {
-      setTemplates(await api.listTemplates());
+      const loaded = await api.listTemplates();
+      setTemplates(loaded);
+      if (initialTemplateId) setActive(loaded.find((item) => item.id === initialTemplateId) ?? null);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not load saved reconciliations");
     } finally {
@@ -34,7 +37,7 @@ export function SavedReconciliationsPage({ onJobCreated, onNewReconciliation }: 
     }
   }
 
-  useEffect(() => { load().catch(() => undefined); }, []);
+  useEffect(() => { load().catch(() => undefined); }, [initialTemplateId]);
 
   async function archive(template: TemplateSummary) {
     if (!window.confirm(`Archive "${template.name}"? It will no longer be listed; its history stays in the audit log.`)) return;

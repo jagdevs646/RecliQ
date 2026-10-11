@@ -1,5 +1,5 @@
-import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Sparkles, Trash2, Undo2, Upload } from "lucide-react";
-import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Sparkles, Trash2, Undo2 } from "lucide-react";
+import { useMemo, useState, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { filterColumns, matchRanges, searchTerms } from "../lib/columnSearch";
 import { TOLERANCE_KINDS, TOLERANCE_LIMITS, clearTolerance, comparedFieldLabel, guessToleranceKind, setToleranceLimit, toleranceFor, toleranceIsComplete, toleranceKind, toleranceLimit, type ToleranceKind } from "../lib/plan";
 import type { AnalysisResponse, RuleMapping, ToleranceBand } from "../types";
@@ -23,10 +23,23 @@ interface Props {
   toleranceNotice?: ReactNode;
   /** What RecliQ learned about the columns, to pick each field's type of data. */
   analysis?: AnalysisResponse | null;
+  uiState?: MappingBuilderUIState;
+  onUIStateChange?: (update: SetStateAction<MappingBuilderUIState>) => void;
 }
 
 type MappingMode = "drag" | "rows";
 type AutoMatch = { source: string; destination: string; confidence: number };
+
+export interface MappingBuilderUIState {
+  pickedKinds: Record<string, ToleranceKind>;
+  mode: MappingMode;
+  left: string[];
+  right: string[];
+  past: RuleMapping[][];
+  future: RuleMapping[][];
+  templateName: string;
+  autoMatches: AutoMatch[];
+}
 
 const templateKey = "recliq.mapping.templates";
 const lastMappingKey = "recliq.mapping.last";
@@ -47,16 +60,32 @@ function matchConfidence(source: string, destination: string) {
   return Math.round((common.length / Math.max(left.length, right.length)) * 90);
 }
 
-export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name, suggestions = [], tolerances = [], onTolerancesChange: editTolerances, toleranceNotice, analysis }: Props) {
-  // A type of data the user picked over the detected one, by compared field.
-  const [pickedKinds, setPickedKinds] = useState<Record<string, ToleranceKind>>({});
-  const [mode, setMode] = useState<MappingMode>("drag");
-  const [left, setLeft] = useState<string[]>([]);
-  const [right, setRight] = useState<string[]>([]);
-  const [past, setPast] = useState<RuleMapping[][]>([]);
-  const [future, setFuture] = useState<RuleMapping[][]>([]);
-  const [templateName, setTemplateName] = useState("");
-  const [autoMatches, setAutoMatches] = useState<AutoMatch[]>([]);
+export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChange, primaryFile1, primaryFile2, file1Name, file2Name, suggestions = [], tolerances = [], onTolerancesChange: editTolerances, toleranceNotice, analysis, uiState, onUIStateChange }: Props) {
+  const [localUIState, setLocalUIState] = useState<MappingBuilderUIState>(() => ({
+    pickedKinds: {}, mode: "drag", left: [], right: [], past: [], future: [], templateName: "", autoMatches: [],
+  }));
+  const currentUIState = uiState ?? localUIState;
+  const setUIState = (action: SetStateAction<MappingBuilderUIState>) => {
+    onUIStateChange?.(action);
+    if (!uiState) setLocalUIState(action);
+  };
+  const setUIField = <Key extends keyof MappingBuilderUIState>(key: Key, action: SetStateAction<MappingBuilderUIState[Key]>) => {
+    setUIState((current) => {
+      const value = typeof action === "function"
+        ? (action as (currentValue: MappingBuilderUIState[Key]) => MappingBuilderUIState[Key])(current[key])
+        : action;
+      return { ...current, [key]: value };
+    });
+  };
+  const { pickedKinds, mode, left, right, past, future, templateName, autoMatches } = currentUIState;
+  const setPickedKinds = (action: SetStateAction<Record<string, ToleranceKind>>) => setUIField("pickedKinds", action);
+  const setMode = (action: SetStateAction<MappingMode>) => setUIField("mode", action);
+  const setLeft = (action: SetStateAction<string[]>) => setUIField("left", action);
+  const setRight = (action: SetStateAction<string[]>) => setUIField("right", action);
+  const setPast = (action: SetStateAction<RuleMapping[][]>) => setUIField("past", action);
+  const setFuture = (action: SetStateAction<RuleMapping[][]>) => setUIField("future", action);
+  const setTemplateName = (action: SetStateAction<string>) => setUIField("templateName", action);
+  const setAutoMatches = (action: SetStateAction<AutoMatch[]>) => setUIField("autoMatches", action);
   const primaryFile1Columns = Array.isArray(primaryFile1) ? primaryFile1 : primaryFile1 ? [primaryFile1] : [];
   const primaryFile2Columns = Array.isArray(primaryFile2) ? primaryFile2 : primaryFile2 ? [primaryFile2] : [];
   const availableFile1 = useMemo(() => file1Columns.filter((column) => !primaryFile1Columns.includes(column)), [file1Columns, primaryFile1Columns]);
@@ -154,7 +183,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
     </div>
     <div className="mapping-toolbar">
       <div className="segmented-control" aria-label="Mapping mode"><button type="button" className={mode === "drag" ? "is-active" : ""} onClick={() => setMode("drag")}>Drag & drop</button><button type="button" className={mode === "rows" ? "is-active" : ""} onClick={() => setMode("rows")}>Row mapping</button></div>
-      <button type="button" className="primary" onClick={autoMap} title="Map compatible unmapped columns without changing your manual mappings"><Sparkles size={16} />Auto map columns</button>
+      <button type="button" className="primary" data-workflow-focus onClick={autoMap} title="Map compatible unmapped columns without changing your manual mappings"><Sparkles size={16} />Auto map columns</button>
       <div className="icon-actions"><button type="button" className="icon-button" onClick={undo} disabled={!past.length} title="Undo mapping"><Undo2 size={16} /></button><button type="button" className="icon-button" onClick={redo} disabled={!future.length} title="Redo mapping"><Redo2 size={16} /></button><button type="button" className="icon-button" onClick={() => commit([])} disabled={!rules.length} title="Reset all mappings"><Trash2 size={16} /></button></div>
     </div>
     {openSuggestions.length > 0 && <div className="suggestion-strip">
@@ -185,7 +214,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
     <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}><span>{rule.file_1_fields.join(" + ")}</span><ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>{editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}<button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button></div>)}</div>
     {editTolerances && tolerances.some((band) => !toleranceIsComplete(band, { rules })) && <p className="field-hint is-warning">A tolerance of 0 accepts nothing: enter a value above 0, or clear the box for no tolerance.</p>}
     {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
-    <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button><button type="button" className="icon-button" title="Importing templates is planned for a future release" disabled><Upload size={16} /></button></div>
+    <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button></div>
   </section>;
 }
 

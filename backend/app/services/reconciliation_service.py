@@ -17,6 +17,7 @@ from app.core.observability import capture_exception
 from app.database.session import SessionLocal
 from app.jobs.queue import enqueue_job
 from app.jobs.runner import claim_job, heartbeat, is_transient
+from app.models.account import User
 from app.models.alias import EntityAlias
 from app.models.file import UploadedFile
 from app.models.job import ReconciliationJob
@@ -35,6 +36,8 @@ from app.schemas.reconciliation import (
 from app.services import learning_service, resolution_service
 from app.services.audit_service import AuditActor, record_event
 from app.services.job_service import append_history
+from app.services.policy_service import effective_features, effective_limits, require_feature
+from app.services.quota_service import release_job_slot, reserve_job, reserve_storage
 from app.storage import get_storage
 from app.storage.base import report_data_path
 
@@ -208,13 +211,29 @@ def enqueue_generic_job(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Source file 2 is required")
 
     files_to_check = set(source_file_ids + destination_file_ids)
+    user = None
+    if session_id.startswith("user-"):
+        user = db.get(User, session_id.removeprefix("user-"))
+        if not user or user.status not in {"active", "restricted"}:
+            raise HTTPException(status_code=403, detail="This account is not permitted to start reconciliations.")
+    require_feature(db, user, "basic_reconciliation")
+    if template:
+        require_feature(db, user, "saved_setups")
+    limits = effective_limits(db, user)
+    if len(files_to_check) > limits["max_files_per_run"]:
+        raise HTTPException(status_code=429, detail={"code": "quota_exceeded", "limit": "max_files_per_run", "current_usage": len(files_to_check), "allowed": limits["max_files_per_run"], "message": f"This run uses {len(files_to_check)} files; the workspace limit is {limits['max_files_per_run']}."})
+    records = {fid: _file_record(db, fid, session_id) for fid in files_to_check}
+    total_rows = sum(records[file_id].row_count_total for file_id in source_file_ids + destination_file_ids)
+    if total_rows > limits["max_rows_per_run"]:
+        raise HTTPException(status_code=413, detail={"code": "quota_exceeded", "limit": "max_rows_per_run", "current_usage": total_rows, "allowed": limits["max_rows_per_run"], "message": f"This run processes {total_rows:,} rows; the workspace limit is {limits['max_rows_per_run']:,}."})
 
-    for fid in files_to_check:
-        _file_record(db, fid, session_id)
+    label = next((str(pair.report_metadata.get("label") or "").strip() for pair in plan.file_pairs if pair.report_metadata.get("label")), "")
+    display_name = label or f"{records[file_1_id].original_filename} vs {records[file_2_id].original_filename}"
 
     job = ReconciliationJob(
         session_id=session_id,
         job_type="generic",
+        display_name=display_name[:250],
         status="queued",
         progress=0,
         orientation=plan.orientation,
@@ -227,6 +246,7 @@ def enqueue_generic_job(
     db.add(job)
     db.flush()
     append_history(db, job, "queued", "Generic reconciliation job queued")
+    reserve_job(db, job, limits)
     db.commit()
     db.refresh(job)
     record_event(
@@ -271,12 +291,27 @@ def enqueue_gst_job(
         if fs.file_id:
             files_to_check.add(fs.file_id)
 
-    for fid in files_to_check:
-        _file_record(db, fid, session_id)
+    user = None
+    if session_id.startswith("user-"):
+        user = db.get(User, session_id.removeprefix("user-"))
+        if not user or user.status not in {"active", "restricted"}:
+            raise HTTPException(status_code=403, detail="This account is not permitted to start reconciliations.")
+    require_feature(db, user, "gst_reconciliation")
+    limits = effective_limits(db, user)
+    if len(files_to_check) > limits["max_files_per_run"]:
+        raise HTTPException(status_code=429, detail={"code": "quota_exceeded", "limit": "max_files_per_run", "current_usage": len(files_to_check), "allowed": limits["max_files_per_run"], "message": f"This run uses {len(files_to_check)} files; the workspace limit is {limits['max_files_per_run']}."})
+    records = {fid: _file_record(db, fid, session_id) for fid in files_to_check}
+    ordered_ids = [item.file_id for item in [*payload.source_files_1, *payload.source_files_2] if item.file_id]
+    if not ordered_ids:
+        ordered_ids = [file_1_id, file_2_id]
+    total_rows = sum(records[file_id].row_count_total for file_id in ordered_ids)
+    if total_rows > limits["max_rows_per_run"]:
+        raise HTTPException(status_code=413, detail={"code": "quota_exceeded", "limit": "max_rows_per_run", "current_usage": total_rows, "allowed": limits["max_rows_per_run"], "message": f"This run processes {total_rows:,} rows; the workspace limit is {limits['max_rows_per_run']:,}."})
 
     job = ReconciliationJob(
         session_id=session_id,
         job_type="gst",
+        display_name=f"{records[file_1_id].original_filename} vs {records[file_2_id].original_filename}"[:250],
         status="queued",
         progress=0,
         orientation=payload.orientation,
@@ -287,6 +322,7 @@ def enqueue_gst_job(
     db.add(job)
     db.flush()
     append_history(db, job, "queued", "GST reconciliation job queued")
+    reserve_job(db, job, limits)
     db.commit()
     db.refresh(job)
     record_event(
@@ -369,18 +405,34 @@ def _process_claimed_job(job_id: str) -> None:
     settings = get_settings()
     storage = get_storage()
     output_path: Path | None = None
+    persisted_storage_paths: list[str] = []
+    report_committed = False
     try:
         job = db.get(ReconciliationJob, job_id)
         if not job or job.status != "processing":
             return
+        owner = None
+        if job.session_id.startswith("user-"):
+            owner = db.get(User, job.session_id.removeprefix("user-"))
+            if not owner or owner.status not in {"active", "restricted"}:
+                raise RuntimeError("The account is no longer permitted to run this reconciliation.")
+        features = effective_features(db, owner)
+        required_feature = "gst_reconciliation" if job.job_type == "gst" else "basic_reconciliation"
+        if not features.get(required_feature, False):
+            raise RuntimeError("This reconciliation feature was disabled before the job started.")
         append_history(db, job, "processing", f"Reconciliation started (attempt {job.attempts})")
         db.commit()
         logger.info("Reconciliation started", extra={"attempt": job.attempts, "job_type": job.job_type})
-        saved_aliases = _saved_aliases(db, job.session_id) if job.job_type == "generic" else []
+        use_review_learning = features.get("near_match_review", False)
+        saved_aliases = _saved_aliases(db, job.session_id) if job.job_type == "generic" and use_review_learning else []
         # Reviewers' earlier decisions and the organization's auto-resolution
         # rules, read once so every sheet rule of this job uses the same set.
-        learning = learning_service.build_context(db, job.session_id) if job.job_type == "generic" else None
-        resolution_rules = resolution_service.active_rule_configs(db, job.session_id) if job.job_type == "generic" else []
+        learning = learning_service.build_context(db, job.session_id) if job.job_type == "generic" and use_review_learning else None
+        resolution_rules = (
+            resolution_service.active_rule_configs(db, job.session_id)
+            if job.job_type == "generic" and features.get("auto_resolution", False)
+            else []
+        )
 
         def is_cancelled() -> bool:
             try:
@@ -658,11 +710,18 @@ def _process_claimed_job(job_id: str) -> None:
             raise InterruptedError("Reconciliation cancelled by user")
 
         stored_report = storage.save_report(output_path, job.session_id, output_name)
+        persisted_storage_paths.append(stored_report.storage_path)
 
         # The report data is stored as its own object (local disk or blob
         # storage), so previews and custom reports work from any worker.
+        data_size_bytes = 0
+        data_storage_path = report_data_path(stored_report.storage_path)
         if raw_path.exists():
-            storage.save_file(raw_path, report_data_path(stored_report.storage_path))
+            storage.save_file(raw_path, data_storage_path)
+            persisted_storage_paths.append(data_storage_path)
+            data_size_bytes = raw_path.stat().st_size
+        user = db.get(User, job.session_id.removeprefix("user-")) if job.session_id.startswith("user-") else None
+        reserve_storage(db, job.session_id, stored_report.size_bytes + data_size_bytes, effective_limits(db, user)["storage_mb"])
         from app.utils.json_encoder import safe_json_dumps
 
         # The report summary doubles as the job manifest: aggregate counts at the
@@ -681,6 +740,7 @@ def _process_claimed_job(job_id: str) -> None:
             storage_backend=stored_report.storage_backend,
             storage_path=stored_report.storage_path,
             size_bytes=stored_report.size_bytes,
+            data_size_bytes=data_size_bytes,
             summary_json=safe_json_dumps(report_summary),
         )
         db.add(report)
@@ -690,27 +750,47 @@ def _process_claimed_job(job_id: str) -> None:
         job.status = "completed_with_errors" if rule_errors else "completed"
         job.progress = 100
         job.completed_at = datetime.now(timezone.utc)
+        job.matched_records_count = int(summary.get("matched_records", summary.get("fully_matched_records", 0)) or 0)
+        job.exception_count = int(summary.get("only_in_file_1", 0) or 0) + int(summary.get("only_in_file_2", 0) or 0) + int(summary.get("field_discrepancies", 0) or 0)
+        job.review_count = int(summary.get("confidence_review", 0) or 0)
         job.error_message = safe_json_dumps(rule_errors) if rule_errors else None
         completion_message = "Reconciliation completed with sheet-rule errors" if rule_errors else "Reconciliation completed"
         append_history(db, job, job.status, completion_message, safe_json_dumps(summary))
+        release_job_slot(db, job.id)
         db.commit()
+        report_committed = True
         logger.info(completion_message, extra={"failed_rules": len(rule_errors), "report_id": report.id})
         record_event(
             scope_id=job.session_id, actor=AuditActor.system(), action="job.completed", entity_type="job",
             entity_id=job.id, summary=completion_message, after={"status": job.status, "report_id": report.id},
             metadata={key: value for key, value in summary.items() if isinstance(value, (int, float))},
         )
+        from app.services.email_service import notify_workspace
+        notify_workspace(
+            scope_id=job.session_id,
+            event="reconciliation_completed",
+            job_id=job.id,
+            run_name=job.display_name,
+        )
         _record_auto_resolution(job, merged_ud)
-        try:
-            resolution_service.record_patterns(db, job.session_id, job.id, merged_ud)
-        except Exception:
-            db.rollback()
-            logger.warning("Could not record recurring exception patterns", exc_info=True)
+        if use_review_learning:
+            try:
+                resolution_service.record_patterns(db, job.session_id, job.id, merged_ud)
+            except Exception:
+                db.rollback()
+                logger.warning("Could not record recurring exception patterns", exc_info=True)
 
-        # Enforce maximum 20 stored records per session
+        # Guests retain the existing latest-20 history; accounts use the
+        # administrator-configured workspace retention period.
         from app.services.job_service import prune_old_jobs
         try:
-            prune_old_jobs(db, job.session_id, storage, max_records=20)
+            if job.session_id.startswith("user-"):
+                account = db.get(User, job.session_id.removeprefix("user-"))
+                retention_days = effective_limits(db, account)["report_retention_days"] if account else 365
+                if retention_days > 0:
+                    prune_old_jobs(db, job.session_id, storage, older_than_days=retention_days)
+            else:
+                prune_old_jobs(db, job.session_id, storage, max_records=20)
         except Exception:
             pass
     except InterruptedError:
@@ -725,6 +805,7 @@ def _process_claimed_job(job_id: str) -> None:
             job.completed_at = datetime.now(timezone.utc)
             job.error_message = "Reconciliation cancelled by user"
             append_history(db, job, "cancelled", "Reconciliation cancelled by user")
+            release_job_slot(db, job.id)
             try:
                 db.commit()
             except Exception:
@@ -755,6 +836,7 @@ def _process_claimed_job(job_id: str) -> None:
             job.error_message = str(exc)
             job.completed_at = datetime.now(timezone.utc)
             append_history(db, job, "failed", str(exc))
+            release_job_slot(db, job.id)
             try:
                 db.commit()
             except Exception:
@@ -762,6 +844,13 @@ def _process_claimed_job(job_id: str) -> None:
             record_event(
                 scope_id=job.session_id, actor=AuditActor.system(), action="job.failed", entity_type="job",
                 entity_id=job.id, summary="Reconciliation failed", after={"status": "failed", "error": str(exc)[:2000]},
+            )
+            from app.services.email_service import notify_workspace
+            notify_workspace(
+                scope_id=job.session_id,
+                event="reconciliation_failed",
+                job_id=job.id,
+                run_name=job.display_name,
             )
     finally:
         db.close()
@@ -773,5 +862,8 @@ def _process_claimed_job(job_id: str) -> None:
                 raw_path = output_path.with_name(f"{output_path.stem}_data.json")
                 if raw_path.exists():
                     raw_path.unlink(missing_ok=True)
+            if not report_committed:
+                for storage_path in persisted_storage_paths:
+                    storage.delete_file(storage_path)
         except Exception:
             pass

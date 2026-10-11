@@ -8,7 +8,7 @@
 
 ## 1. System overview
 
-RecliQ is a reconciliation service: a React single-page app, a FastAPI backend, a durable job runner and a pandas-based matching engine. Records live in PostgreSQL (SQLite for local work) and files in Azure Blob Storage (local disk for development). Visitors are identified by an anonymous session, and everything they create is scoped to it.
+RecliQ is a reconciliation service: a React single-page app, a FastAPI backend, a durable job runner and a pandas-based matching engine. Records live in PostgreSQL (SQLite for local work) and files in Azure Blob Storage (local disk for development). It preserves anonymous guest workspaces and adds optional registered accounts; every request resolves an isolated workspace server-side.
 
 ```mermaid
 flowchart TB
@@ -130,21 +130,21 @@ Reviewers' confirm/reject decisions are stored with the method and score that pr
 
 The full endpoint list is in [api.md](api.md). A run follows this path:
 
-1. **Upload** (`POST /api/files/upload`): content is checked against the extension, size and row limits are enforced while streaming, and the file's SHA-256 is recorded in the audit log.
+1. **Upload** (`POST /api/files/upload`): the current workspace's allowed extensions are checked, file content is validated, policy and environment size/row limits are enforced, and the file's SHA-256 is recorded in the audit log.
 2. **Set up**: sheets and headers are read (`/files/{id}/metadata`, `/files/{id}/columns`), and `POST /api/analysis/` suggests keys and column pairs.
 3. **Pre-check** (`POST /api/analysis/precheck`): the sheets are read exactly as the run will read them; blockers must be fixed and warnings confirmed.
 4. **Start** (`POST /api/reconciliation/generic`): the plan is validated, stored with a new job, and the job is queued.
-5. **Run**: a worker claims the job with a conditional update, refreshes a heartbeat, and reports progress (`GET /api/jobs/{id}`, `WS /api/jobs/{id}/ws`).
+5. **Run**: a worker claims the job with a conditional update, rechecks account status and reconciliation feature policy, refreshes a heartbeat, and reports progress (`GET /api/jobs/{id}`, `WS /api/jobs/{id}/ws`).
 6. **Review**: `GET /api/reports/job/{id}/summary` and `/preview` feed the dashboard; `/download` returns the workbook.
-7. **Repeat**: `GET /api/jobs/{id}/plan` returns the stored plan and files for "Change rules and run again".
+7. **Repeat**: `GET /api/jobs/{id}/plan` returns a stored general plan; `GET /api/jobs/{id}/gst-plan` returns the stored GST setup. Both are workspace-scoped and restore the source files and configuration for "Run again".
 
 ---
 
 ## 6. Data, jobs and reliability
 
-- **Database.** Files, jobs and their history, reports, saved setups and versions, aliases and decisions, auto-resolution rules and versions, and the audit log. Alembic migrations run on start in containers.
+- **Database.** Files, jobs and their history, reports, saved setups and versions, aliases and decisions, auto-resolution rules and versions, account identities/sessions/preferences, feature and quota policies, email deliveries, and workspace/platform audit logs.
 - **Durable jobs.** The job row is the source of truth. With Redis, workers run separately (`python -m app.jobs.worker`); without it, a thread pool in the API runs them. A sweeper re-queues runs whose heartbeat has stopped, up to `JOB_MAX_ATTEMPTS`, then fails them with an explanation. Infrastructure errors are retried; data errors are not.
-- **Retention.** Each session keeps its 20 most recent runs; older ones are removed with their reports.
+- **Retention.** Guest workspaces keep their 20 most recent runs. Registered accounts use the configured report-retention period; files are removed only when no retained run needs them.
 - **Timestamps.** Stored in UTC and returned with an offset, so browsers show local time correctly.
 
 ---
@@ -153,7 +153,10 @@ The full endpoint list is in [api.md](api.md). A run follows this path:
 
 - **No secrets in the repository.** Configuration comes from environment variables and a secret store; CI scans the full history with gitleaks.
 - **Upload safety.** Content sniffing, password-protected and ZIP-bomb detection, `defusedxml` for XML, and size and row limits.
-- **Session isolation.** Every query is filtered by the session; the session cookie is HttpOnly and `Secure` over HTTPS.
+- **Workspace isolation.** Guest sessions use a UUID. Accounts use a stable `user-<UUID>` workspace resolved from an opaque HttpOnly cookie; only the token hash is stored. Authenticated ownership cannot be overridden by `X-Session-ID`. State-changing cookie requests require CSRF validation.
+- **Account security.** Email verification, password hashing, rate-limited login, reset and recovery tokens, session revocation, and optional OAuth providers. Super Admin routes require an active administrator and MFA; the bootstrap credentials come from deployment secrets.
+- **Policy enforcement.** Feature and quota policy is checked in backend operations and workers. Per-account overrides can further restrict global defaults. Hiding a page is never the authorization control.
+- **Guest continuity.** Guests need no registration. Guest import into an account is a separate, explicit, ownership-checked operation.
 - **Append-only audit log.** The ORM and database triggers refuse updates and deletes, entries are hash-chained, and `GET /api/audit/verify` detects tampering.
 
 Details: [operations-and-security.md](operations-and-security.md).

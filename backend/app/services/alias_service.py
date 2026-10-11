@@ -14,10 +14,13 @@ weights, never for name aliases.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.alias import EntityAlias, MatchDecision
+from app.models.job import ReconciliationJob
+from app.models.review import ReviewOutcome
 from app.reconciliation_engine.learning import pair_key, value_key  # noqa: F401  (re-exported)
 from app.services.audit_service import AuditActor, record_event
 
@@ -66,6 +69,20 @@ def record_decision(
         method=(method or "").strip()[:80] or None,
     )
     db.add(row)
+    if job_id:
+        job = db.query(ReconciliationJob).filter(ReconciliationJob.id == job_id, ReconciliationJob.session_id == scope_id).first()
+        if job:
+            outcome = db.get(ReviewOutcome, (job_id, pair_key(value_1, value_2)[:620]))
+            if decision == "reset":
+                if outcome:
+                    db.delete(outcome)
+                    job.review_count += 1
+            elif outcome:
+                outcome.outcome = decision
+                outcome.updated_at = datetime.now(timezone.utc)
+            else:
+                db.add(ReviewOutcome(job_id=job_id, pair_key=pair_key(value_1, value_2)[:620], outcome=decision))
+                job.review_count = max(0, job.review_count - 1)
     db.commit()
     db.refresh(row)
     record_event(

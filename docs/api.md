@@ -2,11 +2,28 @@
 
 All endpoints are under `/api` (set by `API_PREFIX`), except the health checks. The interactive OpenAPI documentation is at `/docs` on a running backend and always matches the code; this page is an overview.
 
-## Sessions
+## Workspace identity and authentication
 
-There are no accounts. On the first request the backend creates an anonymous session (a UUID), returns it in the `X-Session-ID` header and sets it as an HttpOnly cookie. The frontend also sends it back in `X-Session-ID`. Every file, run, report, saved setup, alias, rule and audit entry belongs to one session, and queries only ever see their own session's data.
+Guests remain anonymous. On the first request the backend creates a UUID session, returns it in `X-Session-ID` and sets the guest cookie. Optional accounts use an opaque HttpOnly auth cookie backed by a database session; account workspace ownership is resolved server-side. An authenticated cookie cannot be overridden with `X-Session-ID`. Cookie-authenticated state-changing requests must include `X-CSRF-Token` from `GET /auth/me`.
 
-- `GET /session`: the current session.
+| Method and path | Purpose |
+|---|---|
+| `GET /session` | Current anonymous guest session |
+| `POST /auth/register`, `POST /auth/verify-email` | Register a standard user, verify email; registration requires configured email delivery |
+| `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` | Sign in, revoke current session, resolve current identity/workspace/features |
+| `POST /auth/password/forgot`, `POST /auth/password/reset`, `POST /auth/password/change` | Password recovery and change |
+| `PUT /auth/profile`, `POST /auth/email/change`, `POST /auth/email/change/verify` | Profile and verified email updates |
+| `GET /auth/sessions`, `DELETE /auth/sessions/{id}` | List and revoke account sessions |
+| `POST /auth/mfa/setup`, `POST /auth/mfa/enable`, `POST /auth/mfa/disable` | Configure TOTP MFA; required for Super Admin access |
+| `GET /auth/preferences`, `PUT /auth/preferences` | Account theme and notification preferences |
+| `POST /auth/import-guest` | Explicitly transfer the current guest workspace into the signed-in account |
+| `GET /auth/oauth/providers`, `GET /auth/oauth/{provider}` | Provider availability and OAuth start; Google, Facebook and LinkedIn require configured credentials |
+
+OAuth provider email-verification claims are honored when present: an explicit unverified claim is rejected. If a provider omits that claim, RecliQ does not treat the email as verified or link an existing account by email. A new account must verify ownership through RecliQ's email confirmation flow before retrying OAuth. This fallback requires configured email delivery; otherwise the OAuth flow reports that verification cannot be completed.
+
+In `development`, `local` or `test` with `EMAIL_BACKEND=log`, registration and verification-resend responses include a `development_verification_url`, and a password-reset response for an existing account includes `development_reset_url`. These URLs are shown by the local UI for testing; no email is sent. They are never returned by the SMTP flow. Production password-reset responses remain generic whether or not the address belongs to an account, and configured SMTP sends the one-hour, single-use reset link to that account's email address.
+
+Administrative routes are under `/admin`. Every route requires an active Super Admin account with MFA. They cover overview, user search/detail/status/session revocation, feature/quota policy, admin audit, report-email delivery metadata and system health. `GET/PUT /admin/email-settings` reads or changes the platform sender address; `POST /admin/email-settings/test` sends a configuration test only to the signed-in Super Admin's verified address. The sender address defaults to `jagdev.s65@gmail.com`; SMTP host and credentials remain backend environment secrets. Admin policy updates never override ownership or audit protections. Account feature overrides can only restrict global features; numeric quotas can be raised or lowered within deployment hard caps, while allowed formats remain an intersection with the global policy.
 
 Timestamps in responses are UTC with an offset (e.g. `2026-09-30T18:52:11Z`).
 
@@ -14,12 +31,12 @@ Timestamps in responses are UTC with an offset (e.g. `2026-09-30T18:52:11Z`).
 
 | Method and path | Purpose |
 |---|---|
-| `GET /files/formats` | Accepted extensions and their descriptions |
+| `GET /files/formats` | Workspace-allowed extensions and effective upload/row limits |
 | `POST /files/upload` | Upload one file (`multipart/form-data`, field `file`). Content is checked against the extension; size and row limits apply |
 | `GET /files/{file_id}/metadata` | File name and its sheets (`[{id, name}]`) |
 | `GET /files/{file_id}/columns?orientation=vertical&sheet_id=…` | Column headers of one sheet; `orientation` is `vertical` or `horizontal` |
 
-Accepted formats: `.xlsx`, `.xls`, `.csv`, `.tsv`, `.txt`, `.pdf` and `.docx` (tables), MT940 (`.sta`, `.mt940`, `.940`), BAI2 (`.bai`, `.bai2`), CAMT.053 (`.xml`) and GSTR-2B/2A JSON (`.json`). Bank statements are converted into Transactions and Balances sheets; see [operations-and-security.md](operations-and-security.md#bank-statements-and-gst-returns).
+Supported formats are `.xlsx`, `.xls`, `.csv`, `.tsv`, `.txt`, `.pdf` and `.docx` (tables), MT940 (`.sta`, `.mt940`, `.940`), BAI2 (`.bai`, `.bai2`), CAMT.053 (`.xml`) and GSTR-2B/2A JSON (`.json`). `/files/formats` filters this list by workspace policy, and the upload endpoint enforces the same allowed-format list. Bank statements are converted into Transactions and Balances sheets; see [operations-and-security.md](operations-and-security.md#bank-statements-and-gst-returns).
 
 ## Setting up a run
 
@@ -106,7 +123,8 @@ GST request:
 | `GET /jobs?limit=50` | Recent runs of this session |
 | `GET /jobs/{job_id}` | One run: status (`queued`, `processing`, `completed`, `completed_with_errors`, `failed`, `cancelled`), progress and file names |
 | `WS /jobs/{job_id}/ws` | Live progress updates |
-| `GET /jobs/{job_id}/plan` | The run's stored plan and its files, to change the rules and run again. `409` with a reason if it cannot be reopened (GST runs, or files no longer stored) |
+| `GET /jobs/{job_id}/plan` | A general run's stored plan and files, to change rules and run again. `409` if the run cannot be reopened or its uploads are gone |
+| `GET /jobs/{job_id}/gst-plan` | The owned GST run's source/destination files, selected sheets, orientation, and supplier confidence threshold for Run Again; returns `404` outside the workspace and `409` if setup or uploads are unavailable |
 | `POST /jobs/{job_id}/cancel` | Cancel a queued or running job |
 | `DELETE /jobs/{job_id}` | Delete a run, its report, and its uploads when no other run uses them |
 | `DELETE /jobs` | Delete all runs of this session |
@@ -120,6 +138,11 @@ GST request:
 | `GET /reports/job/{job_id}/download` | The Excel report (a ZIP when a run has several file pairs, or `?file_pair_id=` for one) |
 | `POST /reports/job/{job_id}/download_custom` | A report rebuilt with chosen sheets, date format and number format |
 | `GET /reports/{report_id}/download` | Download by report id |
+| `POST /reports/job/{job_id}/email` | Queue report delivery to authorized recipients (feature and quota checks apply) |
+| `GET /reports/job/{job_id}/email` | List this workspace's delivery status |
+| `POST /reports/email-deliveries/{id}/retry`, `DELETE /reports/email-deliveries/{id}/link` | Retry a failed delivery or revoke its secure-link capability |
+
+Email is sent by the backend worker. `EMAIL_BACKEND=log` is only a local test transport; the application does not claim real delivery unless the configured SMTP transport confirms success.
 
 ## Saved setups
 

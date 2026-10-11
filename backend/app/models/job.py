@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -10,8 +10,13 @@ from app.models.base import Base, IdMixin, TimestampMixin
 class ReconciliationJob(IdMixin, TimestampMixin, Base):
     __tablename__ = "reconciliation_jobs"
 
-    session_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     job_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(250))
+    quota_reserved: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    matched_records_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    exception_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    review_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True, nullable=False)
     progress: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     orientation: Mapped[str] = mapped_column(String(30), default="vertical", nullable=False)

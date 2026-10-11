@@ -1,4 +1,4 @@
-import type { AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile } from "../types";
+import type { AccountIdentity, AdminOverview, AdminUser, AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, GstJobPlan, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportEmailDelivery, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile, WorkspaceOverview, SupportTicket, SupportTicketMessage } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -70,6 +70,9 @@ function sessionHeaders(): Headers {
 }
 
 export class ApiClient {
+  private csrfToken: string | null = null;
+  readonly baseUrl = API_BASE;
+
   private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
     const headers = new Headers(options.headers);
     if (!(options.body instanceof FormData)) {
@@ -78,9 +81,14 @@ export class ApiClient {
 
     const sessionId = readSessionId();
     if (sessionId) headers.set("X-Session-ID", sessionId);
+    const method = (options.method ?? "GET").toUpperCase();
+    if (!["GET", "HEAD", "OPTIONS", "TRACE"].includes(method) && this.csrfToken) {
+      headers.set("X-CSRF-Token", this.csrfToken);
+    }
 
     const response = await fetch(`${API_BASE}${path}`, { ...options, headers, credentials: "include" });
     rememberSession(response);
+    this.rememberCsrf(response);
     if (!response.ok) {
       const text = await response.text();
       let body: unknown = text;
@@ -93,6 +101,11 @@ export class ApiClient {
     return response.json() as Promise<T>;
   }
 
+  private rememberCsrf(response: Response): void {
+    const token = response.headers.get("X-CSRF-Token");
+    if (token) this.csrfToken = token;
+  }
+
   async uploadFile(file: File, onProgress?: (progress: number) => void): Promise<UploadedFile> {
     const formData = new FormData();
     formData.append("file", file);
@@ -102,6 +115,7 @@ export class ApiClient {
       request.withCredentials = true;
       const sessionId = readSessionId();
       if (sessionId) request.setRequestHeader("X-Session-ID", sessionId);
+      if (this.csrfToken) request.setRequestHeader("X-CSRF-Token", this.csrfToken);
       request.responseType = "json";
       request.upload.onprogress = (event) => {
         if (event.lengthComputable) {
@@ -111,6 +125,8 @@ export class ApiClient {
       request.onerror = () => reject(new Error("Upload failed. Check that the RecliQ API is running."));
       request.onload = () => {
         rememberXhrSession(request);
+        const csrf = request.getResponseHeader("X-CSRF-Token");
+        if (csrf) this.csrfToken = csrf;
         if (request.status >= 200 && request.status < 300) {
           resolve(request.response as UploadedFile);
           return;
@@ -306,6 +322,247 @@ export class ApiClient {
     return result.session_id;
   }
 
+  async identity(): Promise<AccountIdentity> {
+    return this.request<AccountIdentity>("/auth/me");
+  }
+
+  async register(payload: { username: string; email: string; display_name: string; password: string }): Promise<{ message: string; email: string; development_verification_url?: string }> {
+    return this.request("/auth/register", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async login(payload: { identifier: string; password: string; totp_code?: string }): Promise<AccountIdentity> {
+    await this.request("/auth/login", { method: "POST", body: JSON.stringify(payload) });
+    return this.identity();
+  }
+
+  async logout(): Promise<void> {
+    await this.request<void>("/auth/logout", { method: "POST" });
+    this.csrfToken = null;
+  }
+
+  async updateProfile(display_name: string): Promise<AccountIdentity> {
+    await this.request("/auth/profile", { method: "PUT", body: JSON.stringify({ display_name }) });
+    return this.identity();
+  }
+
+  async changePassword(payload: { current_password: string; new_password: string }): Promise<{ message: string }> {
+    return this.request("/auth/password/change", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async requestPasswordReset(email: string): Promise<{ message: string; development_reset_url?: string }> {
+    return this.request("/auth/password/forgot", { method: "POST", body: JSON.stringify({ email }) });
+  }
+
+  async resetPassword(token: string, new_password: string): Promise<{ message: string }> {
+    return this.request("/auth/password/reset", { method: "POST", body: JSON.stringify({ token, new_password }) });
+  }
+
+  async verifyEmail(token: string): Promise<{ message: string }> {
+    return this.request("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) });
+  }
+
+  async resendVerification(email: string): Promise<{ message: string; development_verification_url?: string }> {
+    return this.request("/auth/verification/resend", { method: "POST", body: JSON.stringify({ email }) });
+  }
+
+  async verifyEmailChange(token: string): Promise<{ message: string }> {
+    return this.request("/auth/email/change/verify", { method: "POST", body: JSON.stringify({ token }) });
+  }
+
+  async oauthProviders(): Promise<Array<{ id: string; label: string; enabled: boolean }>> {
+    return (await this.request<{ providers: Array<{ id: string; label: string; enabled: boolean }> }>("/auth/oauth/providers")).providers;
+  }
+
+  oauthStartUrl(provider: string, mode: "login" | "link" = "login"): string {
+    return `${API_BASE}/auth/oauth/${encodeURIComponent(provider)}?mode=${mode}`;
+  }
+
+  async deleteAccount(confirm: "DELETE", current_password?: string): Promise<void> {
+    await this.request<void>("/auth/account/delete", { method: "POST", body: JSON.stringify({ confirm, current_password }) });
+    this.csrfToken = null;
+  }
+
+  async importGuestWorkspace(confirm: boolean): Promise<{ message: string; counts: Record<string, number> }> {
+    return this.request("/auth/import-guest", { method: "POST", body: JSON.stringify({ confirm }) });
+  }
+
+  async listSessions(): Promise<Array<{ id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string | null; current: boolean }>> {
+    return (await this.request<{ sessions: Array<{ id: string; created_at: string; last_seen_at: string; expires_at: string; user_agent: string | null; current: boolean }> }>("/auth/sessions")).sessions;
+  }
+
+  async revokeSession(id: string): Promise<void> {
+    await this.request<void>(`/auth/sessions/${id}`, { method: "DELETE" });
+  }
+
+  async preferences(): Promise<{ theme: "light" | "dark" | "system"; notifications: Record<string, boolean> }> {
+    return this.request("/auth/preferences");
+  }
+
+  async updatePreferences(payload: { theme: "light" | "dark" | "system"; notifications?: Record<string, boolean> }): Promise<{ theme: "light" | "dark" | "system"; notifications: Record<string, boolean> }> {
+    return this.request("/auth/preferences", { method: "PUT", body: JSON.stringify(payload) });
+  }
+
+  async setupMfa(): Promise<{ secret: string; otpauth_url: string }> {
+    return this.request("/auth/mfa/setup", { method: "POST" });
+  }
+
+  async enableMfa(code: string): Promise<{ message: string }> {
+    return this.request("/auth/mfa/enable", { method: "POST", body: JSON.stringify({ code }) });
+  }
+
+  async changeEmail(new_email: string, current_password: string): Promise<{ message: string }> {
+    return this.request("/auth/email/change", { method: "POST", body: JSON.stringify({ new_email, current_password }) });
+  }
+
+  async workspaceOverview(period: "7d" | "30d" | "all"): Promise<WorkspaceOverview> {
+    return this.request(`/workspace/overview?period=${period}`);
+  }
+
+  async adminOverview(period: "today" | "7d" | "30d" | "all" | "custom", dateFrom?: string, dateTo?: string): Promise<AdminOverview> {
+    const query = new URLSearchParams({ period });
+    if (dateFrom) query.set("date_from", dateFrom);
+    if (dateTo) query.set("date_to", dateTo);
+    return this.request(`/admin/overview?${query.toString()}`);
+  }
+
+  async adminUsers(params: { q?: string; status?: string; role?: string; sort?: string; created_from?: string; created_to?: string; active_from?: string; active_to?: string; runs_min?: number | string; runs_max?: number | string; storage_min?: number; storage_max?: number; page?: number; page_size?: number } = {}): Promise<{ users: AdminUser[]; total: number; page: number; page_size: number }> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+    return this.request(`/admin/users?${query.toString()}`);
+  }
+
+  async adminPolicy(): Promise<{ features: Record<string, boolean>; limits: Record<string, Record<string, number | string[]>>; available_formats: Array<{ extension: string; label: string; content_type: string }>; email_ready: boolean }> {
+    return this.request("/admin/policy");
+  }
+
+  async adminEmailSettings(): Promise<{ sender_email: string; transport: "smtp" | "local_log" | "disabled"; ready: boolean; smtp_ready: boolean; smtp_host_configured: boolean; smtp_auth_configured: boolean; local_only: boolean }> {
+    return this.request("/admin/email-settings");
+  }
+
+  async updateAdminEmailSettings(sender_email: string): Promise<{ sender_email: string; transport: "smtp" | "local_log" | "disabled"; ready: boolean; smtp_ready: boolean; smtp_host_configured: boolean; smtp_auth_configured: boolean; local_only: boolean }> {
+    return this.request("/admin/email-settings", { method: "PUT", body: JSON.stringify({ sender_email }) });
+  }
+
+  async sendAdminTestEmail(): Promise<{ message: string; transport: "smtp" | "local_log" }> {
+    return this.request("/admin/email-settings/test", { method: "POST", body: "{}" });
+  }
+
+  async updateAdminPolicy(payload: { features?: Record<string, boolean>; limits?: Record<string, Record<string, number | string[]>> }): Promise<unknown> {
+    return this.request("/admin/policy", { method: "PUT", body: JSON.stringify(payload) });
+  }
+
+  async updateAdminUserStatus(id: string, status: "active" | "restricted" | "suspended", reason: string): Promise<unknown> {
+    return this.request(`/admin/users/${id}/status`, { method: "PUT", body: JSON.stringify({ status, reason }) });
+  }
+
+  async updateAdminUserPolicy(id: string, payload: { features: Record<string, boolean>; limits: Record<string, number | string[]> }): Promise<unknown> {
+    return this.request(`/admin/users/${id}/policy`, { method: "PUT", body: JSON.stringify(payload) });
+  }
+
+  async adminRequirePasswordReset(id: string, reason: string): Promise<{ message: string }> {
+    return this.request(`/admin/users/${id}/require-password-reset`, { method: "POST", body: JSON.stringify({ reason }) });
+  }
+
+  async adminDeleteUser(id: string, reason: string): Promise<{ message: string }> {
+    return this.request(`/admin/users/${id}/delete`, { method: "POST", body: JSON.stringify({ reason }) });
+  }
+
+  async adminAudit(params: { action?: string; target_id?: string; offset?: number; limit?: number } = {}): Promise<unknown> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return this.request(`/admin/audit?${query.toString()}`);
+  }
+
+  async adminVerifyAudit(): Promise<{ valid: boolean; checked: number; broken_at: string | null }> {
+    return this.request("/admin/audit/verify");
+  }
+
+  async jobList(params: { q?: string; status?: string; date_from?: string; date_to?: string; sort?: string; page?: number; page_size?: number } = {}): Promise<{ jobs: Job[]; total: number; page: number; page_size: number }> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return this.request(`/jobs?${query.toString()}`);
+  }
+
+  async renameJob(jobId: string, display_name: string): Promise<Job> {
+    return this.request(`/jobs/${jobId}/name`, { method: "PUT", body: JSON.stringify({ display_name }) });
+  }
+
+  async sendReportEmail(jobId: string, payload: { recipients: string[]; subject: string; message?: string; include_summary: boolean; delivery_method: "attachment" | "secure_link"; idempotency_key: string }): Promise<ReportEmailDelivery[]> {
+    return this.request(`/reports/job/${jobId}/email`, { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async listReportEmails(jobId: string): Promise<ReportEmailDelivery[]> {
+    return (await this.request<{ deliveries: ReportEmailDelivery[] }>(`/reports/job/${jobId}/email`)).deliveries;
+  }
+
+  async revokeReportLink(deliveryId: string): Promise<void> {
+    await this.request(`/reports/email-deliveries/${deliveryId}/link`, { method: "DELETE" });
+  }
+
+  async retryReportEmail(deliveryId: string): Promise<ReportEmailDelivery> {
+    return this.request(`/reports/email-deliveries/${deliveryId}/retry`, { method: "POST" });
+  }
+
+  async adminUserDetail(id: string): Promise<unknown> {
+    return this.request(`/admin/users/${id}`);
+  }
+
+  async adminRevokeSessions(id: string, reason: string): Promise<{ revoked_count: number }> {
+    return this.request(`/admin/users/${id}/revoke-sessions`, { method: "POST", body: JSON.stringify({ reason }) });
+  }
+
+  async adminEmailDeliveries(params: { status?: string; offset?: number; limit?: number } = {}): Promise<unknown> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return this.request(`/admin/email-deliveries?${query.toString()}`);
+  }
+
+  async adminHealth(): Promise<unknown> {
+    return this.request("/admin/health");
+  }
+
+  async adminProductInsights(period: "today" | "7d" | "30d" | "all" = "all"): Promise<Record<string, unknown>> {
+    return this.request(`/admin/product-insights?period=${period}`);
+  }
+
+  async adminComplaintSummary(): Promise<{ total: number; unresolved: number; unread: number; new: number; urgent: number; high: number; by_category: Record<string, number>; by_priority: Record<string, number> }> {
+    return this.request("/admin/complaints/summary");
+  }
+
+  async adminComplaints(params: { category?: string; status?: string; priority?: string; user_id?: string; q?: string; page?: number; page_size?: number } = {}): Promise<{ tickets: SupportTicket[]; total: number; page: number; page_size: number }> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return this.request(`/admin/complaints?${query.toString()}`);
+  }
+
+  async adminComplaint(ticketId: string): Promise<SupportTicket> {
+    return this.request(`/admin/complaints/${ticketId}`);
+  }
+
+  async updateAdminComplaint(ticketId: string, payload: { status?: SupportTicket["status"]; priority?: SupportTicket["priority"]; reply?: string }): Promise<SupportTicket> {
+    return this.request(`/admin/complaints/${ticketId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  }
+
+  async markAdminComplaintsRead(): Promise<{ marked_read: number }> {
+    return this.request("/admin/complaints/mark-read", { method: "POST" });
+  }
+
+  async platformActivity(params: { q?: string; action?: string; source?: "all" | "workspace" | "admin"; date_from?: string; date_to?: string; offset?: number; limit?: number } = {}): Promise<{ events: Array<Record<string, unknown>>; total: number; offset: number; limit: number }> {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
+    return this.request(`/admin/activity?${query.toString()}`);
+  }
+
+  async listSupportTickets(page = 1, pageSize = 20): Promise<{ tickets: SupportTicket[]; total: number; page: number; page_size: number }> {
+    return this.request(`/support?page=${page}&page_size=${pageSize}`);
+  }
+
+  async createSupportTicket(payload: Pick<SupportTicket, "category" | "custom_area" | "workflow_stage" | "impact" | "subject" | "description" | "expected_behavior" | "reproduction_steps">): Promise<SupportTicket> {
+    return this.request("/support", { method: "POST", body: JSON.stringify(payload) });
+  }
+
+  async supportTicket(ticketId: string): Promise<SupportTicket> {
+    return this.request(`/support/${ticketId}`);
+  }
+
+  async replyToSupportTicket(ticketId: string, body: string): Promise<SupportTicketMessage> {
+    return this.request(`/support/${ticketId}/messages`, { method: "POST", body: JSON.stringify({ body }) });
+  }
+
   async listJobs(): Promise<Job[]> {
     const result = await this.request<{ jobs: Job[] }>("/jobs");
     return result.jobs;
@@ -317,6 +574,10 @@ export class ApiClient {
 
   async getJobPlan(jobId: string): Promise<JobPlan> {
     return this.request<JobPlan>(`/jobs/${jobId}/plan`);
+  }
+
+  async getGstJobPlan(jobId: string): Promise<GstJobPlan> {
+    return this.request<GstJobPlan>(`/jobs/${jobId}/gst-plan`);
   }
 
   async cancelJob(jobId: string): Promise<Job> {
@@ -366,10 +627,12 @@ export class ApiClient {
       credentials: "include",
       headers: new Headers({
         ...Object.fromEntries(sessionHeaders().entries()),
+        ...(this.csrfToken ? { "X-CSRF-Token": this.csrfToken } : {}),
         "Content-Type": "application/json"
       })
     });
     rememberSession(response);
+    this.rememberCsrf(response);
     if (!response.ok) {
       throw new Error(await response.text());
     }

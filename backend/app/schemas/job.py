@@ -18,6 +18,10 @@ class ReportOut(BaseModel):
 class ReconciliationJobOut(BaseModel):
     id: str
     job_type: str
+    display_name: str | None = None
+    matched_records_count: int = 0
+    exception_count: int = 0
+    review_count: int = 0
     status: str
     progress: int
     orientation: str
@@ -40,6 +44,9 @@ class ReconciliationJobOut(BaseModel):
 
 class JobListResponse(BaseModel):
     jobs: list[ReconciliationJobOut]
+    total: int = 0
+    page: int = 1
+    page_size: int = 50
 
 
 class JobPlanResponse(BaseModel):
@@ -48,5 +55,16 @@ class JobPlanResponse(BaseModel):
     job_id: str
     orientation: str
     file_pairs: list[dict[str, Any]]
+    files: list[UploadedFileOut]
+
+
+class GstJobPlanResponse(BaseModel):
+    """Stored GST inputs and settings, scoped to the owning workspace."""
+
+    job_id: str
+    orientation: str
+    source_files_1: list[dict[str, Any]]
+    source_files_2: list[dict[str, Any]]
+    text_threshold: int
     files: list[UploadedFileOut]
 

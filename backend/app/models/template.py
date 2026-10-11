@@ -12,7 +12,7 @@ class ReconciliationTemplate(IdMixin, TimestampMixin, Base):
 
     __tablename__ = "reconciliation_templates"
 
-    session_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    session_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)

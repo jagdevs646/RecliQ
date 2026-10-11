@@ -4,14 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_actor, get_session_id
+from app.api.deps import get_actor, get_optional_user, get_session_id
 from app.database.session import get_db
+from app.models.account import User
 from app.models.template import ReconciliationTemplate, ReconciliationTemplateVersion
 from app.schemas.job import ReconciliationJobOut
 from app.schemas.template import TemplateConfig, TemplateCreate, TemplateRunRequest, TemplateUpdate
 from app.services import template_service
 from app.services.audit_service import AuditActor, record_event
 from app.services.reconciliation_service import enqueue_generic_job
+from app.services.policy_service import require_feature
 from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/templates", tags=["templates"])
@@ -49,6 +51,10 @@ def _load(db: Session, session_id: str, template_id: str) -> ReconciliationTempl
     return template
 
 
+def _require_saved_setups(db: Session, user: User | None) -> None:
+    require_feature(db, user, "saved_setups")
+
+
 @router.get("")
 def list_templates(db: Session = Depends(get_db), session_id: str = Depends(get_session_id)) -> dict:
     templates = (
@@ -66,7 +72,9 @@ def create_template(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    _require_saved_setups(db, user)
     try:
         if payload.config is not None:
             config = payload.config
@@ -116,7 +124,9 @@ def update_template(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    _require_saved_setups(db, user)
     template = _load(db, session_id, template_id)
     before_version, before_config = template_service.version_config(db, template)
     before = {"name": template.name, "description": template.description, "version": before_version, "config": before_config.model_dump()}
@@ -162,7 +172,9 @@ def archive_template(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    _require_saved_setups(db, user)
     template = _load(db, session_id, template_id)
     template.archived = True
     db.commit()
@@ -188,8 +200,10 @@ def resolve_template(
     payload: TemplateRunRequest,
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
+    user: User | None = Depends(get_optional_user),
 ):
     """Preview how the template maps onto the chosen files (no job is created)."""
+    _require_saved_setups(db, user)
     template = _load(db, session_id, template_id)
     try:
         version, plan, resolution = _resolve(db, session_id, template, payload)
@@ -207,7 +221,9 @@ def run_template(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ):
+    _require_saved_setups(db, user)
     template = _load(db, session_id, template_id)
     try:
         version, plan, resolution = _resolve(db, session_id, template, payload)

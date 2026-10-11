@@ -3,16 +3,18 @@ import hashlib
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_actor, get_session_id
-from app.core.config import get_settings
-from app.core.upload_validation import SUPPORTED_FORMATS, UploadRejected, validate_upload
+from app.api.deps import get_actor, get_optional_user, get_session_id
+from app.core.upload_validation import SUPPORTED_FORMATS, UploadRejected, supported_extensions_text, validate_upload
 from app.database.session import get_db
 from app.models.file import UploadedFile
+from app.models.account import User
 from app.reconciliation_engine.ingestion import warm_table_cache
 from app.schemas.file import FileColumnsResponse, UploadedFileOut, FileMetadataResponse, SheetMetadata
 from app.services.audit_service import AuditActor, record_event
 from app.services.reconciliation_service import get_file_columns, get_file_metadata
 from app.storage import get_storage
+from app.services.policy_service import effective_limits
+from app.services.quota_service import reserve_storage
 
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -28,13 +30,21 @@ def _sha256(stream) -> str:
 
 
 @router.get("/formats")
-def supported_formats() -> dict:
+def supported_formats(
+    db: Session = Depends(get_db),
+    user: User | None = Depends(get_optional_user),
+) -> dict:
     """The formats RecliQ can actually parse, and the upload limits."""
-    settings = get_settings()
+    limits = effective_limits(db, user)
+    allowed = set(limits["allowed_formats"])
     return {
-        "formats": [{"extension": extension, **details} for extension, details in SUPPORTED_FORMATS.items()],
-        "max_upload_mb": settings.max_upload_mb,
-        "max_rows_per_sheet": settings.max_rows_per_sheet,
+        "formats": [
+            {"extension": extension, **details}
+            for extension, details in SUPPORTED_FORMATS.items()
+            if extension in allowed
+        ],
+        "max_upload_mb": limits["max_file_size_mb"],
+        "max_rows_per_sheet": limits["max_rows_per_sheet"],
     }
 
 
@@ -45,12 +55,28 @@ def upload_file(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> UploadedFile:
-    settings = get_settings()
+    limits = effective_limits(db, user)
+    max_bytes = limits["max_file_size_mb"] * 1024 * 1024
     try:
+        filename = file.filename or ""
+        extension = f".{filename.rsplit('.', 1)[-1].lower()}" if "." in filename else ""
+        if extension not in SUPPORTED_FORMATS:
+            raise UploadRejected(
+                f"Unsupported file format ({extension or 'files without an extension'}). "
+                f"Supported formats: {supported_extensions_text()}.",
+                415,
+            )
+        if extension not in limits["allowed_formats"]:
+            allowed = ", ".join(limits["allowed_formats"]) or "none"
+            raise UploadRejected(
+                f"The {extension or 'unknown'} format is not enabled for this workspace. Allowed formats: {allowed}.",
+                415,
+            )
         # Content, size and row limits are checked before anything is stored.
         validated = validate_upload(
-            file.filename, file.file, max_bytes=settings.max_upload_bytes, max_rows=settings.max_rows_per_sheet
+            filename, file.file, max_bytes=max_bytes, max_rows=limits["max_rows_per_sheet"]
         )
     except UploadRejected as exc:
         record_event(
@@ -61,18 +87,27 @@ def upload_file(
 
     checksum = _sha256(file.file)
     storage = get_storage()
-    stored = storage.save_upload(file, session_id, content_type=validated.content_type)
-    record = UploadedFile(
-        session_id=session_id,
-        original_filename=stored.original_filename,
-        stored_filename=stored.stored_filename,
-        storage_backend=stored.storage_backend,
-        storage_path=stored.storage_path,
-        content_type=stored.content_type,
-        size_bytes=stored.size_bytes,
-    )
-    db.add(record)
-    db.commit()
+    stored = None
+    try:
+        reserve_storage(db, session_id, validated.size_bytes, limits["storage_mb"])
+        stored = storage.save_upload(file, session_id, content_type=validated.content_type)
+        record = UploadedFile(
+            session_id=session_id,
+            original_filename=stored.original_filename,
+            stored_filename=stored.stored_filename,
+            storage_backend=stored.storage_backend,
+            storage_path=stored.storage_path,
+            content_type=stored.content_type,
+            size_bytes=stored.size_bytes,
+            row_count_total=sum(validated.row_counts.values()),
+        )
+        db.add(record)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if stored:
+            storage.delete_file(stored.storage_path)
+        raise
     db.refresh(record)
     record_event(
         scope_id=session_id, actor=actor, action="file.uploaded", entity_type="file", entity_id=record.id,

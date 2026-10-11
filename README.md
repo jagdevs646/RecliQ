@@ -2,7 +2,7 @@
 
 **One click reconciliation.** RecliQ compares two sets of financial records (books against a bank statement, a ledger against a vendor statement, purchase invoices against GSTR-2B) and produces an Excel report of what matches, what differs, and what is missing on either side.
 
-It runs in the browser with no sign-up: each visitor gets an anonymous session, and their files, runs, history and reports stay within that session.
+RecliQ supports anonymous guest workspaces and optional registered accounts. Guests continue without interruption; accounts provide a persistent workspace across browsers. Files, runs, reports, settings and history are always scoped to the active workspace.
 
 ## What it does
 
@@ -34,6 +34,14 @@ It runs in the browser with no sign-up: each visitor gets an anonymous session, 
 - **Auto-resolution rules**: explain recurring exceptions (bank charges, TDS and so on) and assign a GL account; matching records are reported as auto-resolved.
 - **Audit log**: an append-only record of uploads, runs, decisions, rule changes and deletions.
 - **GST reconciliation**: a dedicated invoice flow with duplicate-invoice merging, amount comparison and confidence review.
+
+### Optional accounts and administration
+- Registration uses username, email verification and password; sign-in uses an HttpOnly session cookie. Guests can continue without an account.
+- Google, Facebook and LinkedIn sign-in are integrated but remain unavailable until provider credentials are configured.
+- Account settings include security sessions, MFA, theme and notifications. Guests retain local theme preferences.
+- Super Admin access requires explicit provisioning and MFA. Feature policy, account restrictions, upload formats and quotas are enforced by the API.
+- Guest workspace import is explicit and ownership-checked; it is never automatic.
+- Report email is processed by the backend. `EMAIL_BACKEND=log` is local-only; real delivery requires SMTP configuration.
 
 ## Tech stack
 
@@ -97,13 +105,14 @@ Leave it running. The API is up when the terminal shows `Application startup com
 
 ```bash
 cd frontend
-npm install
-npm run dev
+corepack enable
+pnpm install --frozen-lockfile
+pnpm run dev
 ```
 
 **4. Open RecliQ** at http://localhost:5173, or type `o` and press Enter in the frontend terminal to open it in your browser.
 
-Next time, skip the install steps: activate the virtual environment and run `uvicorn app.main:app --reload` in `backend`, then `npm run dev` in `frontend`. Press `Ctrl+C` in each terminal to stop.
+Next time, skip the install steps: activate the virtual environment and run `uvicorn app.main:app --reload` in `backend`, then `pnpm run dev` in `frontend`. Press `Ctrl+C` in each terminal to stop.
 
 > If PowerShell says running scripts is disabled when you activate the virtual environment, use Command Prompt instead, or run `.venv\Scripts\python -m uvicorn app.main:app --reload` without activating it.
 
@@ -154,7 +163,7 @@ CI (`.github/workflows/ci.yml`) runs a secret scan, the backend tests, the datab
 
 ## Configuration
 
-Settings come from environment variables; see [backend/.env.example](backend/.env.example). The main ones:
+Settings come from environment variables; see [backend/.env.example](backend/.env.example). Locally, the default `EMAIL_BACKEND=log` shows a one-time email-verification link after registration and writes action links to the API log; no email is sent. Production registration requires configured SMTP. See [backend account and administrator setup](backend/README.md#local-account-and-administrator-setup) for the local sign-in and first-admin steps. Main settings:
 
 | Variable | Purpose |
 |---|---|
@@ -163,6 +172,10 @@ Settings come from environment variables; see [backend/.env.example](backend/.en
 | `JOB_QUEUE_BACKEND`, `REDIS_URL` | `local` or `redis` job queue |
 | `MAX_UPLOAD_MB`, `MAX_ROWS_PER_SHEET` | upload limits (50 MB by default) |
 | `FRONTEND_ORIGIN` | allowed browser origin |
+| `AUTH_CSRF_SECRET`, `AUTH_SESSION_DAYS`, `SESSION_COOKIE_SECURE` | CSRF signing, account-session duration and HTTPS-only cookies |
+| `REGISTRATION_ENABLED`, `EMAIL_BACKEND`, `SMTP_*` | registration, account verification, password recovery and report delivery |
+| `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_CLIENT_ID/SECRET`, `LINKEDIN_CLIENT_ID/SECRET` | optional social login; disabled until credentials are configured |
+| `BOOTSTRAP_ADMIN_USERNAME/EMAIL/PASSWORD/TOTP_SECRET` | secure first Super Admin provisioning; provide real secret values outside source control |
 | `SENTRY_DSN`, `LOG_LEVEL`, `LOG_FORMAT` | error tracking and logging |
 
 Secrets are never committed. Real deployments read them from a secret store such as Azure Key Vault or GitHub Actions secrets; see [docs/operations-and-security.md](docs/operations-and-security.md).

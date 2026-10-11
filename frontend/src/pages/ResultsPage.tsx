@@ -1,16 +1,17 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { decimalColumns, formatRecordValue, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportCustomConfig, ReportScope } from "../types";
 import { ReportCustomizer } from "../components/ReportCustomizer";
 import { ColumnResizer, useColumnLayout } from "../components/ColumnResizer";
+import { ReportEmailDialog } from "../components/ReportEmailDialog";
 
-interface Props { job: Job | null; onNewReconciliation: () => void; onChangeRules?: () => void; }
+interface Props { job: Job | null; onNewReconciliation: () => void; onChangeRules?: () => void; canEmail?: boolean; canReview?: boolean; canSaveSetup?: boolean; canReconcile?: boolean; }
 
 const emptySummary: ReconciliationSummary = { report_rows: 0, only_in_file_1: 0, only_in_file_2: 0, confidence_review: 0 };
 
-export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) {
+export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail = false, canReview = true, canSaveSetup = true, canReconcile = true }: Props) {
   // The job summary is also the manifest: aggregate counts plus file pairs and sheet rules.
   const [jobSummary, setJobSummary] = useState<ReconciliationSummary>(emptySummary);
   const [filePairId, setFilePairId] = useState("");
@@ -27,6 +28,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) 
   // Reviewer decisions on proposed matches (evidence for alias suggestions).
   const [decisions, setDecisions] = useState<Record<string, "accept" | "reject">>({});
   const [savedNote, setSavedNote] = useState("");
+  const [emailOpen, setEmailOpen] = useState(false);
   const columnLayout = useColumnLayout();
 
   const filePairs = jobSummary.file_pairs ?? [];
@@ -94,7 +96,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) 
 
   const decisionKey = (row: Record<string, unknown>) => `${row["MATCH KEY"] ?? ""}||${row["CANDIDATE KEY"] ?? ""}`;
   const reviewable = (row: Record<string, unknown>) => row["IDENTITY CLASSIFICATION"] === "EXCEPTION_MATCH" && Boolean(row["MATCH KEY"]) && Boolean(row["CANDIDATE KEY"]);
-  const showDecisions = Boolean(preview && ["exception_matches", "review"].includes(preview.category) && preview.rows.some(reviewable));
+  const showDecisions = Boolean(canReview && preview && ["exception_matches", "review"].includes(preview.category) && preview.rows.some(reviewable));
 
   async function decide(row: Record<string, unknown>, decision: "accept" | "reject") {
     if (!job) return;
@@ -191,8 +193,9 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) 
         {/* Customization rebuilds one workbook: the job's, or the selected file pair's. */}
         {canCustomize && <button type="button" className="secondary" onClick={() => setViewStage("customize")}><Settings2 size={18} />{pairDownload ? "Customize this pair" : "Customize report"}</button>}
         {pairDownload && pairDownload.report_filename && <button type="button" className="secondary" onClick={() => download(pairDownload.file_pair_id)}><Download size={18} />{pairDownload.report_filename}</button>}
-        {job.job_type === "generic" && onChangeRules && <button type="button" className="secondary" onClick={onChangeRules} title="Open these files with the same rules, change them, and run again"><SlidersHorizontal size={18} />Change rules and run again</button>}
-        {job.job_type === "generic" && <button type="button" className="secondary" onClick={saveSetup}><BookmarkPlus size={18} />Save for reuse</button>}
+        {job.job_type === "generic" && canReconcile && onChangeRules && <button type="button" className="secondary" onClick={onChangeRules} title="Open these files with the same rules, change them, and run again"><SlidersHorizontal size={18} />Change rules and run again</button>}
+        {job.job_type === "generic" && canSaveSetup && <button type="button" className="secondary" onClick={saveSetup}><BookmarkPlus size={18} />Save for reuse</button>}
+        {canEmail && <button type="button" className="secondary" onClick={() => setEmailOpen(true)}><Mail size={18} />Email report</button>}
         <button type="button" className="primary" onClick={() => download()}><Download size={18} />{downloadLabel}</button>
       </div>
     </div>
@@ -217,6 +220,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules }: Props) 
     {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{cards.find((card) => card.category === preview.category)?.title ?? preview.sheet_name}{activeRule ? ` · ${activeRule.report_label}` : activePair ? ` · ${activePair.label}` : ""}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><div className="table-tools"><button type="button" className="secondary compact" aria-pressed={columnLayout.wrap} onClick={columnLayout.toggleWrap} title="Show long text on several lines"><WrapText size={15} />Wrap text</button>{columnLayout.customized && <button type="button" className="secondary compact" onClick={columnLayout.resetWidths}><RotateCcw size={15} />Reset widths</button>}<label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div></div><p className="table-hint">Drag a column's edge to resize it, or double-click the edge to fit its text.</p><div className={`table-scroll${columnLayout.wrap ? " is-wrapped" : ""}`}><table><thead><tr>{showDecisions && <th>Your decision</th>}{preview.columns.map((column) => <th key={column}><div className="cell-text" style={columnLayout.widthStyle(column)} title={column}>{column}</div><ColumnResizer column={column} width={columnLayout.widths[column]} onResize={(width) => columnLayout.setWidth(column, width)} /></th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length + (showDecisions ? 1 : 0))}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{showDecisions && <td className="decision-cell">{reviewable(row) ? (decisions[decisionKey(row)] ? <span className={`badge ${decisions[decisionKey(row)] === "accept" ? "success" : "danger"}`}>{decisions[decisionKey(row)] === "accept" ? "Confirmed" : "Rejected"}</span> : <><button type="button" className="icon-button" title="Confirm this match" aria-label="Confirm this match" onClick={() => decide(row, "accept")}><ThumbsUp size={14} /></button><button type="button" className="icon-button" title="Not the same record" aria-label="Not the same record" onClick={() => decide(row, "reject")}><ThumbsDown size={14} /></button></>) : null}</td>}{preview.columns.map((column) => { const exact = String(row[column] ?? "—"); const value = formatRecordValue(row[column], column, roundedColumns); return <td key={column}><div className="cell-text" style={columnLayout.widthStyle(column)} title={value !== exact ? `Exact value: ${exact}` : value.length > 24 ? value : undefined}>{value}</div></td>; })}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
     {job.status === "completed_with_errors" && <section className="rule-errors"><h2><AlertTriangle size={18} />Some sheet rules failed</h2><p>Successful sheet rules are included above and in the report. These rules produced no results:</p><ul>{failedRules.map((rule) => <li key={rule.sheet_rule_id}><strong>{rule.report_label}</strong><span>{rule.error}</span></li>)}</ul></section>}
     {message && <p className="error-text">{message}</p>}
+    {emailOpen && job && <ReportEmailDialog job={job} onClose={() => setEmailOpen(false)} />}
   </section>;
 }
 

@@ -1,9 +1,12 @@
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from pydantic import ValidationError
+from sqlalchemy import or_
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
 
+from app.models.account import User
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
@@ -19,6 +22,67 @@ def list_jobs(db: Session, session_id: str, limit: int = 50) -> list[Reconciliat
         .limit(limit)
         .all()
     )
+
+
+def search_jobs(
+    db: Session,
+    session_id: str,
+    *,
+    query_text: str = "",
+    status_filter: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    sort: str = "newest",
+    page: int = 1,
+    page_size: int = 25,
+) -> tuple[list[ReconciliationJob], int]:
+    from app.models.file import UploadedFile
+
+    first_file, second_file = aliased(UploadedFile), aliased(UploadedFile)
+    query = (
+        db.query(ReconciliationJob)
+        .outerjoin(first_file, ReconciliationJob.input_file_1_id == first_file.id)
+        .outerjoin(second_file, ReconciliationJob.input_file_2_id == second_file.id)
+        .filter(ReconciliationJob.session_id == session_id)
+    )
+    if query_text.strip():
+        term = f"%{query_text.strip()}%"
+        query = query.filter(or_(
+            ReconciliationJob.display_name.ilike(term),
+            first_file.original_filename.ilike(term),
+            second_file.original_filename.ilike(term),
+        ))
+    if status_filter:
+        if status_filter not in {"queued", "processing", "completed", "completed_with_errors", "failed", "cancelled"}:
+            raise ValueError("Unknown reconciliation status.")
+        query = query.filter(ReconciliationJob.status == status_filter)
+    if date_from:
+        query = query.filter(ReconciliationJob.created_at >= datetime.combine(date_from, datetime.min.time(), tzinfo=timezone.utc))
+    if date_to:
+        query = query.filter(ReconciliationJob.created_at < datetime.combine(date_to + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc))
+    total = query.count()
+    if sort == "oldest":
+        query = query.order_by(ReconciliationJob.created_at.asc())
+    elif sort == "name":
+        query = query.order_by(ReconciliationJob.display_name.asc(), ReconciliationJob.created_at.desc())
+    else:
+        query = query.order_by(ReconciliationJob.created_at.desc())
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    return rows, total
+
+
+def _job_file_ids(job: ReconciliationJob) -> set[str]:
+    ids = {value for value in (job.input_file_1_id, job.input_file_2_id) if value}
+    try:
+        payload = json.loads(job.settings_json or "{}")
+    except json.JSONDecodeError:
+        return ids
+    for pair in payload.get("file_pairs", []):
+        for side in ("source_files", "destination_files"):
+            ids.update(item.get("file_id") for item in pair.get(side, []) if item.get("file_id"))
+    for side in ("source_files_1", "source_files_2"):
+        ids.update(item.get("file_id") for item in payload.get(side, []) if item.get("file_id"))
+    return ids
 
 
 class PlanUnavailable(Exception):
@@ -76,6 +140,9 @@ def cancel_job(db: Session, job_id: str, session_id: str) -> ReconciliationJob |
         job.completed_at = datetime.now(timezone.utc)
         job.error_message = "Reconciliation cancelled by user"
         append_history(db, job, "cancelled", "Reconciliation cancelled by user")
+        from app.services.quota_service import release_job_slot
+
+        release_job_slot(db, job.id)
         db.commit()
         db.refresh(job)
     return job
@@ -87,8 +154,11 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
         return False
 
     report_id = job.report_id
-    file_1_id = job.input_file_1_id
-    file_2_id = job.input_file_2_id
+    file_ids = _job_file_ids(job)
+    if job.status in {"queued", "processing"}:
+        from app.services.quota_service import release_job_slot
+
+        release_job_slot(db, job.id)
 
     # Delete history
     db.query(ReconciliationHistory).filter(ReconciliationHistory.job_id == job.id).delete(synchronize_session=False)
@@ -109,28 +179,26 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
                         storage.delete_file(path)
                     except Exception:
                         pass
+            from app.services.quota_service import release_storage
+
+            release_storage(db, session_id, report.size_bytes + report.data_size_bytes)
             db.delete(report)
 
     # Clean up uploaded files if no other job references them
-    for file_id in (file_1_id, file_2_id):
-        if file_id:
-            other_refs = (
-                db.query(ReconciliationJob)
-                .filter(
-                    (ReconciliationJob.input_file_1_id == file_id)
-                    | (ReconciliationJob.input_file_2_id == file_id)
-                )
-                .count()
-            )
-            if other_refs == 0:
-                file_rec = db.query(UploadedFile).filter(UploadedFile.id == file_id).first()
-                if file_rec:
-                    if storage:
-                        try:
-                            storage.delete_file(file_rec.storage_path)
-                        except Exception:
-                            pass
-                    db.delete(file_rec)
+    remaining_jobs = db.query(ReconciliationJob).filter(ReconciliationJob.session_id == session_id).all()
+    referenced = set().union(*(_job_file_ids(other) for other in remaining_jobs)) if remaining_jobs else set()
+    for file_id in file_ids - referenced:
+        file_rec = db.query(UploadedFile).filter(UploadedFile.id == file_id, UploadedFile.session_id == session_id).first()
+        if file_rec:
+            if storage:
+                try:
+                    storage.delete_file(file_rec.storage_path)
+                except Exception:
+                    pass
+            from app.services.quota_service import release_storage
+
+            release_storage(db, session_id, file_rec.size_bytes)
+            db.delete(file_rec)
 
     db.commit()
     return True
@@ -149,21 +217,23 @@ def clear_all_jobs(db: Session, session_id: str, storage=None) -> int:
     return count
 
 
-def prune_old_jobs(db: Session, session_id: str, storage=None, max_records: int = 20) -> int:
+def prune_old_jobs(db: Session, session_id: str, storage=None, max_records: int = 20, older_than_days: int | None = None) -> int:
     """
     Ensure a maximum of max_records (default 20) reconciliation records exist per session.
     Removes oldest excess records and cleans up storage files.
     """
-    jobs = (
-        db.query(ReconciliationJob)
-        .filter(ReconciliationJob.session_id == session_id)
-        .order_by(ReconciliationJob.created_at.desc())
-        .all()
-    )
-    if len(jobs) <= max_records:
-        return 0
-
-    excess_jobs = jobs[max_records:]
+    jobs_query = db.query(ReconciliationJob).filter(ReconciliationJob.session_id == session_id)
+    if older_than_days is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        jobs = jobs_query.filter(ReconciliationJob.created_at < cutoff, ReconciliationJob.status.notin_(["queued", "processing"])).all()
+        excess_jobs = jobs
+        if not excess_jobs:
+            return 0
+    else:
+        jobs = jobs_query.order_by(ReconciliationJob.created_at.desc()).all()
+        if len(jobs) <= max_records:
+            return 0
+        excess_jobs = jobs[max_records:]
     pruned_count = 0
     pruned_ids = []
     for job in excess_jobs:

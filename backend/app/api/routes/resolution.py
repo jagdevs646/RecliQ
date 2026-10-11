@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_actor, get_session_id
+from app.api.deps import get_actor, get_optional_user, get_session_id
 from app.api.routes.reports import _job_report, _report_preview_data
 from app.database.session import get_db
 from app.reconciliation_engine.resolution import (
@@ -17,6 +17,8 @@ from app.reconciliation_engine.resolution import (
 )
 from app.services import learning_service, resolution_service
 from app.services.audit_service import AuditActor
+from app.models.account import User
+from app.services.policy_service import require_feature
 
 router = APIRouter(prefix="/resolution-rules", tags=["auto-resolution"])
 
@@ -93,7 +95,9 @@ def create_rule(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "auto_resolution")
     try:
         rule = resolution_service.create_rule(db, scope_id=session_id, actor=actor, payload=payload.model_dump())
     except ValueError as exc:
@@ -108,7 +112,9 @@ def update_rule(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "auto_resolution")
     try:
         rule = resolution_service.update_rule(
             db, scope_id=session_id, actor=actor, rule_id=rule_id, payload=payload.model_dump(exclude_unset=True)
@@ -126,7 +132,9 @@ def archive_rule(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "auto_resolution")
     try:
         rule = resolution_service.archive_rule(db, scope_id=session_id, actor=actor, rule_id=rule_id)
     except resolution_service.RuleNotFound as exc:
@@ -140,7 +148,9 @@ def reorder(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "auto_resolution")
     try:
         rules = resolution_service.reorder_rules(db, scope_id=session_id, actor=actor, rule_ids=payload.rule_ids)
     except ValueError as exc:
@@ -149,8 +159,14 @@ def reorder(
 
 
 @router.post("/preview")
-def preview_rule(payload: RulePreview, db: Session = Depends(get_db), session_id: str = Depends(get_session_id)) -> dict:
+def preview_rule(
+    payload: RulePreview,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    user: User | None = Depends(get_optional_user),
+) -> dict:
     """What the rule would resolve in a finished reconciliation (nothing is changed)."""
+    require_feature(db, user, "auto_resolution")
     _, report = _job_report(db, payload.job_id, session_id)
     data = _report_preview_data(report)
     try:
@@ -160,8 +176,13 @@ def preview_rule(payload: RulePreview, db: Session = Depends(get_db), session_id
 
 
 @router.get("/suggestions")
-def suggestions(db: Session = Depends(get_db), session_id: str = Depends(get_session_id)) -> dict:
+def suggestions(
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    user: User | None = Depends(get_optional_user),
+) -> dict:
     """Recurring exceptions and learned patterns that a rule could handle."""
+    require_feature(db, user, "auto_resolution")
     return {
         "minimum_reconciliations": resolution_service.MIN_JOBS_FOR_SUGGESTION,
         "suggestions": resolution_service.pattern_suggestions(db, session_id)

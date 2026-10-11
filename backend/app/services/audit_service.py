@@ -6,10 +6,9 @@ from where, and the before/after values. Each event carries the hash of the
 previous event in the same scope, so a modified or removed event is detected
 by ``verify_chain``.
 
-Actor identity: RecliQ has no user accounts yet, so the actor is the
-anonymous browser session (``actor_type="session"``) or a system component
-(``actor_type="system"``). The model already separates actor and scope so a
-signed-in user and their organization slot in without a schema change.
+Actor identity is recorded separately from audit scope. Events may be attributed
+to an authenticated account, an anonymous browser session, or a system component;
+the scope identifies the workspace or platform boundary the event belongs to.
 """
 from __future__ import annotations
 

@@ -168,6 +168,25 @@ export function ruleStatus(config: SheetRuleDraft): string {
   return parts.join(" · ");
 }
 
+export type RuleSetupStatus = "not-configured" | "partial" | "configured" | "error";
+
+/** Status shown in rule navigation, derived from the same requirements used by Continue. */
+export function matchingSetupStatus(config: SheetRuleDraft | undefined): RuleSetupStatus {
+  if (!config) return "not-configured";
+  const keyTouched = config.primaryKeySource.length > 0 || config.primaryKeyDestination.length > 0;
+  const keysComplete = config.primaryKeySource.length === config.primaryKeyDestination.length
+    && [...config.primaryKeySource, ...config.primaryKeyDestination].every(Boolean);
+  const invalid = (keyTouched && !keysComplete)
+    || config.secondaryConditions.some((condition) => !condition.source_column || !condition.destination_column)
+    || !config.matchingPasses.every(passIsComplete)
+    || !config.transformations.every(transformationIsComplete)
+    || (hasKeys(config) && isDateOnlyKey(config) && !config.dateOnlyOverride);
+  if (invalid) return "error";
+  if (ruleIsReady(config)) return "configured";
+  const hasInput = keyTouched || config.secondaryConditions.length > 0 || config.matchingPasses.length > 0 || config.transformations.length > 0;
+  return hasInput ? "partial" : "not-configured";
+}
+
 /** Deep-copies another rule's settings, keeping only columns that exist in the target sheets. */
 export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft): SheetRuleDraft {
   const copy = structuredClone(source);
@@ -308,6 +327,15 @@ export function pruneTolerances(tolerances: ToleranceBand[], rules: RuleMapping[
 export function mappingIsReady(config: SheetRuleDraft | undefined): boolean {
   if (!config?.rules.length) return false;
   return config.tolerances.every((band) => toleranceIsComplete(band, config));
+}
+
+/** Map-stage status distinguishes an untouched rule from an invalid mapping. */
+export function mappingSetupStatus(config: SheetRuleDraft | undefined): RuleSetupStatus {
+  if (!config) return "not-configured";
+  if (config.rules.some((rule) => !rule.file_1_fields.length || !rule.file_2_fields.length)) return "error";
+  if (config.tolerances.some((band) => !toleranceIsComplete(band, config))) return "error";
+  if (!config.rules.length) return "not-configured";
+  return mappingIsReady(config) ? "configured" : "partial";
 }
 
 /**

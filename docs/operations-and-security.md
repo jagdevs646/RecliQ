@@ -6,6 +6,18 @@ saved reconciliations and re-runs, the audit log, the data-quality
 pre-check, keyless matching, transformations, tolerances and name
 normalization.
 
+## Workspace authentication and isolation
+
+- Guest users receive an isolated anonymous browser session and do not need to register. Registered users receive a persistent account workspace.
+- Account session secrets are random and opaque: the browser receives an HttpOnly cookie, while only the token hash is stored in `user_sessions`. State-changing cookie-authenticated API requests require the CSRF token from `/api/auth/me`.
+- Every API read and mutation uses the workspace resolved by the backend. An authenticated cookie takes precedence over `X-Session-ID`; the guest header cannot select another workspace. Jobs and report email workers use persisted ownership and authorization checks.
+- Public registration always creates role `user`. Bootstrap Super Admin credentials and a TOTP secret are supplied only through deployment secrets. Admin APIs require an active Super Admin with MFA; the frontend route is not a security boundary.
+- Production startup fails unless `SESSION_COOKIE_SECURE=true` and `AUTH_CSRF_SECRET` contains at least 32 non-whitespace characters. Set both in the platform secret/configuration store; keep insecure cookies and the development fallback secret confined to local/test environments.
+- Authentication attempt counters use atomic PostgreSQL/SQLite upserts so throttles remain consistent across API processes. Login failures, registration, email recovery, and OAuth requests have separate buckets. WebSocket progress connections validate the Origin against the same allowlist as HTTP CORS.
+- API responses are marked `Cache-Control: no-store`; the API and frontend also send browser security headers. The frontend Content Security Policy permits API/WebSocket connections over HTTPS/WSS while refusing framing and plugin content.
+- Global feature defaults may be restricted per account. Account-level numeric quotas may raise or lower workspace defaults within deployment hard caps; allowed formats remain limited by global policy. Upload format, size, row, storage, file-count, job and report-email limits are checked server-side. The UI reflects policy, but never grants permission.
+- Guest-to-account import requires a signed-in account and an explicit user action. It verifies the source session, records the import, and does not run automatically.
+
 ## Secrets
 
 - No secret is committed. Configuration comes from environment variables
@@ -22,9 +34,9 @@ A secret that was ever pushed must be treated as public, even after the
 history is rewritten: forks, clones and caches may keep it.
 
 1. Rotate first: change the password / regenerate the key at its source
-   (Azure portal: reset the user's password and enable MFA; regenerate
-   storage account keys; create a new database password; generate a new
-   `SECRET_KEY`), then update the secret store.
+   (reset the bootstrap administrator password and TOTP secret; rotate
+   `AUTH_CSRF_SECRET`, storage credentials and database password), then
+   update the secret store.
 2. Check the provider's sign-in and activity logs for use of the old value.
 3. Purge it from history (see below) and force-push; ask everyone with a
    clone to re-clone.
@@ -64,13 +76,17 @@ git push --force --all origin && git push --force --tags origin
   and attempt.
 - `GET /health` is liveness; `GET /health/ready` checks the database and
   (with the Redis backend) the queue, returning 503 when either is down.
+- The Admin system-health view also counts live RQ workers for the configured
+  reconciliation queue and marks job processing degraded when Redis is up
+  but no worker is registered.
 - Timestamps are stored in UTC and returned with an offset
   (`2026-09-30T18:52:11Z`); the frontend shows them in the viewer's time
   zone.
 
 ## Uploads
 
-- Accepted formats (`GET /api/files/formats`): `.xlsx`, `.xls`, `.csv`,
+- Supported formats (`GET /api/files/formats`) are filtered by the active
+  workspace's `allowed_formats` policy: `.xlsx`, `.xls`, `.csv`,
   `.tsv`, `.txt`, `.pdf` (tables) and `.docx` (tables), plus bank
   statements and GST returns (below). `.doc` and `.md` were listed before
   but never worked, so they are refused.
@@ -83,9 +99,9 @@ git push --force --all origin && git push --force --tags origin
 - Content is checked against the extension (ZIP/OOXML, OLE2, `%PDF`, no
   binary in text files); password-protected workbooks and ZIP bombs are
   refused with a clear message.
-- `MAX_UPLOAD_MB` (default 50) is enforced while the request streams in, and
-  `MAX_ROWS_PER_SHEET` (default 500,000) from workbook metadata at upload
-  and again when a sheet is parsed.
+- `MAX_UPLOAD_MB` (default 50) and `MAX_ROWS_PER_SHEET` (default 500,000)
+  are environment hard ceilings. Workspace policy can set a lower cap; row
+  counts are checked at upload and again when a sheet is parsed.
 
 ### Bank statements and GST returns
 
@@ -158,13 +174,14 @@ is guessed. The run is linked to the template and version it used.
 
 ### Change rules and run again
 
-"Change rules and run again" on a finished general reconciliation reopens
-the setup wizard at the matching-key step with the same files and every
-setting of the stored plan (`GET /api/jobs/{id}/plan`). The new run is a
-separate job; the earlier run and its report are unchanged. A run can be
-reopened while its files are stored: uploads are kept until the last run
-that uses them is deleted or pruned (each session keeps its 20 most recent
-runs).
+"Run Again" reopens a finished general reconciliation at the matching-key
+step with its stored plan (`GET /api/jobs/{id}/plan`), or a GST run with its
+stored files, sheet selections, orientation and confidence threshold
+(`GET /api/jobs/{id}/gst-plan`). The new run is a separate job; the earlier
+run and its report are unchanged. A run can be reopened while its files are
+stored: uploads are kept until the last run that uses them is deleted or
+pruned. Guests keep their latest 20 runs;
+registered accounts use the configured report-retention period.
 
 ## Audit log
 
@@ -179,9 +196,9 @@ request ID.
 - Entries are hash-chained per scope; `GET /api/audit/verify` recomputes the
   chain and reports the first altered or missing entry.
 - Export: `GET /api/audit/export?format=csv|json`.
-- Actor: until user accounts exist the actor is the anonymous browser
-  session (`actor_type=session`) or a system component. The schema already
-  separates actor and scope for users and organizations.
+- Actor: events identify an authenticated user, anonymous session, or system
+  component separately from their workspace scope. Administrative actions
+  have a separate append-only, hash-chained platform audit trail.
 
 ## Data-quality pre-check
 

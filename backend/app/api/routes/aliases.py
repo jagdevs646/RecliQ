@@ -2,12 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_actor, get_session_id
+from app.api.deps import get_actor, get_optional_user, get_session_id
 from app.database.session import get_db
+from app.models.account import User
 from app.models.alias import EntityAlias, MatchDecision
 from app.reconciliation_engine.normalization.entities import EntityNormalizer
 from app.services import alias_service
 from app.services.audit_service import AuditActor
+from app.services.policy_service import require_feature
 from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/aliases", tags=["aliases"])
@@ -67,7 +69,9 @@ def create_aliases(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "near_match_review")
     created = []
     try:
         for variant in payload.variants:
@@ -89,7 +93,9 @@ def remove_alias(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "near_match_review")
     alias = alias_service.deactivate_alias(db, scope_id=session_id, actor=actor, alias_id=alias_id)
     if alias is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Alias not found")
@@ -102,7 +108,9 @@ def record_decision(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "near_match_review")
     try:
         decision = alias_service.record_decision(db, scope_id=session_id, actor=actor, **payload.model_dump())
     except ValueError as exc:
@@ -141,7 +149,9 @@ def approve_suggestion(
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
     actor: AuditActor = Depends(get_actor),
+    user: User | None = Depends(get_optional_user),
 ) -> dict:
+    require_feature(db, user, "near_match_review")
     key = alias_service.pair_key(payload.canonical, payload.variant)
     if key not in {suggestion.pair_key for suggestion in alias_service.suggestions(db, session_id)}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="This pair is not a current suggestion")

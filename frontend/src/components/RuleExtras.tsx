@@ -28,19 +28,14 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
   const add = (type: MatchingPass["type"]) => onChange({ ...config, matchingPasses: [...config.matchingPasses, newPass(type, config)] });
   const remove = (index: number) => onChange({ ...config, matchingPasses: config.matchingPasses.filter((_, itemIndex) => itemIndex !== index) });
 
-  return <div className="rule-section">
-    <div className="rule-section-heading">
-      <div>
-        <h4>3. If the key is not found, also try <span className="optional-tag">optional</span></h4>
-        <p>{keyed
-          ? "Records still unmatched after the key are tried again, in order, on amount and date. A pair is only made when exactly one record qualifies on both sides; ties are listed for you to decide."
-          : "No key chosen: records are matched on amount and date only. A pair is only made when exactly one record qualifies on both sides."}</p>
-        {keyed && <p className="field-hint">These limits only decide whether records the key did not find can be paired. To accept small differences on records that did match, set a tolerance next to the mapped field in step 4.</p>}
-      </div>
-      <div className="button-row">
-        <button type="button" className="secondary" onClick={() => add("amount_date")}><Plus size={15} />Amount + date</button>
-        <button type="button" className="secondary" onClick={() => add("amount_tolerance")}><Plus size={15} />Amount within a range</button>
-      </div>
+  return <details className="rule-advanced fallback-matching">
+    <summary>Fallback matching <span className="advanced-summary-status">{config.matchingPasses.length ? `${config.matchingPasses.length} pass${config.matchingPasses.length === 1 ? "" : "es"} active` : "Optional"}</span></summary>
+    <p>{keyed
+      ? "Use amount and date to find records the key did not match. Ambiguous candidates stay in review."
+      : "No key selected: add a complete amount and date pass to identify records."}</p>
+    <div className="button-row">
+      <button type="button" className="secondary" onClick={() => add("amount_date")}><Plus size={15} />Amount + date</button>
+      <button type="button" className="secondary" onClick={() => add("amount_tolerance")}><Plus size={15} />Amount within a range</button>
     </div>
     {config.matchingPasses.length === 0 && <p className="rule-empty">No extra passes: unmatched records are listed as not found.</p>}
     {config.matchingPasses.map((item, index) => <div className="pass-card" key={`pass-${index}`}>
@@ -76,7 +71,7 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
       {config.secondaryConditions.length > 0 && <label className="checkbox-line"><input type="checkbox" checked={item.respect_secondary_keys} onChange={(event) => update(index, { respect_secondary_keys: event.target.checked })} />The "must also match" columns must still agree in this pass</label>}
       {item.date_source && config.secondaryConditions.some((condition) => condition.comparison_method === "normalized_date" && condition.source_column === item.date_source && condition.destination_column === item.date_destination) && <p className="field-hint">This pass's date window replaces the exact-date "must also match" check on {item.date_source}. Records whose key matched but whose date differed are re-checked here, only against the record with the same key.</p>}
     </div>)}
-  </div>;
+  </details>;
 }
 
 // ── Preparing values before matching ────────────────────────────────────
@@ -105,8 +100,8 @@ export function TransformationsEditor({ config, onChange, sourceLabel, destinati
   const remove = (index: number) => onChange({ ...config, transformations: config.transformations.filter((_, itemIndex) => itemIndex !== index) });
   const columnsFor = (side: TransformationStep["side"]) => side === "source" ? config.file1Columns : side === "destination" ? config.file2Columns : config.file1Columns.filter((column) => config.file2Columns.includes(column));
 
-  return <details className="rule-advanced" open={config.transformations.length > 0}>
-    <summary>Prepare values before matching{config.transformations.length ? ` (${config.transformations.length})` : ""}</summary>
+  return <details className="rule-advanced">
+    <summary>Prepare values before matching <span className="advanced-summary-status">{config.transformations.length ? `${config.transformations.length} active` : "Optional"}</span></summary>
     <p>Clean or reshape values before they are compared, for example combine Debit and Credit into one signed amount, or remove a prefix from codes. The report shows the original value next to every changed one.</p>
     {config.transformations.map((step, index) => {
       const operation = OPERATIONS.find((item) => item.value === step.operation);
@@ -209,8 +204,9 @@ export function DatesAndNamesSettings({ config, onChange }: Omit<EditorProps, "s
     { key: "word_order", label: "Ignore word order in names" },
     { key: "use_saved_aliases", label: "Use your organization's saved aliases" },
   ];
+  const activeNormalizations = toggles.filter((toggle) => Boolean(config.normalization[toggle.key])).length;
   return <details className="rule-advanced">
-    <summary>Dates and names</summary>
+    <summary>Dates and names <span className="advanced-summary-status">{activeNormalizations} options on · {config.dateFormat === "day_first" ? "DD/MM/YYYY" : "MM/DD/YYYY"}</span></summary>
     <div className="advanced-grid">
       <label><span>Read dates like 03/04/2026 as</span>
         <select value={config.dateFormat} onChange={(event) => setDateFormat(event.target.value as DateFormat)}>

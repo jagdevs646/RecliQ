@@ -1,5 +1,6 @@
 import { CheckCircle2, Loader2, Plus, Trash2, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
+import { AutoResizeTextarea } from "../components/AutoResizeTextarea";
 import { api } from "../services/api";
 import type { AliasSuggestion, EntityAlias } from "../types";
 
@@ -104,7 +105,7 @@ export function AliasesPage() {
       <section className="panel-card">
         <h2>Add an alias</h2>
         <label className="stacked-field"><span>Name</span><input value={canonical} onChange={(event) => setCanonical(event.target.value)} placeholder="International Business Machines" /></label>
-        <label className="stacked-field"><span>Other spellings (one per line)</span><textarea value={variants} onChange={(event) => setVariants(event.target.value)} rows={3} placeholder={"IBM\nI.B.M. India"} /></label>
+        <label className="stacked-field"><span>Other spellings (one per line)</span><AutoResizeTextarea value={variants} onChange={(event) => setVariants(event.target.value)} rows={3} placeholder={"IBM\nI.B.M. India"} /></label>
         <button type="button" className="primary" onClick={add}><Plus size={15} />Save alias</button>
       </section>
     </div>

@@ -18,10 +18,12 @@ def test_jobs_are_available_without_authentication():
     assert "jobs" in response.json()
 
 
-def test_auth_and_profile_routes_are_removed():
+def test_guest_identity_is_available_without_sign_in():
     with TestClient(app) as client:
-        assert client.post("/api/auth/login", json={}).status_code == 404
-        assert client.get("/api/auth/me").status_code == 404
+        assert client.post("/api/auth/login", json={}).status_code == 422
+        identity = client.get("/api/auth/me")
+        assert identity.status_code == 200
+        assert identity.json()["authenticated"] is False
         assert client.get("/api/profile").status_code == 404
 
 

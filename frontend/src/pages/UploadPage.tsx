@@ -1,9 +1,11 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Play, Plus, RefreshCw, Sparkles, Loader2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Circle, CircleDot, Download, Play, Plus, RefreshCw, Sparkles, Loader2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { FileDropzone } from "../components/FileDropzone";
 import { MappingBuilder } from "../components/MappingBuilder";
+import type { MappingBuilderUIState } from "../components/MappingBuilder";
+import { RuleNavigator, type RuleNavigationItem, type RuleSetupStatus } from "../components/RuleNavigator";
 import { ReportColumnPicker } from "../components/ReportColumnPicker";
-import { WorkflowSteps } from "../components/WorkflowSteps";
+import { WorkflowSteps, type WorkflowStepStatus } from "../components/WorkflowSteps";
 import { SheetSelector } from "../components/SheetSelector";
 import { SheetPairingStep } from "../components/SheetPairingStep";
 import type { SheetPairing } from "../components/SheetPairingStep";
@@ -11,10 +13,10 @@ import { FilePairingStep } from "../components/FilePairingStep";
 import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { DatesAndNamesSettings, MatchingPassesEditor, ToleranceNotices, TransformationsEditor } from "../components/RuleExtras";
-import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, suggestSheetPair } from "../lib/plan";
+import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, suggestSheetPair } from "../lib/plan";
 import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
-import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
+import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, SupportedFormats, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
 
 interface Props {
@@ -22,9 +24,14 @@ interface Props {
   /** A finished run to reopen with its files and rules, to change them and run again. */
   rerunFrom?: Job | null;
   onStartFresh?: () => void;
+  initialType?: "generic" | "gst";
+  features?: Record<string, boolean>;
 }
 
 const GST_REPORT_SHEETS = ["Mismatched invoices", "Present in source only", "Present in destination only", "Match confidence review"];
+const EMPTY_MAPPING_UI_STATE: MappingBuilderUIState = {
+  pickedKinds: {}, mode: "drag", left: [], right: [], past: [], future: [], templateName: "", autoMatches: [],
+};
 
 function missingGstColumns(columns: string[], config: GstConfiguration | null) {
   if (!config) return [];
@@ -50,10 +57,22 @@ function fileStem(filename: string): string {
   return filename.replace(/\.(xlsx|xls|csv)$/i, "");
 }
 
-export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Props) {
-  const [jobType, setJobType] = useState<"generic" | "gst">("generic");
+export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initialType = "generic", features }: Props) {
+  const canUseGeneric = features?.basic_reconciliation !== false;
+  const canUseGst = features?.gst_reconciliation !== false;
+  const selectedInitialType = initialType === "gst" && !canUseGst && canUseGeneric
+    ? "generic"
+    : initialType === "generic" && !canUseGeneric && canUseGst
+      ? "gst"
+      : initialType;
+  const [jobType, setJobType] = useState<"generic" | "gst">(selectedInitialType);
   const [orientation, setOrientation] = useState("vertical");
   const [step, setStep] = useState(1);
+  const [maxVisitedStep, setMaxVisitedStep] = useState(1);
+  const [activeRuleId, setActiveRuleId] = useState("");
+  const [workflowIssue, setWorkflowIssue] = useState<{ step: number; ruleId?: string; message: string } | null>(null);
+  const shouldFocusIssue = useRef(false);
+  const [mappingUIByRule, setMappingUIByRule] = useState<Record<string, MappingBuilderUIState>>({});
   const [file1, setFile1] = useState<UploadedFile | null>(null);
   const [file2, setFile2] = useState<UploadedFile | null>(null);
   const [file1Sheets, setFile1Sheets] = useState<SheetMetadata[]>([]);
@@ -71,6 +90,16 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
   const [gstConfig, setGstConfig] = useState<GstConfiguration | null>(null);
   const [gstConfigError, setGstConfigError] = useState("");
   const [gstTextThreshold, setGstTextThreshold] = useState(85);
+  const [uploadFormats, setUploadFormats] = useState<SupportedFormats | null>(null);
+
+  useEffect(() => {
+    void api.getSupportedFormats().then(setUploadFormats).catch(() => setUploadFormats(null));
+  }, []);
+
+  useEffect(() => {
+    if (jobType === "generic" && !canUseGeneric && canUseGst) setJobType("gst");
+    else if (jobType === "gst" && !canUseGst && canUseGeneric) setJobType("generic");
+  }, [canUseGeneric, canUseGst, jobType]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [uploading, setUploading] = useState<1 | 2 | null>(null);
@@ -92,7 +121,6 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
   const sourceWorkbooks = useMemo<WorkbookWithSheets[]>(() => file1 ? [{ file: file1, sheets: file1Sheets }, ...additionalSourceFiles] : additionalSourceFiles, [file1, file1Sheets, additionalSourceFiles]);
   const destinationWorkbooks = useMemo<WorkbookWithSheets[]>(() => file2 ? [{ file: file2, sheets: file2Sheets }, ...additionalDestinationFiles] : additionalDestinationFiles, [file2, file2Sheets, additionalDestinationFiles]);
   const hasBothFiles = sourceWorkbooks.length > 0 && destinationWorkbooks.length > 0;
-  const completedThrough = step === 1 ? 0 : step - 1;
   const missingGstFile1 = useMemo(() => missingGstColumns(file1Columns, gstConfig), [file1Columns, gstConfig]);
   const missingGstFile2 = useMemo(() => missingGstColumns(file2Columns, gstConfig), [file2Columns, gstConfig]);
   const gstReady = Boolean(gstConfig && hasBothFiles && !missingGstFile1.length && !missingGstFile2.length);
@@ -100,28 +128,59 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
   const file1Name = file1?.original_filename || "File 1";
   const file2Name = file2?.original_filename || "File 2";
   const pairId = (pairing: SheetPairing) => `${pairing.sourceFileId ?? file1?.id ?? "source"}::${pairing.sheet1.id}::${pairing.destinationFileId ?? file2?.id ?? "destination"}::${pairing.sheet2.id}`;
+  useEffect(() => {
+    if (!pairings.length) {
+      if (activeRuleId) setActiveRuleId("");
+      return;
+    }
+    if (!pairings.some((pairing) => pairId(pairing) === activeRuleId)) setActiveRuleId(pairId(pairings[0]));
+  }, [pairings, activeRuleId]);
+  useEffect(() => {
+    const validIds = new Set(pairings.map(pairId));
+    setMappingUIByRule((current) => Object.fromEntries(Object.entries(current).filter(([id]) => validIds.has(id))));
+  }, [pairings]);
   const selectedFile1Sheets = file1Sheets.filter((sheet) => selectedSheets1.includes(sheet.id));
   const selectedFile2Sheets = file2Sheets.filter((sheet) => selectedSheets2.includes(sheet.id));
   const genericConfigurationsReady = pairings.length > 0 && pairings.every((pairing) => {
     const config = pairConfigs[pairId(pairing)];
     return ruleIsReady(config) && mappingIsReady(config);
   });
-
-  const canContinue = step === 1
-    ? hasBothFiles && (file1Sheets.length === 0 || selectedSheets1.length > 0) && (file2Sheets.length === 0 || selectedSheets2.length > 0)
-    : step === 2
-      ? pairings.length > 0
-      : jobType === "gst"
-        ? gstReady
-        : step === 3
-          ? pairings.length > 0 && pairings.every((pairing) => ruleIsReady(pairConfigs[pairId(pairing)]))
-          : step === 4
-            ? genericConfigurationsReady
-            : true;
+  const matchingConfigurationsReady = pairings.length > 0 && pairings.every((pairing) => ruleIsReady(pairConfigs[pairId(pairing)]));
+  const stepReadiness = [
+    hasBothFiles && (file1Sheets.length === 0 || selectedSheets1.length > 0) && (file2Sheets.length === 0 || selectedSheets2.length > 0),
+    pairings.length > 0,
+    jobType === "gst" ? gstReady : matchingConfigurationsReady,
+    jobType === "gst" ? gstReady : genericConfigurationsReady,
+    jobType === "gst" ? gstReady : genericConfigurationsReady,
+    jobType === "gst" ? gstReady : genericConfigurationsReady,
+  ];
+  const workflowStepStatuses: WorkflowStepStatus[] = stepReadiness.map((ready, index) => {
+    const stepNumber = index + 1;
+    if (workflowIssue?.step === stepNumber || (stepNumber < step && !ready)) return "error";
+    if (stepNumber === step) return "current";
+    return stepNumber < step && ready ? "complete" : "upcoming";
+  });
+  const activePairing = pairings.find((pairing) => pairId(pairing) === activeRuleId) ?? pairings[0];
+  const activePairIndex = activePairing ? pairings.findIndex((pairing) => pairId(pairing) === pairId(activePairing)) : -1;
+  const activeConfig = activePairing ? pairConfigs[pairId(activePairing)] : undefined;
+  const uploadAccept = uploadFormats ? uploadFormats.formats.map((item) => item.extension).join(",") : UPLOAD_ACCEPT;
+  const uploadFormatsHint = uploadFormats
+    ? uploadFormats.formats.length
+      ? `Allowed formats: ${uploadFormats.formats.map((item) => item.extension).join(", ")}${uploadFormats.max_upload_mb ? ` · up to ${uploadFormats.max_upload_mb} MB` : ""}`
+      : "No upload formats are enabled for this workspace."
+    : undefined;
 
   function updatePairConfig(pairing: SheetPairing, update: (current: SheetRuleDraft) => SheetRuleDraft) {
     const id = pairId(pairing);
     setPairConfigs((current) => current[id] ? { ...current, [id]: update(current[id]) } : current);
+  }
+
+  function updateMappingUI(pairing: SheetPairing, update: SetStateAction<MappingBuilderUIState>) {
+    const id = pairId(pairing);
+    setMappingUIByRule((current) => {
+      const previous = current[id] ?? EMPTY_MAPPING_UI_STATE;
+      return { ...current, [id]: typeof update === "function" ? update(previous) : update };
+    });
   }
 
   async function configurePairings(nextPairings: SheetPairing[]) {
@@ -294,6 +353,119 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
     const source = pairConfigs[sourceId];
     if (source) updatePairConfig(target, (current) => copyRuleSettings(source, current));
   }
+
+  function ruleNavigationItems(stage: 3 | 4 | 5): RuleNavigationItem[] {
+    return pairings.map((pairing) => {
+      const id = pairId(pairing);
+      const config = pairConfigs[id];
+      const status: RuleSetupStatus = stage === 3
+        ? matchingSetupStatus(config)
+        : stage === 5 && mappingIsReady(config)
+          ? "configured"
+          : mappingSetupStatus(config);
+      const mappedFields = config?.rules.length ?? 0;
+      const contextFields = (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0);
+      const statusText = stage === 3
+        ? config ? ruleStatus(config) : busy ? "Reading sheet columns" : "Not configured"
+        : stage === 5 && status === "configured"
+          ? contextFields ? `${contextFields} context field${contextFields === 1 ? "" : "s"} selected` : "Ready · no optional context fields"
+          : status === "error"
+            ? config?.tolerances.length && !mappingIsReady(config) ? "Check mapped fields and tolerance values" : "Fix this rule's mappings"
+            : status === "not-configured"
+              ? "Add at least one field mapping"
+              : `${mappedFields} mapped field${mappedFields === 1 ? "" : "s"}`;
+      return {
+        id,
+        label: `${pairing.sheet1.name} → ${pairing.sheet2.name}`,
+        title: ruleTitle(pairing),
+        status,
+        statusText,
+      };
+    });
+  }
+
+  function validationForStep(target: number): { step: number; ruleId?: string; message: string } | null {
+    if (stepReadiness[target - 1]) return null;
+    if (target === 1) {
+      if (!sourceWorkbooks.length) return { step: 1, message: "Upload a source workbook to continue." };
+      if (!destinationWorkbooks.length) return { step: 1, message: "Upload a comparison workbook to continue." };
+      if (file1Sheets.length && !selectedSheets1.length) return { step: 1, message: `Select at least one sheet from ${file1Name}.` };
+      return { step: 1, message: `Select at least one sheet from ${file2Name}.` };
+    }
+    if (target === 2) return { step: 2, message: "Pair at least one source sheet with a comparison sheet." };
+    if (jobType === "gst") {
+      const missing = missingGstFile1.length
+        ? `${file1Name} is missing ${missingGstFile1.join(", ")}.`
+        : missingGstFile2.length
+          ? `${file2Name} is missing ${missingGstFile2.join(", ")}.`
+          : gstConfigError || "Load the GST field requirements and check both workbooks.";
+      return { step: target, message: missing };
+    }
+    const stage = target === 3 ? 3 : 4;
+    const index = pairings.findIndex((pairing) => {
+      const config = pairConfigs[pairId(pairing)];
+      return stage === 3 ? !ruleIsReady(config) : !mappingIsReady(config);
+    });
+    if (index < 0) return { step: target, message: target === 3 ? "Finish the matching setup for each sheet pair." : "Finish the column mapping for each sheet pair." };
+    const pairing = pairings[index];
+    const config = pairConfigs[pairId(pairing)];
+    if (stage === 3) {
+      const detail = config ? ruleStatus(config) : busy ? "Wait for this sheet pair's columns to finish loading." : "Choose matching columns or complete an amount-and-date fallback.";
+      return { step: target, ruleId: pairId(pairing), message: `Rule ${index + 1}: ${detail}.` };
+    }
+    const detail = !config?.rules.length
+      ? "Add at least one field mapping."
+      : config.tolerances.some((band) => !mappingIsReady(config))
+        ? "Complete or remove invalid tolerance values."
+        : "Complete the field mappings.";
+    return { step: target, ruleId: pairId(pairing), message: `Rule ${index + 1}: ${detail}` };
+  }
+
+  function continueWorkflow() {
+    const issue = validationForStep(step);
+    if (issue) {
+      setWorkflowIssue(issue);
+      if (issue.ruleId) setActiveRuleId(issue.ruleId);
+      shouldFocusIssue.current = true;
+      return;
+    }
+    setWorkflowIssue(null);
+    const nextStep = Math.min(6, step + 1);
+    setMaxVisitedStep((current) => Math.max(current, nextStep));
+    setStep(nextStep);
+  }
+
+  function selectWorkflowStep(target: number) {
+    if (target > maxVisitedStep || target === step) return;
+    setWorkflowIssue(null);
+    setStep(target);
+  }
+
+  useEffect(() => {
+    if (!workflowIssue) return;
+    if (stepReadiness[workflowIssue.step - 1]) {
+      setWorkflowIssue(null);
+      return;
+    }
+    if (!workflowIssue.ruleId) return;
+    const pairing = pairings.find((item) => pairId(item) === workflowIssue.ruleId);
+    const config = pairing ? pairConfigs[pairId(pairing)] : undefined;
+    const corrected = workflowIssue.step === 3 ? ruleIsReady(config) : mappingIsReady(config);
+    if (corrected) setWorkflowIssue(null);
+  }, [workflowIssue, pairings, pairConfigs, stepReadiness]);
+
+  useEffect(() => {
+    if (!shouldFocusIssue.current) return;
+    shouldFocusIssue.current = false;
+    window.requestAnimationFrame(() => {
+      const activePanel = document.getElementById("active-rule-panel");
+      const stepContent = document.querySelector<HTMLElement>(".workflow-panel .step-content");
+      const target = activePanel?.querySelector<HTMLElement>("[data-workflow-focus], select.is-empty, select, button:not(:disabled)")
+        ?? stepContent?.querySelector<HTMLElement>("[data-workflow-focus], select, button:not(:disabled)");
+      if (target) target.focus();
+      else activePanel?.focus();
+    });
+  }, [step, activeRuleId, workflowIssue]);
 
   /** Canonical plan: one file pair per workbook pairing, one independent sheet rule per sheet pairing. */
   function buildFilePairs() {
@@ -481,6 +653,50 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
     setMessage("");
     setAnalysisStatus("Loading the files and rules from your earlier run…");
     try {
+      if (job.job_type === "gst") {
+        const setup = await api.getGstJobPlan(job.id);
+        const sheets = new Map(await Promise.all(setup.files.map(async (file) => [file.id, (await api.getFileMetadata(file.id)).sheets] as const)));
+        const sourceIds = Array.from(new Set(setup.source_files_1.map((file) => file.file_id)));
+        const destinationIds = Array.from(new Set(setup.source_files_2.map((file) => file.file_id)));
+        const firstSource = setup.files.find((file) => file.id === sourceIds[0]);
+        const firstDestination = setup.files.find((file) => file.id === destinationIds[0]);
+        if (!firstSource || !firstDestination) throw new Error("This GST run has no stored source and destination files.");
+        const selectedIds = (refs: typeof setup.source_files_1, fileId: string, available: SheetMetadata[]) => {
+          const stored = Array.from(new Set(refs.filter((item) => item.file_id === fileId).map((item) => item.sheet_id).filter((id): id is string => Boolean(id))));
+          const existing = stored.filter((id) => available.some((sheet) => sheet.id === id));
+          return existing.length ? existing : available.slice(0, 1).map((sheet) => sheet.id);
+        };
+        const sourceSheets = sheets.get(firstSource.id) ?? [];
+        const destinationSheets = sheets.get(firstDestination.id) ?? [];
+        const selectedSource = selectedIds(setup.source_files_1, firstSource.id, sourceSheets);
+        const selectedDestination = selectedIds(setup.source_files_2, firstDestination.id, destinationSheets);
+        const sheetOf = (available: SheetMetadata[], id?: string): SheetMetadata => available.find((sheet) => sheet.id === id) ?? available[0] ?? { id: id ?? "", name: id || "Sheet 1" };
+        const [sourceColumns, destinationColumns] = await Promise.all([
+          api.getColumns(firstSource.id, setup.orientation, selectedSource[0]),
+          api.getColumns(firstDestination.id, setup.orientation, selectedDestination[0]),
+        ]);
+        setJobType("gst");
+        setOrientation(setup.orientation);
+        setFile1(firstSource);
+        setFile1Sheets(sourceSheets);
+        setSelectedSheets1(selectedSource);
+        setFile1Columns(sourceColumns);
+        setFile2(firstDestination);
+        setFile2Sheets(destinationSheets);
+        setSelectedSheets2(selectedDestination);
+        setFile2Columns(destinationColumns);
+        setAdditionalSourceFiles([]);
+        setAdditionalDestinationFiles([]);
+        setFilePairings([]);
+        setPairings([{ sheet1: sheetOf(sourceSheets, selectedSource[0]), sheet2: sheetOf(destinationSheets, selectedDestination[0]), sourceFileId: firstSource.id, destinationFileId: firstDestination.id }]);
+        setPairConfigs({});
+        setGstTextThreshold(setup.text_threshold);
+        setRerunOf(job);
+        setStep(3);
+        setMaxVisitedStep(3);
+        setWorkflowIssue(null);
+        return;
+      }
       const setup = await api.getJobPlan(job.id);
       const sheets = new Map(await Promise.all(setup.files.map(async (file) => [file.id, (await api.getFileMetadata(file.id)).sheets] as const)));
       const sheetOf = (fileId: string, sheetId?: string | null): SheetMetadata => {
@@ -529,6 +745,8 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
       setPairConfigs(Object.fromEntries(drafts));
       setRerunOf(job);
       setStep(3);
+      setMaxVisitedStep(3);
+      setWorkflowIssue(null);
     } catch (error) {
       setMessage(`Could not reopen that run: ${error instanceof Error ? error.message : "unknown error"}. Upload the files to start again.`);
     } finally {
@@ -545,50 +763,131 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
     }
   }
 
+  function renderMappingRule() {
+    if (!activePairing || !activeConfig) return null;
+    const id = pairId(activePairing);
+    return <section id="active-rule-panel" className="active-rule-panel" role="tabpanel" aria-labelledby={`rule-tab-${activePairIndex + 1}`} tabIndex={-1}>
+      <RuleConfigurationHeader
+        index={activePairIndex}
+        stage="Column mapping"
+        pairing={activePairing}
+        sourceFileName={workbookNameForPair("source", activePairing)}
+        destinationFileName={workbookNameForPair("destination", activePairing)}
+        status={mappingSetupStatus(activeConfig)}
+        statusText={mappingPanelStatus(activeConfig)}
+      />
+      <MappingBuilder
+        file1Columns={availableColumns(activeConfig, "source")}
+        file2Columns={availableColumns(activeConfig, "destination")}
+        rules={activeConfig.rules}
+        onRulesChange={(nextRules) => updatePairConfig(activePairing, (current) => ({ ...current, rules: nextRules, tolerances: pruneTolerances(current.tolerances, nextRules) }))}
+        analysis={activeConfig.analysis}
+        tolerances={activeConfig.tolerances}
+        onTolerancesChange={(tolerances) => updatePairConfig(activePairing, (current) => ({ ...current, tolerances }))}
+        toleranceNotice={<ToleranceNotices config={activeConfig} onChange={(next) => updatePairConfig(activePairing, () => next)} />}
+        primaryFile1={activeConfig.primaryKeySource}
+        primaryFile2={activeConfig.primaryKeyDestination}
+        file1Name={`${workbookNameForPair("source", activePairing)} - ${activePairing.sheet1.name}`}
+        file2Name={`${workbookNameForPair("destination", activePairing)} - ${activePairing.sheet2.name}`}
+        suggestions={(activeConfig.analysis?.recommended_mappings ?? []).filter((mapping) => mapping.target && mapping.confidence !== "Low" && mapping.confidence !== "None").map((mapping) => ({ source: mapping.source, target: mapping.target as string }))}
+        uiState={mappingUIByRule[id] ?? EMPTY_MAPPING_UI_STATE}
+        onUIStateChange={(update) => updateMappingUI(activePairing, update)}
+      />
+    </section>;
+  }
+
+  function renderReportRule() {
+    if (!activePairing || !activeConfig) return null;
+    const contextCount = activeConfig.includeFile1.length + activeConfig.includeFile2.length;
+    return <section id="active-rule-panel" className="active-rule-panel" role="tabpanel" aria-labelledby={`rule-tab-${activePairIndex + 1}`} tabIndex={-1}>
+      <RuleConfigurationHeader
+        index={activePairIndex}
+        stage="Report setup"
+        pairing={activePairing}
+        sourceFileName={workbookNameForPair("source", activePairing)}
+        destinationFileName={workbookNameForPair("destination", activePairing)}
+        status="configured"
+        statusText={contextCount ? `${contextCount} optional columns selected` : "Ready · no optional columns"}
+      />
+      <ReportColumnPicker
+        file1Columns={availableColumns(activeConfig, "source").filter((column) => !activeConfig.primaryKeySource.includes(column))}
+        file2Columns={availableColumns(activeConfig, "destination").filter((column) => !activeConfig.primaryKeyDestination.includes(column))}
+        selectedFile1={activeConfig.includeFile1}
+        selectedFile2={activeConfig.includeFile2}
+        onChangeFile1={(includeFile1) => updatePairConfig(activePairing, (current) => ({ ...current, includeFile1 }))}
+        onChangeFile2={(includeFile2) => updatePairConfig(activePairing, (current) => ({ ...current, includeFile2 }))}
+        file1Name={`${workbookNameForPair("source", activePairing)} - ${activePairing.sheet1.name}`}
+        file2Name={`${workbookNameForPair("destination", activePairing)} - ${activePairing.sheet2.name}`}
+      />
+    </section>;
+  }
+
   return <section className="page workflow-page">
     <div className="page-title workflow-title">{rerunOf
       ? <div><span className="eyebrow">Run again</span><h1>Change the rules</h1><p>{rerunOf.input_file_1_name ?? "File 1"} vs {rerunOf.input_file_2_name ?? "File 2"}, loaded with the rules from your run of {formatServerTime(rerunOf.completed_at ?? rerunOf.created_at, { dateStyle: "medium", timeStyle: "short" })}. Change what you need and run again; the earlier run stays in History.</p>{onStartFresh && <button type="button" className="text-command" onClick={onStartFresh}>Start with new files instead</button>}</div>
-      : <div><span className="eyebrow">New reconciliation</span><h1>Set up your comparison</h1><p>Six clear steps from Excel files to a downloadable reconciliation report.</p></div>}<span className="workflow-status">Step {step} of 6</span></div>
-    <WorkflowSteps current={step} completedThrough={completedThrough} onSelect={setStep} />
+      : <div><span className="eyebrow">New reconciliation</span><h1>Set up your comparison</h1><p>Compare workbooks and prepare a reconciliation report.</p></div>}<span className="workflow-status">Step {step} of 6</span></div>
+    <WorkflowSteps current={step} maxVisitedStep={maxVisitedStep} statuses={workflowStepStatuses} onSelect={selectWorkflowStep} />
     <div className="workflow-panel">
+      {workflowIssue?.step === step && <div className="workflow-validation-error" role="alert"><AlertTriangle size={18} /><span>{workflowIssue.message}</span></div>}
       {restoring && <div className="step-content"><div className="loading-state" role="status"><Loader2 className="animate-spin" /> {analysisStatus || "Loading your earlier run…"}</div></div>}
       {step === 1 && !restoring && <div className="step-content">
-        <div className="section-heading"><div><h2>Upload your workbooks</h2><p>Choose the source and destination Excel files you want to compare.</p></div></div>
-        <div className="setup-controls"><label>Reconciliation type<div className="segmented-control"><button type="button" className={jobType === "generic" ? "is-active" : ""} onClick={() => setJobType("generic")}>General</button><button type="button" className={jobType === "gst" ? "is-active" : ""} onClick={() => setJobType("gst")}>GST invoices</button></div></label><label>Data orientation<div className="segmented-control"><button type="button" className={orientation === "vertical" ? "is-active" : ""} onClick={() => setOrientation("vertical")}>Column headers</button><button type="button" className={orientation === "horizontal" ? "is-active" : ""} onClick={() => setOrientation("horizontal")}>Row headers</button></div></label><button type="button" className="secondary refresh-command" onClick={downloadSample}><Download size={16} />Download {jobType === "gst" ? "GST" : "General"} sample template</button><button type="button" className="secondary refresh-command" onClick={() => refreshColumns()} disabled={!hasBothFiles || busy}><RefreshCw size={16} />Refresh fields</button></div>
+        <div className="section-heading"><div><h2>Upload your workbooks</h2><p>Choose the source and comparison files. RecliQ reads their sheets next.</p></div></div>
+        <div className="setup-controls"><label>Reconciliation type{canUseGeneric && canUseGst ? <div className="segmented-control"><button type="button" className={jobType === "generic" ? "is-active" : ""} onClick={() => setJobType("generic")}>General</button><button type="button" className={jobType === "gst" ? "is-active" : ""} onClick={() => setJobType("gst")}>GST invoices</button></div> : <strong className="single-workflow-type">{jobType === "gst" ? "GST invoices" : "General"}</strong>}</label><label>Data orientation<div className="segmented-control"><button type="button" className={orientation === "vertical" ? "is-active" : ""} onClick={() => setOrientation("vertical")}>Column headers</button><button type="button" className={orientation === "horizontal" ? "is-active" : ""} onClick={() => setOrientation("horizontal")}>Row headers</button></div></label><button type="button" className="secondary refresh-command" onClick={downloadSample}><Download size={16} />Download {jobType === "gst" ? "GST" : "General"} sample template</button><button type="button" className="secondary refresh-command" onClick={() => refreshColumns()} disabled={!hasBothFiles || busy}><RefreshCw size={16} />Refresh fields</button></div>
         <div className="upload-grid">
           <div>
-            <FileDropzone label={file1Name} fileName={file1?.original_filename} fileSize={file1?.size_bytes} columnCount={file1Columns.length} uploading={uploading === 1} progress={uploadProgress[1]} onFile={(file) => upload(1, file)} />
+            <FileDropzone label={file1Name} fileName={file1?.original_filename} fileSize={file1?.size_bytes} columnCount={file1Columns.length} uploading={uploading === 1} progress={uploadProgress[1]} accept={uploadAccept} formatsHint={uploadFormatsHint} onFile={(file) => upload(1, file)} />
             {uploadStage[1] && <p className="upload-stage"><Loader2 size={14} className="animate-spin" />{uploadStage[1]}</p>}
             <SheetSelector sheets={file1Sheets} selectedSheets={selectedSheets1} onChange={setSelectedSheets1} fileName={file1Name} />
           </div>
           <div>
-            <FileDropzone label={file2Name} fileName={file2?.original_filename} fileSize={file2?.size_bytes} columnCount={file2Columns.length} uploading={uploading === 2} progress={uploadProgress[2]} onFile={(file) => upload(2, file)} />
+            <FileDropzone label={file2Name} fileName={file2?.original_filename} fileSize={file2?.size_bytes} columnCount={file2Columns.length} uploading={uploading === 2} progress={uploadProgress[2]} accept={uploadAccept} formatsHint={uploadFormatsHint} onFile={(file) => upload(2, file)} />
             {uploadStage[2] && <p className="upload-stage"><Loader2 size={14} className="animate-spin" />{uploadStage[2]}</p>}
             <SheetSelector sheets={file2Sheets} selectedSheets={selectedSheets2} onChange={setSelectedSheets2} fileName={file2Name} />
           </div>
         </div>
-        {jobType === "generic" && <div className="upload-grid mt-4"><AdditionalWorkbookUpload label="Add another source workbook" onFile={(file) => uploadAdditional("source", file)} disabled={busy} /><AdditionalWorkbookUpload label="Add another destination workbook" onFile={(file) => uploadAdditional("destination", file)} disabled={busy} /></div>}
+        {jobType === "generic" && <div className="upload-grid mt-4"><AdditionalWorkbookUpload label="Add another source workbook" accept={uploadAccept} onFile={(file) => uploadAdditional("source", file)} disabled={busy} /><AdditionalWorkbookUpload label="Add another destination workbook" accept={uploadAccept} onFile={(file) => uploadAdditional("destination", file)} disabled={busy} /></div>}
         {(additionalSourceFiles.length > 0 || additionalDestinationFiles.length > 0) && <><div className="info-callout"><Sparkles size={18} /><span>{sourceWorkbooks.length} source and {destinationWorkbooks.length} destination workbooks are ready for explicit pairing.</span></div><WorkbookList label="Additional source workbooks" workbooks={additionalSourceFiles} onRemove={(fileId) => removeAdditionalWorkbook("source", fileId)} /><WorkbookList label="Additional destination workbooks" workbooks={additionalDestinationFiles} onRemove={(fileId) => removeAdditionalWorkbook("destination", fileId)} /></>}
       </div>}
       {step === 2 && <div className="step-content">
-        <div className="section-heading"><div><h2>Pair your sheets</h2><p>Map each source sheet to its destination counterpart. Each pair is reconciled independently.</p></div></div>
+        <div className="section-heading"><div><h2>Pair your sheets</h2><p>Choose which source sheets to compare. Each pair is reconciled independently.</p></div></div>
         {busy && <div className="loading-state"><Loader2 className="animate-spin" /> {analysisStatus || "Preparing sheet pairs…"}</div>}
         {sourceWorkbooks.length === 1 && destinationWorkbooks.length === 1 ? <SheetPairingStep file1Sheets={selectedFile1Sheets} file2Sheets={selectedFile2Sheets} file1Name={file1Name} file2Name={file2Name} pairings={pairings} onChange={(next) => handleWorkbookSheetPairings({ sourceFileId: sourceWorkbooks[0].file.id, destinationFileId: destinationWorkbooks[0].file.id }, next)} /> : <><FilePairingStep sourceFiles={sourceWorkbooks} destinationFiles={destinationWorkbooks} pairings={filePairings} onChange={handleWorkbookPairingsChange} />{filePairings.map((workbookPairing) => { const source = workbookFor("source", workbookPairing.sourceFileId); const destination = workbookFor("destination", workbookPairing.destinationFileId); if (!source || !destination) return null; const scoped = pairings.filter((pairing) => pairing.sourceFileId === source.file.id && pairing.destinationFileId === destination.file.id); return <section className="mapping-workspace" key={`${source.file.id}-${destination.file.id}`}><h3>{source.file.original_filename} <ArrowRight size={16} /> {destination.file.original_filename}</h3><SheetPairingStep file1Sheets={source.sheets} file2Sheets={destination.sheets} file1Name={source.file.original_filename} file2Name={destination.file.original_filename} pairings={scoped} onChange={(next) => handleWorkbookSheetPairings(workbookPairing, next)} /></section>; })}</>}
       </div>}
       {step === 3 && <div className="step-content">
         {jobType === "generic" ? <>
-          <div className="section-heading"><div><h2>Configure matching for each sheet pair</h2><p>Tell RecliQ how to recognise the same record in both files. Each sheet pair is set up on its own.</p></div></div>
+          <div className="section-heading"><div><h2>Choose how records match</h2><p>Select columns that identify the same record in both sheets.</p></div></div>
           {busy && <div className="loading-state"><Loader2 className="animate-spin" /> {analysisStatus || "Analyzing sheet pairs…"}</div>}
-          {pairings.map((pairing, index) => {
-            const config = pairConfigs[pairId(pairing)];
-            return config ? <RulePanel key={pairId(pairing)} index={index} title={ruleTitle(pairing)} status={ruleStatus(config)} ready={ruleIsReady(config)}>
-              <SheetRuleConfiguration pairing={pairing} config={config} onChange={(next) => updatePairConfig(pairing, () => next)} copyOptions={copyOptionsFor(pairing)} onCopyFrom={(sourceId) => copySettings(pairing, sourceId)} sourceLabel={`${workbookNameForPair("source", pairing)} · ${pairing.sheet1.name}`} destinationLabel={`${workbookNameForPair("destination", pairing)} · ${pairing.sheet2.name}`} />
-            </RulePanel> : null;
-          })}
+          {pairings.length > 0 && <div className="rule-workspace">
+            <RuleNavigator items={ruleNavigationItems(3)} activeId={activeRuleId} onSelect={setActiveRuleId} label="Matching key rules" />
+            {activePairing && <section id="active-rule-panel" className="active-rule-panel" role="tabpanel" aria-labelledby={`rule-tab-${activePairIndex + 1}`} tabIndex={-1}>
+              <RuleConfigurationHeader index={activePairIndex} stage="Matching configuration" pairing={activePairing} sourceFileName={workbookNameForPair("source", activePairing)} destinationFileName={workbookNameForPair("destination", activePairing)} status={matchingSetupStatus(activeConfig)} statusText={activeConfig ? ruleStatus(activeConfig) : "Waiting for sheet analysis"} />
+              {activeConfig && <SheetRuleConfiguration pairing={activePairing} config={activeConfig} onChange={(next) => updatePairConfig(activePairing, () => next)} copyOptions={copyOptionsFor(activePairing)} onCopyFrom={(sourceId) => copySettings(activePairing, sourceId)} sourceLabel={`${workbookNameForPair("source", activePairing)} · ${activePairing.sheet1.name}`} destinationLabel={`${workbookNameForPair("destination", activePairing)} · ${activePairing.sheet2.name}`} />}
+            </section>}
+          </div>}
         </> : <GstMatchingKeyStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} error={gstConfigError} file1Name={file1Name} file2Name={file2Name} />}
       </div>}
-      {step === 4 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing, index) => { const config = pairConfigs[pairId(pairing)]; return config ? <RulePanel key={pairId(pairing)} index={index} title={ruleTitle(pairing)} status={`${config.rules.length} mapped field${config.rules.length === 1 ? "" : "s"}${config.tolerances.length ? ` · ${config.tolerances.length} tolerance${config.tolerances.length === 1 ? "" : "s"}` : ""}`} ready={mappingIsReady(config)}><MappingBuilder file1Columns={availableColumns(config, "source")} file2Columns={availableColumns(config, "destination")} rules={config.rules} onRulesChange={(nextRules) => updatePairConfig(pairing, (current) => ({ ...current, rules: nextRules, tolerances: pruneTolerances(current.tolerances, nextRules) }))} analysis={config.analysis} tolerances={config.tolerances} onTolerancesChange={(tolerances) => updatePairConfig(pairing, (current) => ({ ...current, tolerances }))} toleranceNotice={<ToleranceNotices config={config} onChange={(next) => updatePairConfig(pairing, () => next)} />} primaryFile1={config.primaryKeySource} primaryFile2={config.primaryKeyDestination} file1Name={`${workbookNameForPair("source", pairing)} - ${pairing.sheet1.name}`} file2Name={`${workbookNameForPair("destination", pairing)} - ${pairing.sheet2.name}`} suggestions={(config.analysis?.recommended_mappings ?? []).filter((mapping) => mapping.target && mapping.confidence !== "Low" && mapping.confidence !== "None").map((mapping) => ({ source: mapping.source, target: mapping.target as string }))} /></RulePanel> : null; }) : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}</div>}
-      {step === 5 && <div className="step-content">{jobType === "generic" ? pairings.map((pairing, index) => { const config = pairConfigs[pairId(pairing)]; return config ? <RulePanel key={pairId(pairing)} index={index} title={ruleTitle(pairing)} status={`${config.includeFile1.length + config.includeFile2.length} context column${config.includeFile1.length + config.includeFile2.length === 1 ? "" : "s"}`} ready><ReportColumnPicker file1Columns={availableColumns(config, "source").filter((column) => !config.primaryKeySource.includes(column))} file2Columns={availableColumns(config, "destination").filter((column) => !config.primaryKeyDestination.includes(column))} selectedFile1={config.includeFile1} selectedFile2={config.includeFile2} onChangeFile1={(includeFile1) => updatePairConfig(pairing, (current) => ({ ...current, includeFile1 }))} onChangeFile2={(includeFile2) => updatePairConfig(pairing, (current) => ({ ...current, includeFile2 }))} file1Name={`${workbookNameForPair("source", pairing)} - ${pairing.sheet1.name}`} file2Name={`${workbookNameForPair("destination", pairing)} - ${pairing.sheet2.name}`} /></RulePanel> : null; }) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}</div>}
+      {step === 4 && <div className="step-content">
+        {jobType === "generic" ? (
+          <>
+          <div className="section-heading"><div><h2>Map fields to compare</h2><p>Choose the values to compare. Matching keys are excluded automatically.</p></div></div>
+          {pairings.length > 0 && <div className="rule-workspace">
+            <RuleNavigator items={ruleNavigationItems(4)} activeId={activeRuleId} onSelect={setActiveRuleId} label="Column mapping rules" />
+            {renderMappingRule()}
+          </div>}
+          </>
+        ) : <GstColumnMappingStep config={gstConfig} missingFile1={missingGstFile1} missingFile2={missingGstFile2} file1Name={file1Name} file2Name={file2Name} />}
+      </div>}
+      {step === 5 && <div className="step-content">
+        {jobType === "generic" ? (
+          <>
+          <div className="section-heading"><div><h2>Choose report context</h2><p>Optional columns appear beside the matching results. Keys and compared values are already included.</p></div></div>
+          {pairings.length > 0 && <div className="rule-workspace">
+            <RuleNavigator items={ruleNavigationItems(5)} activeId={activeRuleId} onSelect={setActiveRuleId} label="Report setup rules" />
+            {renderReportRule()}
+          </div>}
+          </>
+        ) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}
+      </div>}
       {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl>{jobType === "generic" && multiWorkbook ? <><div><dt>Workbooks</dt><dd>{sourceWorkbooks.length} source · {destinationWorkbooks.length} destination</dd></div><div><dt>File pairs</dt><dd>{new Set(pairings.map((pairing) => `${pairing.sourceFileId}::${pairing.destinationFileId}`)).size} (one report each, delivered as a ZIP)</dd></div></> : <><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div></>}<div><dt>Sheet rules</dt><dd>{pairings.length > 0 ? `${pairings.length} independent rule${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Matching key</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : pairings.length === 1 ? `${pairConfigs[pairId(pairings[0])]?.primaryKeySource.join(" + ")} → ${pairConfigs[pairId(pairings[0])]?.primaryKeyDestination.join(" + ")}` : "Configured per sheet rule (below)"}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : pairings.reduce((count, pairing) => count + (pairConfigs[pairId(pairing)]?.rules.length ?? 0), 0)}</dd></div><div><dt>Report columns</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0); }, 0)}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl>{jobType === "generic" && <section className="review-rules" aria-label="Sheet rule review">{pairings.map((pairing, index) => { const config = pairConfigs[pairId(pairing)]; if (!config) return null; const dateOnly = isDateOnlyKey(config); return <details key={pairId(pairing)} className="rule-panel" open={pairings.length <= 3}><summary>Rule {index + 1} · {ruleTitle(pairing)}<small>{ruleStatus(config)}</small></summary><div className="rule-panel-body"><dl>
         <dt>Primary key</dt><dd>{hasKeys(config) ? `${config.primaryKeySource.join(" + ")} → ${config.primaryKeyDestination.join(" + ")}` : "None — matched on amount and date"}</dd>
         <dt>Must also match</dt><dd>{config.secondaryConditions.length ? config.secondaryConditions.map(describeCondition).join("; ") : "Nothing else (key only)"}</dd>
@@ -611,13 +910,13 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh }: Pro
       <button type="button" className="primary run-button" onClick={start} disabled={busy || (jobType === "gst" && !gstReady) || (jobType === "generic" && (!genericConfigurationsReady || precheckLoading || precheckBlocked(precheck) || (precheckNeedsAcknowledgement(precheck) && !precheckAcknowledged)))}><Play size={18} />{busy ? "Starting reconciliation..." : "Run reconciliation"}</button></div>}
     </div>
     {message && <p className="error-text">{message}</p>}
-    <div className="workflow-actions"><button type="button" className="secondary" onClick={() => setStep((current) => Math.max(1, current - 1))} disabled={step === 1 || busy}><ArrowLeft size={16} />Back</button>{step < 6 ? <button type="button" className="primary" onClick={() => setStep((current) => current + 1)} disabled={!canContinue || busy}>Continue<ArrowRight size={16} /></button> : null}</div>
+    <div className="workflow-actions"><button type="button" className="secondary" onClick={() => { setWorkflowIssue(null); setStep((current) => Math.max(1, current - 1)); }} disabled={step === 1 || busy}><ArrowLeft size={16} />Back</button>{step < 6 ? <button type="button" className="primary" onClick={continueWorkflow} disabled={busy || restoring}>Continue<ArrowRight size={16} /></button> : null}</div>
   </section>;
 }
 
-function AdditionalWorkbookUpload({ label, onFile, disabled }: { label: string; onFile: (file: File) => void; disabled: boolean }) {
+function AdditionalWorkbookUpload({ label, onFile, disabled, accept }: { label: string; onFile: (file: File) => void; disabled: boolean; accept: string }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
-  return <div className="info-callout"><Sparkles size={18} /><span>{label}</span><button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={disabled}>Choose workbook</button><input ref={inputRef} className="visually-hidden" type="file" accept={UPLOAD_ACCEPT} onChange={(event) => { const file = event.target.files?.item(0); if (file) onFile(file); event.currentTarget.value = ""; }} /></div>;
+  return <div className="info-callout"><Sparkles size={18} /><span>{label}</span><button type="button" className="secondary" onClick={() => inputRef.current?.click()} disabled={disabled}>Choose workbook</button><input ref={inputRef} className="visually-hidden" type="file" accept={accept} onChange={(event) => { const file = event.target.files?.item(0); if (file) onFile(file); event.currentTarget.value = ""; }} /></div>;
 }
 
 function WorkbookList({ label, workbooks, onRemove }: { label: string; workbooks: WorkbookWithSheets[]; onRemove: (fileId: string) => void }) {
@@ -637,11 +936,46 @@ function GstMatchingKeyStep({ config, missingFile1, missingFile2, error, file1Na
   return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Confirm GST matching keys</h2><p>GST reconciliations use a fixed business key to keep invoice matching accurate and auditable.</p></div></div><div className="gst-key-list">{(config?.matching_fields ?? []).map((field) => <div key={field}><CheckCircle2 size={17} /><span>{field}</span><small>Required in both files ({file1Name} & {file2Name})</small></div>)}</div><GstValidationAlert config={config} missingFile1={missingFile1} missingFile2={missingFile2} error={error} file1Name={file1Name} file2Name={file2Name} /></section>;
 }
 
-function RulePanel({ index, title, status, ready, children }: { index: number; title: string; status: string; ready: boolean; children: React.ReactNode }) {
-  return <details className="rule-panel" open>
-    <summary>{ready ? <CheckCircle2 size={16} style={{ color: "var(--color-primary)" }} /> : <AlertTriangle size={16} style={{ color: "var(--color-warning)" }} />}Rule {index + 1} · {title}<small>{status}</small></summary>
-    <div className="rule-panel-body">{children}</div>
-  </details>;
+function mappingPanelStatus(config: SheetRuleDraft | undefined): string {
+  if (!config?.rules.length) return "Add at least one field mapping";
+  if (config.tolerances.length && !mappingIsReady(config)) return "Complete or remove invalid tolerance values";
+  return `${config.rules.length} mapped field${config.rules.length === 1 ? "" : "s"}${config.tolerances.length ? ` · ${config.tolerances.length} tolerance${config.tolerances.length === 1 ? "" : "s"}` : ""}`;
+}
+
+function statusLabel(status: RuleSetupStatus): string {
+  if (status === "configured") return "Configured";
+  if (status === "partial") return "In progress";
+  if (status === "error") return "Needs attention";
+  return "Not configured";
+}
+
+function RuleConfigurationHeader({ index, stage, pairing, sourceFileName, destinationFileName, status, statusText }: {
+  index: number;
+  stage: string;
+  pairing: SheetPairing;
+  sourceFileName: string;
+  destinationFileName: string;
+  status: RuleSetupStatus;
+  statusText: string;
+}) {
+  const statusIcon = status === "configured" ? <CheckCircle2 size={16} />
+    : status === "error" ? <AlertTriangle size={16} />
+      : status === "partial" ? <CircleDot size={16} />
+        : <Circle size={16} />;
+  return <header className="rule-config-header">
+    <div className="rule-config-main">
+      <h3>Rule {index + 1} · {stage}</h3>
+      <div className="rule-config-files">
+        <div><span>Source</span><strong title={`${sourceFileName} · ${pairing.sheet1.name}`}>{sourceFileName}<small> · {pairing.sheet1.name}</small></strong></div>
+        <ArrowRight size={16} aria-hidden="true" />
+        <div><span>Comparison</span><strong title={`${destinationFileName} · ${pairing.sheet2.name}`}>{destinationFileName}<small> · {pairing.sheet2.name}</small></strong></div>
+      </div>
+    </div>
+    <div className={`rule-config-status is-${status}`}>
+      <span>{statusIcon}{statusLabel(status)}</span>
+      <small>{statusText}</small>
+    </div>
+  </header>;
 }
 
 interface SheetRuleConfigurationProps {
@@ -686,6 +1020,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
   const suggestedDestination = config.analysis?.recommended_keys_2.filter((column) => config.file2Columns.includes(column)) ?? [];
   const suggestionUsable = suggestedSource.length > 0 && suggestedSource.length === suggestedDestination.length;
   const suggestionApplied = suggestedSource.join("|") === config.primaryKeySource.join("|") && suggestedDestination.join("|") === config.primaryKeyDestination.join("|");
+  const similarRecordSettingsActive = config.similarityPolicy.matcher_type_override !== undefined || config.similarityPolicy.threshold !== undefined;
   const applySuggestion = () => onChange({ ...config, primaryKeySource: suggestedSource, primaryKeyDestination: suggestedDestination, dateOnlyOverride: false });
 
   const columnSelect = (columns: string[], value: string, onSelect: (column: string) => void, label: string) => (
@@ -707,7 +1042,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
 
     <div className="rule-section">
       <div className="rule-section-heading">
-        <div><h4>1. Match records on</h4><p>The column(s) that identify the same record in both sheets, such as an invoice or reference number. Spacing, case and punctuation (INV005 = INV/005 = INV-005) are ignored. No shared reference, as in a bank statement? Leave this empty and add an amount + date pass in step 3.</p></div>
+        <div><h4>Match records on</h4><p>Select the columns that identify the same record in both sheets.</p></div>
       </div>
       {suggestionUsable && !suggestionApplied && <div className="suggestion-strip">
         <span>Suggested from your data</span>
@@ -732,7 +1067,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
 
     <div className="rule-section">
       <div className="rule-section-heading">
-        <div><h4>2. Must also match <span className="optional-tag">optional</span></h4><p>Records are paired only when the key above <strong>and</strong> every column here agree, for example Invoice No. and Vendor Name. Rows that share all of them are added up before matching.</p></div>
+        <div><h4>Additional matching conditions <span className="optional-tag">optional</span></h4><p>Require extra fields, such as vendor or date, to agree as well.</p></div>
         <button type="button" className="secondary" onClick={addCondition}><Plus size={15} />Add column</button>
       </div>
       {config.secondaryConditions.length === 0 && <p className="rule-empty">No extra columns: records are paired on the key alone.</p>}
@@ -755,7 +1090,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
     <DatesAndNamesSettings config={config} onChange={onChange} />
 
     <details className="rule-advanced">
-      <summary>Advanced: slightly different keys</summary>
+      <summary>Find similar records <span className="advanced-summary-status">{similarRecordSettingsActive ? "Custom options active" : "Optional"}</span></summary>
       <p>When a key is not found exactly, RecliQ looks for a record with a <em>similar</em> key whose "must also match" columns agree, and lists it under Match Review for you to confirm.</p>
       <div className="advanced-grid">
         <label><span>Compare keys as</span><select value={config.similarityPolicy.matcher_type_override ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, matcher_type_override: event.target.value || undefined } })}><option value="">Automatic (from the data)</option><option value="identifier">Codes / reference numbers</option><option value="company_name">Company names</option><option value="person_name">Person names</option><option value="text">Plain text</option></select></label>

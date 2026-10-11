@@ -9,6 +9,8 @@ import {
   emptyDraft,
   limitsFromPasses,
   mappingIsReady,
+  mappingSetupStatus,
+  matchingSetupStatus,
   newPass,
   precheckBlocked,
   precheckNeedsAcknowledgement,
@@ -164,6 +166,24 @@ describe("rule readiness", () => {
     const dateOnly = draft({ primaryKeySource: ["DATE"], primaryKeyDestination: ["DATE"] });
     expect(ruleIsReady(dateOnly)).toBe(false);
     expect(ruleIsReady({ ...dateOnly, dateOnlyOverride: true })).toBe(true);
+  });
+
+  it("reports matching setup states using the same readiness requirements", () => {
+    expect(matchingSetupStatus(undefined)).toBe("not-configured");
+    expect(matchingSetupStatus(draft())).toBe("not-configured");
+    expect(matchingSetupStatus(draft({ primaryKeySource: ["INVOICE"], primaryKeyDestination: [""] }))).toBe("error");
+    expect(matchingSetupStatus(draft({ secondaryConditions: [{ source_column: "VENDOR", destination_column: "", comparison_method: "exact_text" }] }))).toBe("error");
+    expect(matchingSetupStatus(draft({ secondaryConditions: [{ source_column: "VENDOR", destination_column: "VENDOR", comparison_method: "exact_text" }] }))).toBe("partial");
+    expect(matchingSetupStatus(draft({ primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"] }))).toBe("configured");
+  });
+
+  it("reports map-stage completion and malformed mappings separately", () => {
+    expect(mappingSetupStatus(undefined)).toBe("not-configured");
+    expect(mappingSetupStatus(draft({ primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"] }))).toBe("not-configured");
+    const ready = draft({ primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"], rules: [{ file_1_fields: ["AMOUNT"], file_2_fields: ["AMOUNT"] }] });
+    expect(mappingSetupStatus(ready)).toBe("configured");
+    expect(mappingSetupStatus({ ...ready, rules: [{ file_1_fields: ["AMOUNT"], file_2_fields: [] }] })).toBe("error");
+    expect(mappingSetupStatus({ ...ready, tolerances: [{ field: "AMOUNT", amount: 0 }] })).toBe("error");
   });
 });
 

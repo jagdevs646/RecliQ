@@ -1,28 +1,73 @@
 import asyncio
+import json
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_actor, get_session_id
 from app.core.anonymous_session import websocket_session_id
+from app.core.origins import is_allowed_origin
 from app.database.session import SessionLocal, get_db
+from app.models.file import UploadedFile
 from app.models.job import ReconciliationJob
 from app.schemas.file import UploadedFileOut
-from app.schemas.job import JobListResponse, JobPlanResponse, ReconciliationJobOut
+from app.schemas.job import GstJobPlanResponse, JobListResponse, JobPlanResponse, ReconciliationJobOut
+from app.schemas.reconciliation import GSTReconciliationRequest
 from app.storage import get_storage
 from app.services.audit_service import AuditActor, record_event
-from app.services.job_service import PlanUnavailable, cancel_job, clear_all_jobs, delete_job, get_job, job_plan, list_jobs
+from app.services.job_service import PlanUnavailable, cancel_job, clear_all_jobs, delete_job, get_job, job_plan, list_jobs, search_jobs
 from app.utils.timestamps import iso_utc
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+class JobNameUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=250)
+
+
 @router.get("", response_model=JobListResponse)
 def jobs(
     limit: int = Query(default=50, ge=1, le=200),
+    page: int = Query(default=1, ge=1),
+    page_size: int | None = Query(default=None, ge=1, le=200),
+    q: str = Query(default="", max_length=200),
+    status_filter: str | None = Query(default=None, alias="status"),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    sort: str = Query(default="newest", pattern="^(newest|oldest|name)$"),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
 ) -> JobListResponse:
-    return JobListResponse(jobs=list_jobs(db, session_id, limit=limit))
+    size = page_size or limit
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=422, detail="The start date must be on or before the end date.")
+    try:
+        items, total = search_jobs(db, session_id, query_text=q, status_filter=status_filter, date_from=date_from, date_to=date_to, sort=sort, page=page, page_size=size)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JobListResponse(jobs=items, total=total, page=page, page_size=size)
+
+
+@router.put("/{job_id}/name", response_model=ReconciliationJobOut)
+def update_job_name(
+    job_id: str,
+    payload: JobNameUpdate,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
+) -> ReconciliationJob:
+    job = get_job(db, job_id, session_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Reconciliation not found.")
+    before = job.display_name
+    job.display_name = payload.display_name.strip()
+    if not job.display_name:
+        raise HTTPException(status_code=422, detail="Enter a reconciliation name.")
+    db.commit()
+    db.refresh(job)
+    record_event(scope_id=session_id, actor=actor, action="job.renamed", entity_type="job", entity_id=job.id, summary="Reconciliation name changed", before={"display_name": before}, after={"display_name": job.display_name})
+    return job
 
 
 @router.delete("", status_code=status.HTTP_200_OK)
@@ -75,6 +120,44 @@ def job_setup(
     )
 
 
+@router.get("/{job_id}/gst-plan", response_model=GstJobPlanResponse)
+def gst_job_setup(
+    job_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> dict:
+    job = get_job(db, job_id, session_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.job_type != "gst":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only GST reconciliations use this setup.")
+    try:
+        payload = GSTReconciliationRequest.model_validate(json.loads(job.settings_json or "{}"))
+    except (ValueError, ValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This GST run's setup could not be read. Start a new reconciliation instead.") from exc
+
+    source_files_1 = [item.model_dump(mode="json") for item in payload.source_files_1]
+    source_files_2 = [item.model_dump(mode="json") for item in payload.source_files_2]
+    file_ids = list(dict.fromkeys(
+        [item["file_id"] for item in source_files_1 + source_files_2]
+        + [item for item in (payload.file_1_id, payload.file_2_id) if item]
+    ))
+    records = {
+        record.id: record
+        for record in db.query(UploadedFile).filter(UploadedFile.id.in_(file_ids), UploadedFile.session_id == session_id)
+    }
+    if not file_ids or len(records) != len(file_ids):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The files from this run are no longer stored. Upload them again to reconcile.")
+    return {
+        "job_id": job.id,
+        "orientation": payload.orientation,
+        "source_files_1": source_files_1,
+        "source_files_2": source_files_2,
+        "text_threshold": payload.text_threshold,
+        "files": [UploadedFileOut.model_validate(records[file_id]) for file_id in file_ids],
+    }
+
+
 @router.post("/{job_id}/cancel", response_model=ReconciliationJobOut)
 def cancel_reconciliation_job(
     job_id: str,
@@ -120,6 +203,9 @@ def delete_reconciliation_job(
 
 @router.websocket("/{job_id}/ws")
 async def job_progress_websocket(websocket: WebSocket, job_id: str):
+    if not is_allowed_origin(websocket.headers.get("origin")):
+        await websocket.close(code=1008)
+        return
     session_id = websocket_session_id(websocket)
     await websocket.accept()
     last_progress = -1

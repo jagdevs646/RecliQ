@@ -1,19 +1,29 @@
 import json
+import hashlib
+import secrets
 import zipfile
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_actor, get_session_id
+from app.api.deps import get_actor, get_optional_user, get_session_id
+from app.core.config import get_settings
 from app.database.session import get_db
+from app.models.account import ReportAccessToken, ReportEmailDelivery, User
 from app.models.job import ReconciliationJob
 from app.models.report import Report
 from app.services.audit_service import AuditActor, record_event
+from app.services.policy_service import effective_limits, require_feature
+from app.services.quota_service import reserve_email
+from app.jobs.queue import enqueue_email_delivery
 from app.storage import get_storage
 from app.storage.base import report_data_path
 from pydantic import BaseModel
@@ -21,6 +31,44 @@ from app.reconciliation_engine.universal_reporter import generate_enterprise_rep
 
 
 router = APIRouter(prefix="/reports", tags=["reports"])
+
+
+class ReportEmailRequest(BaseModel):
+    recipients: list[EmailStr] = Field(min_length=1, max_length=50)
+    subject: str = Field(min_length=1, max_length=300)
+    message: str = Field(default="", max_length=3000)
+    include_summary: bool = True
+    delivery_method: str = Field(pattern="^(attachment|secure_link)$")
+    idempotency_key: str = Field(min_length=16, max_length=64)
+
+    @field_validator("recipients")
+    @classmethod
+    def unique_recipients(cls, values: list[EmailStr]) -> list[EmailStr]:
+        unique = list(dict.fromkeys(str(value).casefold() for value in values))
+        if len(unique) != len(values):
+            raise ValueError("Recipient addresses must be unique.")
+        return unique
+
+
+def _email_delivery_out(item: ReportEmailDelivery) -> dict[str, Any]:
+    try:
+        recipients = json.loads(item.recipients_json)
+    except json.JSONDecodeError:
+        recipients = []
+    return {
+        "id": item.id,
+        "job_id": item.job_id,
+        "report_id": item.report_id,
+        "recipients": recipients,
+        "subject": item.subject,
+        "delivery_method": item.delivery_method,
+        "status": item.status,
+        "transport": item.transport,
+        "error_message": item.error_message,
+        "created_at": item.created_at,
+        "sent_at": item.sent_at,
+        "attempt_count": item.attempt_count,
+    }
 
 
 def _job_report(db: Session, job_id: str, session_id: str) -> tuple[ReconciliationJob, Report]:
@@ -77,6 +125,202 @@ def _scoped_summary(summary: dict[str, Any], file_pair_id: str | None, sheet_rul
 
 def _report_media_type(path: Path) -> str:
     return "application/zip" if path.suffix.lower() == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.get("/shared/{token}")
+def download_shared_report(token: str, db: Session = Depends(get_db)) -> FileResponse:
+    """A recipient-specific bearer link; only its high-entropy token is public."""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    access = db.query(ReportAccessToken).filter(
+        ReportAccessToken.token_hash == token_hash,
+        ReportAccessToken.revoked_at.is_(None),
+        ReportAccessToken.expires_at > now,
+    ).first()
+    if not access:
+        raise HTTPException(status_code=404, detail="This report link is invalid, expired, or revoked.")
+    delivery = db.get(ReportEmailDelivery, access.delivery_id)
+    report = db.query(Report).filter(
+        Report.id == delivery.report_id,
+        Report.session_id == delivery.scope_id,
+    ).first() if delivery and delivery.status == "sent" else None
+    if not report:
+        raise HTTPException(status_code=404, detail="This report link is no longer available.")
+    access.accessed_at = now
+    db.commit()
+    record_event(
+        scope_id=delivery.scope_id,
+        actor=AuditActor.system("report-link"),
+        action="report.link_accessed",
+        entity_type="report",
+        entity_id=report.id,
+        summary="A recipient-specific report link was accessed",
+        metadata={"delivery_id": delivery.id},
+    )
+    path = get_storage().resolve_path(report.storage_path)
+    return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
+
+
+@router.post("/job/{job_id}/email")
+def email_job_report(
+    job_id: str,
+    payload: ReportEmailRequest,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    user: User | None = Depends(get_optional_user),
+    actor: AuditActor = Depends(get_actor),
+) -> list[dict[str, Any]]:
+    job, report = _job_report(db, job_id, session_id)
+    require_feature(db, user, "report_email")
+    limits = effective_limits(db, user)
+    if len(payload.recipients) > limits["max_email_recipients"]:
+        raise HTTPException(status_code=429, detail={
+            "code": "email_recipient_limit_exceeded",
+            "message": f"This workspace can send to at most {limits['max_email_recipients']} recipient(s) per report.",
+            "current_usage": len(payload.recipients),
+            "allowed": limits["max_email_recipients"],
+        })
+    if payload.delivery_method == "attachment" and report.size_bytes > limits["max_file_size_mb"] * 1024 * 1024:
+        raise HTTPException(status_code=413, detail={
+            "code": "email_attachment_too_large",
+            "message": "This report exceeds the workspace attachment-size limit. Choose a secure download link instead.",
+            "current_bytes": report.size_bytes,
+            "allowed_bytes": limits["max_file_size_mb"] * 1024 * 1024,
+        })
+
+    records: list[ReportEmailDelivery] = []
+    pending: list[ReportEmailDelivery] = []
+    for recipient in payload.recipients:
+        recipients_json = json.dumps([str(recipient).casefold()], separators=(",", ":"))
+        existing = db.query(ReportEmailDelivery).filter(
+            ReportEmailDelivery.scope_id == session_id,
+            ReportEmailDelivery.idempotency_key == payload.idempotency_key,
+            ReportEmailDelivery.recipients_json == recipients_json,
+        ).first()
+        if existing:
+            records.append(existing)
+            continue
+        delivery = ReportEmailDelivery(
+            scope_id=session_id,
+            job_id=job.id,
+            report_id=report.id,
+            sender_user_id=user.id if user else None,
+            recipients_json=recipients_json,
+            subject=payload.subject.strip(),
+            message=payload.message.strip(),
+            idempotency_key=payload.idempotency_key,
+            delivery_method=payload.delivery_method,
+            include_summary=payload.include_summary,
+            status="queued",
+            attempt_count=0,
+        )
+        db.add(delivery)
+        records.append(delivery)
+        pending.append(delivery)
+
+    if pending:
+        reserve_email(db, session_id, len(pending), limits["report_emails_per_day"])
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            resolved = [db.query(ReportEmailDelivery).filter(
+                ReportEmailDelivery.scope_id == session_id,
+                ReportEmailDelivery.idempotency_key == payload.idempotency_key,
+                ReportEmailDelivery.recipients_json == json.dumps([str(recipient).casefold()], separators=(",", ":")),
+            ).first() for recipient in payload.recipients]
+            if any(item is None for item in resolved):
+                raise
+            records = [item for item in resolved if item is not None]
+            pending = []
+        else:
+            for item in pending:
+                db.refresh(item)
+            record_event(
+                scope_id=session_id,
+                actor=actor,
+                action="report.email_requested",
+                entity_type="job",
+                entity_id=job.id,
+                summary=f"Requested report delivery to {len(pending)} recipient(s)",
+                after={"delivery_ids": [item.id for item in pending], "method": payload.delivery_method},
+            )
+            for item in pending:
+                try:
+                    enqueue_email_delivery(item.id)
+                except Exception as exc:
+                    item.status = "failed"
+                    item.error_message = f"The delivery could not be queued ({type(exc).__name__}). Try again later."
+                    db.commit()
+    for item in records:
+        db.refresh(item)
+    return [_email_delivery_out(item) for item in records]
+
+
+@router.get("/job/{job_id}/email")
+def list_job_report_emails(
+    job_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+) -> dict[str, list[dict[str, Any]]]:
+    _job, _report = _job_report(db, job_id, session_id)
+    deliveries = db.query(ReportEmailDelivery).filter(
+        ReportEmailDelivery.scope_id == session_id,
+        ReportEmailDelivery.job_id == job_id,
+    ).order_by(ReportEmailDelivery.created_at.desc()).limit(50).all()
+    return {"deliveries": [_email_delivery_out(item) for item in deliveries]}
+
+
+@router.delete("/email-deliveries/{delivery_id}/link", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_report_email_link(
+    delivery_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
+) -> Response:
+    delivery = db.query(ReportEmailDelivery).filter(
+        ReportEmailDelivery.id == delivery_id,
+        ReportEmailDelivery.scope_id == session_id,
+        ReportEmailDelivery.delivery_method == "secure_link",
+    ).first()
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Report email delivery not found.")
+    now = datetime.now(timezone.utc)
+    db.query(ReportAccessToken).filter(ReportAccessToken.delivery_id == delivery.id, ReportAccessToken.revoked_at.is_(None)).update({ReportAccessToken.revoked_at: now}, synchronize_session=False)
+    db.commit()
+    record_event(scope_id=session_id, actor=actor, action="report.link_revoked", entity_type="report", entity_id=delivery.report_id, summary="A report download link was revoked", metadata={"delivery_id": delivery.id})
+    return Response(status_code=204)
+
+
+@router.post("/email-deliveries/{delivery_id}/retry")
+def retry_report_email(
+    delivery_id: str,
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    user: User | None = Depends(get_optional_user),
+) -> dict[str, Any]:
+    delivery = db.query(ReportEmailDelivery).filter(
+        ReportEmailDelivery.id == delivery_id,
+        ReportEmailDelivery.scope_id == session_id,
+    ).first()
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Report email delivery not found.")
+    if delivery.status != "failed":
+        raise HTTPException(status_code=409, detail="Only failed deliveries can be retried.")
+    require_feature(db, user, "report_email")
+    limits = effective_limits(db, user)
+    reserve_email(db, session_id, 1, limits["report_emails_per_day"])
+    delivery.status = "queued"
+    delivery.error_message = None
+    db.commit()
+    try:
+        enqueue_email_delivery(delivery.id, attempt=delivery.attempt_count + 1)
+    except Exception as exc:
+        delivery.status = "failed"
+        delivery.error_message = f"The delivery could not be queued ({type(exc).__name__}). Try again later."
+        db.commit()
+    db.refresh(delivery)
+    return _email_delivery_out(delivery)
 
 
 def _report_data_file(report: Report) -> Path | None:

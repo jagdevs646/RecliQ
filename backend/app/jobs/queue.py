@@ -17,6 +17,7 @@ logger = logging.getLogger("recliq.jobs")
 _local_executor: ThreadPoolExecutor | None = None
 
 RUNNER_PATH = "app.jobs.runner.run_job"
+EMAIL_RUNNER_PATH = "app.jobs.email_runner.process_email_delivery"
 
 
 def rq_job_id(job_id: str) -> str:
@@ -65,6 +66,29 @@ def enqueue_job(job_id: str) -> None:
     else:
         _executor().submit(run_job, job_id)
     logger.info("Job queued", extra={"queued_job_id": job_id, "queue_backend": backend})
+
+
+def enqueue_email_delivery(delivery_id: str, *, attempt: int = 0) -> None:
+    """Queue one report-recipient delivery on the configured backend."""
+    settings = get_settings()
+    backend = settings.job_queue_backend.lower()
+    from app.jobs.email_runner import process_email_delivery
+
+    if backend == "redis":
+        rq_queue().enqueue(
+            EMAIL_RUNNER_PATH,
+            delivery_id,
+            job_id=f"email-{delivery_id}-{attempt}",
+            job_timeout=min(settings.job_timeout_seconds, 300),
+            result_ttl=24 * 3600,
+            failure_ttl=7 * 24 * 3600,
+            description=f"Report email delivery {delivery_id}",
+        )
+    elif backend == "sync":
+        process_email_delivery(delivery_id)
+    else:
+        _executor().submit(process_email_delivery, delivery_id)
+    logger.info("Report email queued", extra={"delivery_id": delivery_id, "queue_backend": backend})
 
 
 def is_enqueued(job_id: str) -> bool:

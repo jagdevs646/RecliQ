@@ -7,7 +7,18 @@
     <meta name="theme-color" content="#087d72" />
     <title>RecliQ - One click reconciliation</title>
     <!-- Page colour before the app loads, so there is no white flash. -->
-    <style>html, body { margin: 0; background: #f4f7f7; }</style>
+    <script>
+      try {
+        const mode = localStorage.getItem("recliq_theme") || "system";
+        const theme = mode === "system" ? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light") : mode;
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      } catch { /* Theme preference is optional. */ }
+    </script>
+    <style>
+      html, body { margin: 0; background: #f4f7f7; }
+      html[data-theme="dark"], html[data-theme="dark"] body { background: #101719; color: #edf4f3; }
+    </style>
   </head>
   <body>
     <div id="root"></div>

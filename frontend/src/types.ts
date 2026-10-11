@@ -1,4 +1,100 @@
-export type Page = "dashboard" | "upload" | "status" | "results" | "history" | "saved" | "aliases" | "audit" | "rules" | "learning";
+export type Page = "dashboard" | "upload" | "status" | "results" | "history" | "saved" | "aliases" | "audit" | "rules" | "learning" | "settings" | "support" | "admin";
+export type AdminSection = "dashboard" | "users" | "features" | "limits" | "insights" | "complaints" | "activity" | "email" | "preview";
+
+export type ThemeMode = "light" | "dark" | "system";
+
+export interface AccountIdentity {
+  authenticated: boolean;
+  user: null | {
+    id: string;
+    username: string;
+    email: string;
+    display_name: string;
+    role: "user" | "super_admin";
+    status: "active" | "restricted" | "suspended" | "deleted";
+    email_verified: boolean;
+    mfa_enabled: boolean;
+    has_password: boolean;
+    theme?: ThemeMode;
+  };
+  workspace: { type: "guest" | "account"; id: string | null; label?: string };
+  features?: Record<string, boolean>;
+  capabilities?: { report_email: boolean; email_notifications: boolean };
+}
+
+export interface WorkspaceOverview {
+  workspace: { type: "guest" | "account"; label: string; user: { id: string; username: string; display_name: string; role: string } | null };
+  period: "7d" | "30d" | "all";
+  metrics: { runs: number; matched_records: number; exceptions_flagged: number; awaiting_review: number; completed_runs: number; failed_runs: number; active_runs: number };
+  definitions: Record<string, string>;
+  activity: Array<{ date: string; runs: number }>;
+  attention: Job[];
+  recent_jobs: Job[];
+  saved_setups: Array<{ id: string; name: string; description: string; last_run_at: string | null; current_version: number }>;
+  usage: { storage_bytes: number; jobs_today: number; jobs_month: number; active_jobs: number; storage_limit_bytes: number; jobs_per_day_limit: number; jobs_per_month_limit: number; concurrent_jobs_limit: number };
+  features: Record<string, boolean>;
+}
+
+export interface AdminUser {
+  id: string; username: string; email: string; display_name: string; role: string; status: string;
+  email_verified: boolean; created_at: string; last_seen_at: string | null;
+  usage: { reconciliation_count: number; file_count: number; uploaded_bytes: number; report_count: number; report_bytes: number; storage_bytes: number; jobs_by_status: Record<string, number> };
+}
+
+export interface AdminOverview {
+  period: string;
+  accounts: { total: number; active: number; suspended: number; restricted: number; new_in_period: number; active_in_period: number };
+  jobs: { total: number; completed: number; failed: number; queued_or_processing: number; registered: number; guest: number };
+  files: { count: number; bytes: number };
+  reports: { count: number; bytes: number };
+  emails: Record<string, number>;
+  complaints: { total: number; unresolved: number; unread: number; new: number; urgent: number; high: number; by_priority: Record<string, number>; by_category: Record<string, number> };
+  activity: { jobs: Array<{ date: string; count: number }>; accounts: Array<{ date: string; count: number }> };
+  recent_admin_activity: Array<{ id: string; occurred_at: string; actor_id: string; action: string; target_type: string; target_id: string | null; result: string }>;
+  period_start: string | null;
+}
+
+export interface SupportTicket {
+  id: string;
+  category: string;
+  custom_area: string;
+  workflow_stage: string;
+  impact: string;
+  subject: string;
+  description: string;
+  expected_behavior: string;
+  reproduction_steps: string;
+  status: "new" | "in_progress" | "waiting_for_user" | "resolved";
+  priority: "low" | "normal" | "high" | "urgent";
+  requester_type: "guest" | "account";
+  requester: { user_id: string | null; username: string | null; display_name: string; email: string | null; scope_id: string };
+  created_at: string;
+  updated_at: string;
+  admin_read_at: string | null;
+  messages?: SupportTicketMessage[];
+}
+
+export interface SupportTicketMessage {
+  id: string;
+  author_type: "user" | "admin";
+  author_label: string;
+  body: string;
+  created_at: string;
+}
+
+export interface ReportEmailDelivery {
+  id: string;
+  job_id: string;
+  report_id: string;
+  recipients: string[];
+  subject: string;
+  delivery_method: "attachment" | "secure_link";
+  status: "queued" | "processing" | "sent" | "failed";
+  transport?: "smtp" | "local_log" | null;
+  error_message: string | null;
+  created_at: string;
+  sent_at: string | null;
+}
 
 export interface User {
   id: string;
@@ -162,6 +258,15 @@ export interface JobPlan {
   files: UploadedFile[];
 }
 
+export interface GstJobPlan {
+  job_id: string;
+  orientation: string;
+  source_files_1: FileSource[];
+  source_files_2: FileSource[];
+  text_threshold: number;
+  files: UploadedFile[];
+}
+
 export interface GenericPlanPayload {
   orientation: string;
   file_pairs: FilePairPayload[];
@@ -310,6 +415,7 @@ export interface Job {
   id: string;
   job_type: string;
   status: "queued" | "processing" | "completed" | "failed" | string;
+  display_name?: string | null;
   progress: number;
   orientation: string;
   error_message: string | null;
@@ -325,6 +431,9 @@ export interface Job {
   attempts?: number;
   template_id?: string | null;
   template_version?: number | null;
+  matched_records_count?: number;
+  exception_count?: number;
+  review_count?: number;
 }
 
 export interface ReconciliationSummary {

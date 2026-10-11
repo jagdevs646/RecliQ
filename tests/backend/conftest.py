@@ -15,6 +15,13 @@ os.environ.setdefault("LOCAL_STORAGE_PATH", str(_RUN_DIR / "storage"))
 os.environ.setdefault("JOB_QUEUE_BACKEND", "local")
 os.environ.setdefault("LOG_FORMAT", "text")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
+for _name in (
+    "BOOTSTRAP_ADMIN_USERNAME",
+    "BOOTSTRAP_ADMIN_EMAIL",
+    "BOOTSTRAP_ADMIN_PASSWORD",
+    "BOOTSTRAP_ADMIN_TOTP_SECRET",
+):
+    os.environ[_name] = ""
 
 import pytest  # noqa: E402
 
