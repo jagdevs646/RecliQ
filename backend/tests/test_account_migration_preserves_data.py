@@ -65,7 +65,7 @@ def test_account_migrations_preserve_populated_guest_records(tmp_path, monkeypat
         assert stored_job == (session_id, 5, 6, 3)
         assert stored_decision == ("vendor:acme", "accepted")
         assert outcome == "accepted"
-        assert version == "20261011_0002"
+        assert version == "20261012_0001"
         engine.dispose()
     finally:
         get_settings.cache_clear()

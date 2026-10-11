@@ -12,6 +12,7 @@ normalization.
 - Account session secrets are random and opaque: the browser receives an HttpOnly cookie, while only the token hash is stored in `user_sessions`. State-changing cookie-authenticated API requests require the CSRF token from `/api/auth/me`.
 - Every API read and mutation uses the workspace resolved by the backend. An authenticated cookie takes precedence over `X-Session-ID`; the guest header cannot select another workspace. Jobs and report email workers use persisted ownership and authorization checks.
 - Public registration always creates role `user`. Bootstrap Super Admin credentials and a TOTP secret are supplied only through deployment secrets. Admin APIs require an active Super Admin with MFA; the frontend route is not a security boundary.
+- Two-factor (TOTP) keys are encrypted in the database with AES-256-GCM under `MFA_ENCRYPTION_KEY` (at least 32 characters). To rotate it, put the new key first in a comma-separated list with the old one after it; start-up re-encrypts every stored key under the new one, and the old key can then be removed. Keys saved before encryption existed are encrypted at start-up. Without `MFA_ENCRYPTION_KEY` in production the keys stay unencrypted: start-up logs a warning and the admin health page shows `mfa_encryption: not_configured`. Keep the key with the database backups; without it, stored two-factor keys cannot be read and must be set up again.
 - Production startup fails unless `SESSION_COOKIE_SECURE=true` and `AUTH_CSRF_SECRET` contains at least 32 non-whitespace characters. Set both in the platform secret/configuration store; keep insecure cookies and the development fallback secret confined to local/test environments.
 - Authentication attempt counters use atomic PostgreSQL/SQLite upserts so throttles remain consistent across API processes. Login failures, registration, email recovery, and OAuth requests have separate buckets. WebSocket progress connections validate the Origin against the same allowlist as HTTP CORS.
 - API responses are marked `Cache-Control: no-store`; the API and frontend also send browser security headers. The frontend Content Security Policy permits API/WebSocket connections over HTTPS/WSS while refusing framing and plugin content.
@@ -25,7 +26,8 @@ normalization.
   pushed must still be rotated.
 - Configuration comes from environment variables: `backend/.env` locally
   (git ignores it) and the hosting platform's settings in production.
-  Render generates `AUTH_CSRF_SECRET` and keeps the other secrets entered in
+  Render generates `AUTH_CSRF_SECRET` and `MFA_ENCRYPTION_KEY` (in the
+  `render.yaml` blueprint) and keeps the other secrets entered in
   its dashboard (`render.yaml`); `scripts/deploy-azure.ps1` stores the
   database URL, storage connection string, registry password and a generated
   `AUTH_CSRF_SECRET` as Container App secrets. Azure Key Vault is not used yet (see

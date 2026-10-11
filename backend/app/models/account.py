@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.secret_box import EncryptedString
 from app.models.base import Base, IdMixin, TimestampMixin, utc_now
 
 
@@ -19,8 +20,9 @@ class User(IdMixin, TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(30), default="active", server_default="active", nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
-    mfa_secret: Mapped[str | None] = mapped_column(String(128))
-    mfa_pending_secret: Mapped[str | None] = mapped_column(String(128))
+    # Encrypted at rest (app.core.secret_box); Python code sees the plain key.
+    mfa_secret: Mapped[str | None] = mapped_column(EncryptedString(255))
+    mfa_pending_secret: Mapped[str | None] = mapped_column(EncryptedString(255))
     require_password_reset: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str | None = None
     bootstrap_admin_password: str | None = None
     bootstrap_admin_totp_secret: str | None = None
+    # Two-factor (TOTP) keys are stored encrypted with this key (AES-256-GCM).
+    # A comma-separated list rotates keys: the first encrypts, all decrypt.
+    # Local development and tests fall back to a fixed key.
+    mfa_encryption_key: str | None = None
 
     # The log transport is local-only (enforced by email_service); production
     # still requires an explicitly configured SMTP transport.
@@ -101,6 +105,8 @@ class Settings(BaseSettings):
             raise ValueError("Authentication limits and session duration must be positive integers.")
         if self.auth_csrf_secret and len(self.auth_csrf_secret.strip()) < 32:
             raise ValueError("AUTH_CSRF_SECRET must contain at least 32 non-whitespace characters.")
+        if self.mfa_encryption_key and any(len(key.strip()) < 32 for key in self.mfa_encryption_key.split(",")):
+            raise ValueError("Each MFA_ENCRYPTION_KEY must contain at least 32 non-whitespace characters.")
         if self.environment.lower() not in {"development", "test", "local"}:
             if not self.session_cookie_secure:
                 raise ValueError("SESSION_COOKIE_SECURE must be true outside local development and tests.")
@@ -129,6 +135,17 @@ class Settings(BaseSettings):
         if self.environment.lower() in {"development", "test", "local"}:
             return "recliq-local-csrf-secret-change-before-deployment"
         return ""
+
+    @property
+    def mfa_encryption_keys(self) -> list[str]:
+        """Keys for two-factor secrets, the encrypting one first. Locally the
+        fixed development key is always included, so data encrypted before a
+        key was configured can still be read (and is re-encrypted at start-up).
+        Empty in production without MFA_ENCRYPTION_KEY."""
+        keys = [key.strip() for key in (self.mfa_encryption_key or "").split(",") if key.strip()]
+        if self.environment.lower() in {"development", "test", "local"}:
+            keys.append("recliq-local-mfa-key-change-before-deployment")
+        return keys
 
 
 @lru_cache

@@ -177,6 +177,7 @@ Settings come from environment variables; see [backend/.env.example](backend/.en
 | `AUTH_CSRF_SECRET`, `AUTH_SESSION_DAYS`, `SESSION_COOKIE_SECURE` | CSRF signing, account-session duration and HTTPS-only cookies |
 | `REGISTRATION_ENABLED`, `EMAIL_BACKEND`, `SMTP_*` | registration, account verification, password recovery and report delivery |
 | `GOOGLE_CLIENT_ID/SECRET`, `FACEBOOK_CLIENT_ID/SECRET`, `LINKEDIN_CLIENT_ID/SECRET` | optional social login; disabled until credentials are configured |
+| `MFA_ENCRYPTION_KEY` | encrypts two-factor keys in the database; keep it with the backups |
 | `BOOTSTRAP_ADMIN_USERNAME/EMAIL/PASSWORD/TOTP_SECRET` | secure first Super Admin provisioning; provide real secret values outside source control |
 | `SENTRY_DSN`, `LOG_LEVEL`, `LOG_FORMAT` | error tracking and logging |
 

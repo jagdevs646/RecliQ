@@ -8,9 +8,11 @@ from pathlib import Path
 import pyotp
 from dotenv.parser import parse_stream
 from email_validator import EmailNotValidError, validate_email
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm.attributes import flag_modified
 
+from app.core import secret_box
 from app.core.config import Settings, get_settings
 from app.database.session import SessionLocal
 from app.models.account import User, UserPreference
@@ -59,6 +61,29 @@ def _diagnose_bootstrap_environment() -> None:
         file_value = file_values.get(name)
         if process_value is not None and file_value is not None and process_value != file_value:
             logger.warning("Process environment overrides %s from backend/.env (values redacted)", name)
+
+
+def encrypt_stored_mfa_secrets(db) -> int:
+    """Encrypt two-factor keys stored in plain text, and re-encrypt all of them
+    under the first key when several are configured (key rotation)."""
+    if not secret_box.encryption_enabled():
+        logger.warning("MFA_ENCRYPTION_KEY is not set: two-factor keys are stored unencrypted")
+        return 0
+    rotating = len(get_settings().mfa_encryption_keys) > 1
+    raw = db.execute(text("SELECT id, mfa_secret, mfa_pending_secret FROM users")).all()
+    pending = [
+        user_id for user_id, *values in raw
+        if any(value and (rotating or not secret_box.is_encrypted(value)) for value in values)
+    ]
+    for user_id in pending:
+        user = db.get(User, user_id)
+        for field in ("mfa_secret", "mfa_pending_secret"):
+            if getattr(user, field):
+                flag_modified(user, field)  # Written back through the encrypting column type.
+    db.commit()
+    if pending:
+        logger.info("Encrypted stored two-factor keys", extra={"accounts": len(pending)})
+    return len(pending)
 
 
 def initialize_platform_state() -> None:
@@ -155,6 +180,7 @@ def initialize_platform_state() -> None:
                     else:
                         logger.info("Provisioned the configured Super Admin; existing administrators were not changed")
         db.commit()
+        encrypt_stored_mfa_secrets(db)
     except Exception as exc:
         db.rollback()
         logger.error("Platform initialization failed (error_type=%s; sensitive values redacted)", type(exc).__name__)

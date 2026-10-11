@@ -827,5 +827,8 @@ def system_health(db: Session = Depends(get_db)) -> dict:
         health["storage"] = {"status": "unavailable"}
     email_ready = bool(email_transport_status(db)["smtp_ready"])
     health["email"] = {"status": "ready" if email_ready else "not_configured"}
+    from app.core import secret_box
+
+    health["mfa_encryption"] = {"status": "healthy" if secret_box.encryption_enabled() else "not_configured"}
     health["api"] = {"status": "healthy"}
     return {"checked_at": datetime.now(timezone.utc), "services": health}

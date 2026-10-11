@@ -105,9 +105,11 @@ $acrCredentials = Invoke-AzJson @("acr", "credential", "show", "--resource-group
 $acrPassword = $acrCredentials.passwords[0].value
 $databaseUrl = "postgresql+psycopg://${databaseAdmin}:$([uri]::EscapeDataString($databasePassword))@$postgresName.postgres.database.azure.com:5432/recliq?sslmode=require"
 # Production mode makes the backend refuse to start without HTTPS-only cookies
-# and a CSRF key. The key is generated here and kept only as a Container App
-# secret. Registration and email stay off until SMTP is configured.
+# and a CSRF key. That key and the one encrypting two-factor keys are generated
+# here and kept only as Container App secrets. Registration and email stay off
+# until SMTP is configured.
 $csrfSecret = New-RandomSecret
+$mfaEncryptionKey = New-RandomSecret
 
 Invoke-Az @("containerapp", "env", "create", "--name", $containerEnv, "--resource-group", $ResourceGroup, "--location", $Location, "--only-show-errors")
 
@@ -123,8 +125,8 @@ az containerapp create `
     --ingress external `
     --min-replicas 1 `
     --max-replicas 2 `
-    --secrets "database-url=$databaseUrl" "acr-password=$acrPassword" "storage-connection=$storageConnection" "auth-csrf-secret=$csrfSecret" `
-    --env-vars "ENVIRONMENT=production" "DATABASE_URL=secretref:database-url" "STORAGE_BACKEND=azure" "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection" "AZURE_STORAGE_CONTAINER=recliq" "SESSION_COOKIE_SECURE=true" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled" `
+    --secrets "database-url=$databaseUrl" "acr-password=$acrPassword" "storage-connection=$storageConnection" "auth-csrf-secret=$csrfSecret" "mfa-encryption-key=$mfaEncryptionKey" `
+    --env-vars "ENVIRONMENT=production" "DATABASE_URL=secretref:database-url" "STORAGE_BACKEND=azure" "AZURE_STORAGE_CONNECTION_STRING=secretref:storage-connection" "AZURE_STORAGE_CONTAINER=recliq" "SESSION_COOKIE_SECURE=true" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "MFA_ENCRYPTION_KEY=secretref:mfa-encryption-key""REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled" `
     --only-show-errors | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Unable to create the RecliQ backend Container App" }
 

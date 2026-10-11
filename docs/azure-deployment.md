@@ -26,7 +26,7 @@ Optional parameters: `-Location` (default `centralindia`), `-ResourceGroup` (def
 | Backend Container App | Port 8000, 1 to 2 replicas. Runs `alembic upgrade head` on start, then the API |
 | Frontend Container App | Nginx serving the built app, 1 to 2 replicas, built with the backend's address |
 
-The database URL, the storage connection string, the registry password and a CSRF key the script generates (`AUTH_CSRF_SECRET`, 96 random hex characters) are stored as **Container App secrets** and passed to the backend by reference (`secretref:`), never as plain environment values. The backend runs with `ENVIRONMENT=production`, so it refuses to start without `SESSION_COOKIE_SECURE=true` and that key, and with a `FRONTEND_ORIGIN` pointing at the frontend app.
+The database URL, the storage connection string, the registry password and two keys the script generates (`AUTH_CSRF_SECRET`, and `MFA_ENCRYPTION_KEY`, which encrypts two-factor keys in the database; 96 random hex characters each) are stored as **Container App secrets** and passed to the backend by reference (`secretref:`), never as plain environment values. The backend runs with `ENVIRONMENT=production`, so it refuses to start without `SESSION_COOKIE_SECURE=true` and that key, and with a `FRONTEND_ORIGIN` pointing at the frontend app.
 
 Registration and email stay off (`REGISTRATION_ENABLED=false`, `EMAIL_BACKEND=disabled`): visitors use guest workspaces. The script does not configure an email provider, a bootstrap administrator or a durable Redis worker; add them as described below, and do not enable registration until email verification works. The script also uses `az acr build`; if ACR Tasks are unavailable in the subscription, build images locally with Docker and push them with `az acr login` / `docker push` instead.
 
@@ -56,6 +56,7 @@ AZURE_STORAGE_CONTAINER=recliq
 FRONTEND_ORIGIN=https://<frontend-address>
 SESSION_COOKIE_SECURE=true
 AUTH_CSRF_SECRET=<at-least-32-random-characters-from-a-secret-store>
+MFA_ENCRYPTION_KEY=<at-least-32-random-characters-from-a-secret-store>
 AUTH_SESSION_DAYS=30
 REGISTRATION_ENABLED=false             # enable only after SMTP verification works
 EMAIL_BACKEND=disabled                 # set to smtp when configured
@@ -93,8 +94,10 @@ A backend created by an earlier version of the script has no `ENVIRONMENT`, so i
 ```powershell
 $bytes = New-Object byte[] 48; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
 $csrf = -join ($bytes | ForEach-Object { $_.ToString("x2") })
-az containerapp secret set --name <backend-app> --resource-group <resource-group> --secrets "auth-csrf-secret=$csrf"
-az containerapp update --name <backend-app> --resource-group <resource-group> --set-env-vars "ENVIRONMENT=production" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled"
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$mfaKey = -join ($bytes | ForEach-Object { $_.ToString("x2") })
+az containerapp secret set --name <backend-app> --resource-group <resource-group> --secrets "auth-csrf-secret=$csrf" "mfa-encryption-key=$mfaKey"
+az containerapp update --name <backend-app> --resource-group <resource-group> --set-env-vars "ENVIRONMENT=production" "AUTH_CSRF_SECRET=secretref:auth-csrf-secret" "MFA_ENCRYPTION_KEY=secretref:mfa-encryption-key" "REGISTRATION_ENABLED=false" "EMAIL_BACKEND=disabled"
 ```
 
 Do the same for the frontend (`docker/frontend.azure.Dockerfile`, passing `--build-arg VITE_API_BASE_URL=https://<backend-address>/api`). Review the Alembic changes and take a database backup before the new backend starts, because its container command runs migrations automatically. To roll back, point the app at the previous image tag or revision (`az containerapp revision list`); a code rollback does not automatically reverse database migrations.
