@@ -21,14 +21,15 @@ concurrency:
 jobs:
   speed:
     name: Engine speed, 100,000 rows
-    runs-on: ubuntu-latest
+    # Pinned: the baseline is only comparable on the same runner image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       BASELINE_FILE: perf-baseline/keyed-100000.json
       BASELINE_KEY: perf-baseline-keyed-100000-v${{ vars.PERF_BASELINE_VERSION || '1' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -37,7 +38,7 @@ jobs:
         run: pip install -r backend/requirements.txt psutil==7.2.2
       - name: Restore the baseline
         id: baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: perf-baseline
           key: ${{ env.BASELINE_KEY }}
@@ -47,13 +48,13 @@ jobs:
         run: python scripts/perf/nightly_check.py 100000 keyed "$BASELINE_FILE"
       - name: Save the first baseline
         if: steps.baseline.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: perf-baseline
           key: ${{ env.BASELINE_KEY }}
       - name: Keep the measurement
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-results
           path: scripts/perf/results.jsonl
