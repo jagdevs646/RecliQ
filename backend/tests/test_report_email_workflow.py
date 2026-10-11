@@ -4,13 +4,15 @@ import json
 import re
 import smtplib
 
+import pyotp
 import pytest
 from fastapi.testclient import TestClient
 
 from app.database.session import SessionLocal
-from app.models.account import PlatformPolicy, ReportEmailDelivery
+from app.models.account import PlatformPolicy, ReportEmailDelivery, User
 from app.models.job import ReconciliationJob
 from app.models.report import Report
+from app.services.account_security import hash_password
 from app.storage import get_storage
 
 
@@ -63,6 +65,73 @@ def _create_guest_report(session_id: str, tmp_path) -> str:
         return job.id
     finally:
         db.close()
+
+
+def _login_test_admin(client: TestClient) -> None:
+    secret = pyotp.random_base32()
+    db = SessionLocal()
+    try:
+        user = User(
+            username="deliveryadmin",
+            username_key="deliveryadmin",
+            email="deliveryadmin@example.test",
+            email_key="deliveryadmin@example.test",
+            display_name="Delivery Admin",
+            password_hash=hash_password("email-admin-test-password-8721"),
+            role="super_admin",
+            status="active",
+            email_verified=True,
+            mfa_enabled=True,
+            mfa_secret=secret,
+        )
+        db.add(user)
+        db.commit()
+    finally:
+        db.close()
+    response = client.post("/api/auth/login", json={
+        "identifier": "deliveryadmin",
+        "password": "email-admin-test-password-8721",
+        "totp_code": pyotp.TOTP(secret).now(),
+    })
+    assert response.status_code == 200, response.text
+
+
+def test_admin_email_delivery_summary_and_history_are_paginated(client: TestClient, tmp_path):
+    session_id = client.get("/api/session").json()["session_id"]
+    job_id = _create_guest_report(session_id, tmp_path)
+    db = SessionLocal()
+    try:
+        report_id = db.query(ReconciliationJob).filter_by(id=job_id).one().report_id
+        for index, delivery_status in enumerate(("queued", "processing", "sent", "failed", "sent")):
+            db.add(ReportEmailDelivery(
+                scope_id=session_id,
+                job_id=job_id,
+                report_id=report_id,
+                recipients_json=json.dumps([f"recipient{index}@example.test"]),
+                subject="Reconciliation report",
+                idempotency_key=f"admin-delivery-test-{index}",
+                delivery_method="secure_link",
+                status=delivery_status,
+                transport="smtp" if delivery_status == "sent" else None,
+            ))
+        db.commit()
+    finally:
+        db.close()
+
+    assert client.get("/api/admin/email-deliveries/summary").status_code == 401
+    _login_test_admin(client)
+
+    summary_response = client.get("/api/admin/email-deliveries/summary")
+    assert summary_response.status_code == 200, summary_response.text
+    summary = summary_response.json()
+    assert summary["total"] == 5
+    assert summary["by_status"] == {"queued": 1, "processing": 1, "sent": 2, "failed": 1}
+    assert summary["updated_at"]
+
+    page = client.get("/api/admin/email-deliveries?status=failed&offset=0&limit=1")
+    assert page.status_code == 200, page.text
+    assert page.json()["total"] == 1
+    assert page.json()["deliveries"][0]["recipients"] == ["recipient3@example.test"]
 
 
 def test_guest_email_report_uses_secure_revocable_link_and_idempotency(client: TestClient, tmp_path, monkeypatch):

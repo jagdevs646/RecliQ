@@ -41,6 +41,7 @@
 | Scrollbar | Global application stylesheet | `DESIGN.md`, CSS tokens | Stable gutter only when needed | Computed style and browser inspection |
 | Toast | Existing inline status/alert regions; no separate toast provider is present | Existing sibling UI | Success / error / info | Live-region browser check |
 | CRUD | FastAPI-scoped services and route-specific mutation feedback | `docs/api.md`, `docs/support-policy.md` | Create returns to ticket list; reply stays in detail | API integration tests |
+| Email delivery monitoring | Database status summary and paginated recipient table in the shared modal | `ReportEmailDelivery`, `/admin/email-deliveries/summary`, `/admin/email-deliveries` | Status-filtered or all-deliveries detail | Summary refresh and recipient pagination tests |
 
 ## Component behavior
 
@@ -57,6 +58,7 @@
 - Admin tables use server pagination; default page size is 25, maximum 100.
 - Search and filters are debounced 300ms, IME-safe, and stale responses cannot replace newer results.
 - Complaint lists preserve filters and reset to page one when filters change. No bulk selection is offered.
+- Email delivery status counts come from a database aggregate; recipient records load only when the detail modal is open and stay server-paginated. Counts refresh every 30 seconds while Email Management is active.
 - Empty, no-results, loading, and request-error states remain inside the list panel.
 - Search state is transient and is not put in the URL because complaint search may contain personal account identifiers.
 
@@ -69,6 +71,7 @@
 | Triage complaint | Status/priority control and `Save changes` | Pessimistic request; preserve draft | Same complaint detail | “Complaint updated” | Preserve selected values and allow retry | Detail heading | `docs/support-policy.md` |
 | Recover password locally | Forgot-password form or reset link from verification dialog | Preserve email and show pending state | Reset form from returned development link | “Local password reset link ready. No email was sent.” | Show request error without revealing account existence in production | Reset form heading | `backend/app/api/routes/auth.py`, `frontend/src/components/AuthDialog.tsx` |
 | Change platform sender | Admin email management form | Disable duplicate save; keep draft on error | Same settings panel | “Sender address saved.” | Preserve draft and show actionable error | Sender email field | `backend/app/api/routes/admin.py` |
+| Inspect report email deliveries | Status count or `View all deliveries` | Keep the summary visible; show modal loading state | Paginated delivery history filtered to the selected status | Matching delivery count and recipient records | Keep selected filter and offer retry | Modal heading | `backend/app/api/routes/admin.py`, `frontend/src/pages/AdminPage.tsx` |
 | Search complaints/users | Search field | Debounced server query | Same route and page one | Result count | Keep query; show retry | Search field | This contract |
 | Account security action | Named action | App-owned modal confirmation | Same account detail | Server-confirmed status | Keep modal open on failure | Modal or initiating action | `docs/operations-and-security.md` |
 
@@ -84,7 +87,7 @@
 ## Overlays and feedback
 
 - Browser `alert`, `confirm`, and `prompt` are prohibited. Use a semantic modal dialog with native modal focus containment or a maintained app dialog.
-- Account and complaint detail dialogs open only after the corresponding row or request is activated. Their backdrops dim and softly blur the page; closing a dialog preserves the list and current detail drafts.
+- Account, complaint, and report-email detail dialogs open only after the corresponding row or action is activated. Their backdrops dim and softly blur the page; closing a dialog preserves the list and current filters.
 - Account status, session, and policy changes require explicit object-specific confirmation and an audit reason where the API supports one.
 - Support submission and admin replies are in-app only. Creating a complaint never triggers email.
 - Success and errors are announced using existing `role=status` / `role=alert` inline messages; failure details remain visible for correction.

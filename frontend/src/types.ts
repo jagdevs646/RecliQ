@@ -54,6 +54,25 @@ export interface AdminOverview {
   period_start: string | null;
 }
 
+export type AdminEmailDeliveryStatus = "queued" | "processing" | "sent" | "failed";
+
+export interface AdminEmailDeliverySummary {
+  total: number;
+  by_status: Record<AdminEmailDeliveryStatus, number>;
+  updated_at: string | null;
+}
+
+export interface AdminEmailDeliveryRecord {
+  id: string;
+  recipients: string[];
+  status: AdminEmailDeliveryStatus;
+  delivery_method: "attachment" | "secure_link";
+  transport: "smtp" | "local_log" | null;
+  created_at: string;
+  sent_at: string | null;
+  error_type: string | null;
+}
+
 export interface SupportTicket {
   id: string;
   category: string;

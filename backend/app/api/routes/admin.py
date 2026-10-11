@@ -725,6 +725,19 @@ def admin_audit(
     return {"events": [{"sequence": item.id, "event_id": item.event_id, "occurred_at": item.occurred_at, "actor_id": item.actor_id, "action": item.action, "target_type": item.target_type, "target_id": item.target_id, "result": item.result, "before": _json(item.before_json, None), "after": _json(item.after_json, None), "metadata": _json(item.metadata_json, {})} for item in events], "total": total, "offset": offset, "limit": limit}
 
 
+@router.get("/email-deliveries/summary")
+def admin_email_delivery_summary(db: Session = Depends(get_db)) -> dict:
+    counts = {name: 0 for name in ("queued", "processing", "sent", "failed")}
+    for delivery_status, count in db.query(ReportEmailDelivery.status, func.count(ReportEmailDelivery.id)).group_by(ReportEmailDelivery.status):
+        if delivery_status in counts:
+            counts[delivery_status] = count
+    return {
+        "total": db.query(func.count(ReportEmailDelivery.id)).scalar() or 0,
+        "by_status": counts,
+        "updated_at": db.query(func.max(ReportEmailDelivery.updated_at)).scalar(),
+    }
+
+
 @router.get("/email-deliveries")
 def admin_email_deliveries(
     delivery_status: str | None = Query(default=None, alias="status"),

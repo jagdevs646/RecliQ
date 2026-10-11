@@ -3,7 +3,7 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent, type Poi
 import { api } from "../services/api";
 import { AppModal } from "../components/AppModal";
 import { AutoResizeTextarea } from "../components/AutoResizeTextarea";
-import type { AdminOverview, AdminSection, AdminUser } from "../types";
+import type { AdminEmailDeliveryRecord, AdminEmailDeliveryStatus, AdminEmailDeliverySummary, AdminOverview, AdminSection, AdminUser } from "../types";
 import { AdminComplaintsPanel } from "./AdminComplaintsPanel";
 import { AdminProductInsights } from "./AdminProductInsights";
 import { AdminExperiencePreview } from "./AdminExperiencePreview";
@@ -67,6 +67,8 @@ const limitLabels: Record<string, string> = {
 };
 const periods = [["today", "Today"], ["7d", "7 days"], ["30d", "30 days"], ["custom", "Custom"], ["all", "All time"]] as const;
 const OPERATIONS_PAGE_SIZE = 10;
+const emailStatusOrder: AdminEmailDeliveryStatus[] = ["queued", "processing", "sent", "failed"];
+const emailStatusLabels: Record<AdminEmailDeliveryStatus, string> = { queued: "Queued", processing: "Processing", sent: "Sent", failed: "Failed" };
 const adminTitles: Record<AdminTab, string> = {
   dashboard: "Platform dashboard", users: "User management", features: "Feature management", limits: "Usage & limits",
   insights: "Product insights", complaints: "Complaints", activity: "Audit & activity", email: "Email management",
@@ -138,10 +140,16 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [detailMessage, setDetailMessage] = useState("");
-  const [emailRows, setEmailRows] = useState<Array<Record<string, unknown>>>([]);
+  const [emailRows, setEmailRows] = useState<AdminEmailDeliveryRecord[]>([]);
   const [emailTotal, setEmailTotal] = useState(0);
-  const [emailStatus, setEmailStatus] = useState("");
+  const [emailStatus, setEmailStatus] = useState<AdminEmailDeliveryStatus | "">("");
   const [emailOffset, setEmailOffset] = useState(0);
+  const [emailSummary, setEmailSummary] = useState<AdminEmailDeliverySummary | null>(null);
+  const [emailSummaryLoading, setEmailSummaryLoading] = useState(true);
+  const [emailSummaryError, setEmailSummaryError] = useState("");
+  const [emailDeliveriesOpen, setEmailDeliveriesOpen] = useState(false);
+  const [emailDeliveriesLoading, setEmailDeliveriesLoading] = useState(false);
+  const [emailDeliveriesError, setEmailDeliveriesError] = useState("");
   const [emailSettings, setEmailSettings] = useState<PlatformEmailSettings | null>(null);
   const [emailSenderDraft, setEmailSenderDraft] = useState("");
   const [emailSettingsLoading, setEmailSettingsLoading] = useState(false);
@@ -170,6 +178,7 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
   const detailRequestSequence = useRef(0);
   const auditRequestSequence = useRef(0);
   const emailRequestSequence = useRef(0);
+  const emailSummaryRequestSequence = useRef(0);
 
   async function reloadOverview() {
     if (period === "custom" && (!dateFrom || !dateTo)) return;
@@ -210,10 +219,34 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
   }
   async function reloadEmailDeliveries() {
     const requestId = ++emailRequestSequence.current;
+    setEmailDeliveriesLoading(true);
+    setEmailDeliveriesError("");
+    setEmailRows([]);
+    setEmailTotal(0);
     try {
-      const result = await api.adminEmailDeliveries({ status: emailStatus || undefined, offset: emailOffset, limit: OPERATIONS_PAGE_SIZE }) as { deliveries: Array<Record<string, unknown>>; total: number };
+      const result = await api.adminEmailDeliveries({ status: emailStatus || undefined, offset: emailOffset, limit: OPERATIONS_PAGE_SIZE });
       if (requestId === emailRequestSequence.current) { setEmailRows(result.deliveries); setEmailTotal(result.total); }
-    } catch (caught) { if (requestId === emailRequestSequence.current) setError(caught instanceof Error ? caught.message : "Could not load report delivery history."); }
+    } catch (caught) { if (requestId === emailRequestSequence.current) setEmailDeliveriesError(caught instanceof Error ? caught.message : "Could not load report delivery history."); }
+    finally { if (requestId === emailRequestSequence.current) setEmailDeliveriesLoading(false); }
+  }
+  async function reloadEmailSummary() {
+    const requestId = ++emailSummaryRequestSequence.current;
+    setEmailSummaryLoading(true);
+    setEmailSummaryError("");
+    try {
+      const result = await api.adminEmailDeliverySummary();
+      if (requestId === emailSummaryRequestSequence.current) setEmailSummary(result);
+    } catch (caught) {
+      if (requestId === emailSummaryRequestSequence.current) setEmailSummaryError(caught instanceof Error ? caught.message : "Could not load delivery totals.");
+    } finally {
+      if (requestId === emailSummaryRequestSequence.current) setEmailSummaryLoading(false);
+    }
+  }
+  function openEmailDeliveries(status: AdminEmailDeliveryStatus | "" = "") {
+    setEmailStatus(status);
+    setEmailOffset(0);
+    setEmailDeliveriesError("");
+    setEmailDeliveriesOpen(true);
   }
   async function reloadEmailSettings() {
     setEmailSettingsLoading(true);
@@ -230,9 +263,20 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
   useEffect(() => { if (adminTab !== "users") return; const timer = window.setTimeout(() => { void reloadUsers(); }, 300); return () => window.clearTimeout(timer); }, [adminTab, query, statusFilter, roleFilter, userSort, userPage, userPageSize, createdFrom, createdTo, activeFrom, activeTo, runsMin, runsMax, storageMin, storageMax]);
   useEffect(() => { if (["features", "limits", "users", "preview"].includes(adminTab)) void reloadPolicy(); if (adminTab === "features") void api.oauthProviders().then(setProviders).catch(() => undefined); }, [adminTab]);
   useEffect(() => { if (adminTab !== "activity") return; const timer = window.setTimeout(() => { void reloadAudit(); }, 200); return () => window.clearTimeout(timer); }, [adminTab, auditAction, auditTarget, auditSource, auditFrom, auditTo, auditOffset]);
-  useEffect(() => { if (adminTab === "email") void reloadEmailDeliveries(); }, [adminTab, emailStatus, emailOffset]);
+  useEffect(() => {
+    if (adminTab !== "email") return;
+    void reloadEmailSummary();
+    const timer = window.setInterval(() => void reloadEmailSummary(), 30_000);
+    return () => { window.clearInterval(timer); emailSummaryRequestSequence.current += 1; };
+  }, [adminTab]);
+  useEffect(() => {
+    if (adminTab !== "email" || !emailDeliveriesOpen) return;
+    void reloadEmailDeliveries();
+    return () => { emailRequestSequence.current += 1; };
+  }, [adminTab, emailStatus, emailOffset, emailDeliveriesOpen]);
   useEffect(() => { if (adminTab === "email") void reloadEmailSettings(); }, [adminTab]);
   useEffect(() => { if (adminTab === "users") void reloadDetail(selectedId); }, [adminTab, selectedId]);
+  useEffect(() => { if (adminTab !== "email") setEmailDeliveriesOpen(false); }, [adminTab]);
   useEffect(() => { if (adminTab !== "users") { setUserDetailOpen(false); setSelectedId(""); } }, [adminTab]);
   useEffect(() => { try { localStorage.setItem(USER_GRID_PREFS_KEY, JSON.stringify(userGridPrefs)); } catch { /* Preferences are optional and remain usable for this visit. */ } }, [userGridPrefs]);
   useEffect(() => { if (userIdFilter) setSelectedId(userIdFilter); }, [userIdFilter]);
@@ -451,7 +495,7 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
   }
 
   return <section className="page admin-page">
-    <div className="page-title"><div><span className="eyebrow">Restricted area</span><h1>{adminTitles[adminTab]}</h1><p>{adminTab === "dashboard" ? "Platform health, account activity, service usage, and incoming support." : "Platform-wide settings and activity. Workspace data remains private."}</p></div><button className="secondary" type="button" disabled={busy || emailSettingsLoading} onClick={() => { if (adminTab === "dashboard") void reloadOverview(); if (adminTab === "users") void reloadUsers(); if (["features", "limits"].includes(adminTab)) void reloadPolicy(); if (adminTab === "email") { void reloadEmailSettings(); void reloadEmailDeliveries(); } }}><RefreshCw size={16} />Refresh</button></div>
+    <div className="page-title"><div><span className="eyebrow">Restricted area</span><h1>{adminTitles[adminTab]}</h1><p>{adminTab === "dashboard" ? "Platform health, account activity, service usage, and incoming support." : "Platform-wide settings and activity. Workspace data remains private."}</p></div><button className="secondary" type="button" disabled={busy || emailSettingsLoading} onClick={() => { if (adminTab === "dashboard") void reloadOverview(); if (adminTab === "users") void reloadUsers(); if (["features", "limits"].includes(adminTab)) void reloadPolicy(); if (adminTab === "email") { void reloadEmailSettings(); void reloadEmailSummary(); if (emailDeliveriesOpen) void reloadEmailDeliveries(); } }}><RefreshCw size={16} />Refresh</button></div>
     {message && <p className="success-text" role="status">{message}</p>}{error && <p className="error-text" role="alert">{error}</p>}
     {adminTab === "dashboard" && <>
     <div className="admin-dashboard-filters"><div className="admin-period segmented-control" role="group" aria-label="Dashboard period">{periods.map(([value, label]) => <button key={value} type="button" className={period === value ? "is-active" : ""} aria-pressed={period === value} onClick={() => setPeriod(value as typeof period)}>{label}</button>)}</div>
@@ -557,12 +601,28 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
         </form>
         <p id="admin-email-sender-help" className="muted admin-email-help">SMTP host and authentication stay in backend environment secrets. For Gmail, use the matching account and a Google App Password; never enter a normal Google password here. The configured From address must be accepted by your mail provider.</p>
       </section>
-      <section className="admin-section"><div className="section-heading"><div><h2>Report email delivery</h2><p>Review queued, processing, sent, and failed deliveries without exposing report contents.</p></div><Mail size={19} /></div>
-      <label className="admin-delivery-filter">Delivery status<select value={emailStatus} onChange={(event) => { setEmailOffset(0); setEmailStatus(event.target.value); }}><option value="">All statuses</option><option value="queued">Queued</option><option value="processing">Processing</option><option value="sent">Sent</option><option value="failed">Failed</option></select></label>
-      {emailRows.length ? emailRows.map((item, index) => <p className="admin-event-row" key={String(item.id ?? index)}><strong>{String(item.status ?? "")}{item.transport === "local_log" ? " · local log only" : item.transport === "smtp" ? " · SMTP" : ""}</strong><small>{Array.isArray(item.recipients) ? item.recipients.join(", ") : "Recipient metadata unavailable"} · {item.created_at ? new Date(String(item.created_at)).toLocaleString() : ""}</small></p>) : <p className="muted">No report email attempts match this status.</p>}
-      <div className="pagination"><span>Page {Math.floor(emailOffset / OPERATIONS_PAGE_SIZE) + 1} of {Math.max(1, Math.ceil(emailTotal / OPERATIONS_PAGE_SIZE))} · {emailTotal} deliveries</span><div><button type="button" className="secondary compact" disabled={emailOffset === 0} onClick={() => setEmailOffset((value) => Math.max(0, value - OPERATIONS_PAGE_SIZE))}>Previous</button><button type="button" className="secondary compact" disabled={emailOffset + OPERATIONS_PAGE_SIZE >= emailTotal} onClick={() => setEmailOffset((value) => value + OPERATIONS_PAGE_SIZE)}>Next</button></div></div>
+      <section className="admin-section"><div className="section-heading"><div><h2>Report email delivery</h2><p>Delivery totals refresh every 30 seconds. Open a status to inspect recipients and delivery issues.</p></div><button type="button" className="icon-button" aria-label="Refresh delivery totals" title="Refresh delivery totals" disabled={emailSummaryLoading} onClick={() => void reloadEmailSummary()}><RefreshCw size={16} aria-hidden="true" /></button></div>
+        {emailSummaryError && <p className="error-text" role="alert">{emailSummary ? "Delivery totals could not be refreshed. Showing the last successful totals." : emailSummaryError}</p>}
+        {!emailSummary && emailSummaryLoading && <p className="muted" role="status">Loading delivery totals…</p>}
+        {!emailSummary && !emailSummaryLoading && emailSummaryError && <button className="secondary compact" type="button" onClick={() => void reloadEmailSummary()}>Retry</button>}
+        {emailSummary && <>
+          <div className="admin-email-status-grid" aria-label="Report email counts by delivery status">
+            {emailStatusOrder.map((status) => <button className={`admin-email-status-card is-${status}`} type="button" key={status} onClick={() => openEmailDeliveries(status)} aria-label={`View ${emailSummary.by_status[status].toLocaleString()} ${status} deliveries`}><span>{emailStatusLabels[status]}</span><strong>{emailSummary.by_status[status].toLocaleString()}</strong><small>View recipients</small></button>)}
+          </div>
+          <div className="admin-email-summary-footer"><span><strong>{emailSummary.total.toLocaleString()}</strong> total delivery records{emailSummary.updated_at ? ` · Updated ${new Date(emailSummary.updated_at).toLocaleTimeString()}` : ""}{emailSummaryLoading ? " · Refreshing" : ""}</span><button className="secondary compact" type="button" onClick={() => openEmailDeliveries()}>View all deliveries</button></div>
+        </>}
       </section>
     </>}
+    <AppModal open={emailDeliveriesOpen} title="Report email deliveries" eyebrow="Recipient delivery history" size="wide" onClose={() => setEmailDeliveriesOpen(false)}>
+      <div className="admin-email-detail">
+        <div className="admin-email-detail-toolbar"><label htmlFor="admin-email-history-status">Delivery status<select id="admin-email-history-status" value={emailStatus} onChange={(event) => { setEmailOffset(0); setEmailStatus(event.target.value as AdminEmailDeliveryStatus | ""); }}><option value="">All statuses</option>{emailStatusOrder.map((status) => <option key={status} value={status}>{emailStatusLabels[status]}</option>)}</select></label><div className="admin-email-detail-actions"><span>{emailTotal.toLocaleString()} matching deliveries</span><button className="secondary compact" type="button" disabled={emailDeliveriesLoading} onClick={() => void reloadEmailDeliveries()}><RefreshCw size={14} aria-hidden="true" />Refresh list</button></div></div>
+        {emailDeliveriesError && <p className="error-text" role="alert">{emailDeliveriesError}<button className="secondary compact" type="button" onClick={() => void reloadEmailDeliveries()}>Retry</button></p>}
+        <div className="table-panel admin-email-history"><div className="table-scroll-x"><table><thead><tr><th>Recipient</th><th>Status</th><th>Transport</th><th>Delivery</th><th>Requested</th><th>Sent</th><th>Issue</th></tr></thead><tbody>
+          {emailDeliveriesLoading ? <tr><td colSpan={7} className="table-empty" role="status">Loading delivery records…</td></tr> : emailRows.length ? emailRows.map((item) => <tr key={item.id}><td className="admin-email-recipients">{item.recipients.length ? item.recipients.map((recipient) => <span key={recipient}>{recipient}</span>) : "Recipient unavailable"}</td><td><span className={`admin-email-state is-${item.status}`}>{emailStatusLabels[item.status]}</span></td><td>{item.transport === "local_log" ? "Local log only" : item.transport === "smtp" ? "SMTP" : "—"}</td><td>{item.delivery_method === "secure_link" ? "Secure link" : "Attachment"}</td><td>{new Date(item.created_at).toLocaleString()}</td><td>{item.sent_at ? new Date(item.sent_at).toLocaleString() : "—"}</td><td>{item.error_type || "—"}</td></tr>) : <tr><td colSpan={7} className="table-empty">{emailDeliveriesError ? "Could not load delivery records." : "No report email deliveries match this status."}</td></tr>}
+        </tbody></table></div></div>
+        <div className="pagination"><span>{emailTotal ? `${emailOffset + 1}–${Math.min(emailOffset + emailRows.length, emailTotal)} of ${emailTotal.toLocaleString()} deliveries` : "0 deliveries"} · Page {Math.floor(emailOffset / OPERATIONS_PAGE_SIZE) + 1} of {Math.max(1, Math.ceil(emailTotal / OPERATIONS_PAGE_SIZE))}</span><div><button className="secondary compact" type="button" disabled={emailDeliveriesLoading || emailOffset === 0} onClick={() => setEmailOffset((value) => Math.max(0, value - OPERATIONS_PAGE_SIZE))}>Previous</button><button className="secondary compact" type="button" disabled={emailDeliveriesLoading || emailOffset + OPERATIONS_PAGE_SIZE >= emailTotal} onClick={() => setEmailOffset((value) => value + OPERATIONS_PAGE_SIZE)}>Next</button></div></div>
+      </div>
+    </AppModal>
     <dialog ref={confirmationRef} className="admin-confirm-dialog" aria-labelledby="admin-confirm-title" aria-describedby="admin-confirm-description" onCancel={(event) => { event.preventDefault(); setPendingAction(null); setDialogError(""); }}>
       <div className="dialog-heading"><div><span className="eyebrow">Confirm administrator action</span><h2 id="admin-confirm-title">{pendingAction?.kind === "status" ? `${pendingAction.status === "active" ? "Reactivate" : pendingAction.status === "restricted" ? "Restrict" : "Suspend"} ${pendingAction.user.username}` : pendingAction?.command === "revoke" ? `Revoke sessions for ${pendingAction.username}` : pendingAction?.command === "reset" ? `Require password reset for ${pendingAction?.username}` : `Mark ${pendingAction?.kind === "command" ? pendingAction.username : "account"} deleted`}</h2></div><button type="button" className="icon-button" aria-label="Close confirmation" onClick={() => setPendingAction(null)}>×</button></div>
       <p id="admin-confirm-description">{pendingAction?.kind === "command" && pendingAction.command === "delete" ? "This revokes account access and marks the account deleted. Existing records are retained; no source files are opened or removed." : "This action affects account access and will be recorded in the administrator audit trail."}</p>

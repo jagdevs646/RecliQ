@@ -1,4 +1,4 @@
-import type { AccountIdentity, AdminOverview, AdminUser, AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, GstJobPlan, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportEmailDelivery, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile, WorkspaceOverview, SupportTicket, SupportTicketMessage } from "../types";
+import type { AccountIdentity, AdminEmailDeliveryRecord, AdminEmailDeliverySummary, AdminOverview, AdminUser, AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, GstJobPlan, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportEmailDelivery, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile, WorkspaceOverview, SupportTicket, SupportTicketMessage } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -508,7 +508,11 @@ export class ApiClient {
     return this.request(`/admin/users/${id}/revoke-sessions`, { method: "POST", body: JSON.stringify({ reason }) });
   }
 
-  async adminEmailDeliveries(params: { status?: string; offset?: number; limit?: number } = {}): Promise<unknown> {
+  async adminEmailDeliverySummary(): Promise<AdminEmailDeliverySummary> {
+    return this.request("/admin/email-deliveries/summary");
+  }
+
+  async adminEmailDeliveries(params: { status?: string; offset?: number; limit?: number } = {}): Promise<{ deliveries: AdminEmailDeliveryRecord[]; total: number; offset: number; limit: number }> {
     const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "").map(([key, value]) => [key, String(value)]));
     return this.request(`/admin/email-deliveries?${query.toString()}`);
   }
