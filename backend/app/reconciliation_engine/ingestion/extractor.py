@@ -47,8 +47,39 @@ def finance_format(file_path: Path, filename: str) -> str | None:
     return fmt
 
 
-# .xls (Excel 97-2003) needs xlrd; pandas' default engine only reads .xlsx.
-_EXCEL_ENGINES = {".xlsx": "openpyxl", ".xls": "xlrd"}
+# .xls (Excel 97-2003) needs xlrd. Calamine is faster for .xlsx, with openpyxl
+# retained as a compatibility fallback for workbooks it cannot read.
+_EXCEL_ENGINES = {".xlsx": "calamine", ".xls": "xlrd"}
+
+
+def _excel_engines(extension: str) -> tuple[str, ...]:
+    engine = _EXCEL_ENGINES[extension]
+    return (engine, "openpyxl") if extension == ".xlsx" else (engine,)
+
+
+def _read_excel_table(file_path: Path, extension: str, **kwargs) -> pd.DataFrame:
+    last_error = None
+    for engine in _excel_engines(extension):
+        try:
+            return pd.read_excel(file_path, engine=engine, **kwargs)
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"No Excel reader is configured for {extension} files.")
+
+
+def _read_excel_sheet_names(file_path: Path, extension: str) -> list[str]:
+    last_error = None
+    for engine in _excel_engines(extension):
+        try:
+            with pd.ExcelFile(file_path, engine=engine) as workbook:
+                return workbook.sheet_names
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise ValueError(f"No Excel reader is configured for {extension} files.")
 
 
 def _max_rows() -> int | None:
@@ -84,8 +115,7 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
 
     if ext in _EXCEL_ENGINES:
         try:
-            with pd.ExcelFile(file_path, engine=_EXCEL_ENGINES[ext]) as xl:
-                return [{"id": sheet, "name": sheet} for sheet in xl.sheet_names]
+            return [{"id": sheet, "name": sheet} for sheet in _read_excel_sheet_names(file_path, ext)]
         except Exception as e:
             raise ValueError(f"Failed to read Excel file: {e}")
             
@@ -133,10 +163,9 @@ _MEMORY_CACHE_SIZE = 6
 _memory_cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
 _cache_guard = threading.Lock()
 _parse_locks: dict[tuple, threading.Lock] = {}
-# Bump whenever a reader changes what it returns, so pickles parsed by the old
-# code are not served for files uploaded before the change.
-# 2: PDF tables merged across pages; text overflowing a cell kept in its cell.
-_READER_VERSION = 2
+# Bump whenever a reader changes, so parsed sheets from an older reader are not
+# reused after the .xlsx calamine fast path is enabled.
+_READER_VERSION = 3
 
 
 def _cache_path(file_path: Path, sheet_id: str) -> Path:
@@ -227,7 +256,7 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
             pass
     ext = get_file_extension(filename)
     if ext in _EXCEL_ENGINES:
-        return pd.read_excel(file_path, sheet_name=sheet_id, nrows=nrows, engine=_EXCEL_ENGINES[ext])
+        return _read_excel_table(file_path, ext, sheet_name=sheet_id, nrows=nrows)
     if ext in [".csv", ".txt", ".tsv"] and not finance_format(file_path, filename):
         return pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=nrows)
     return read_table_data(file_path, filename, sheet_id).head(nrows)
@@ -242,7 +271,7 @@ def read_table_columns(file_path: Path, filename: str, sheet_id: str) -> list[st
         return [str(column) for column in cached.columns]
     ext = get_file_extension(filename)
     if ext in _EXCEL_ENGINES:
-        return [str(column) for column in pd.read_excel(file_path, sheet_name=sheet_id, nrows=0, engine=_EXCEL_ENGINES[ext]).columns]
+        return [str(column) for column in _read_excel_table(file_path, ext, sheet_name=sheet_id, nrows=0).columns]
     if ext in [".csv", ".txt", ".tsv"] and not finance_format(file_path, filename):
         return [str(column) for column in pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=0).columns]
     return [str(column) for column in read_table_data(file_path, filename, sheet_id).columns]
@@ -309,7 +338,7 @@ def _parse_table_unchecked(file_path: Path, filename: str, sheet_id: str) -> pd.
         return sheets[sheet_id]
 
     if ext in _EXCEL_ENGINES:
-        return pd.read_excel(file_path, sheet_name=sheet_id, engine=_EXCEL_ENGINES[ext])
+        return _read_excel_table(file_path, ext, sheet_name=sheet_id)
         
     elif ext in ['.csv', '.txt']:
         return pd.read_csv(file_path)

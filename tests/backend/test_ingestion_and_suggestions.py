@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
@@ -26,6 +27,65 @@ def test_sheets_are_parsed_once_and_callers_get_independent_copies(tmp_path: Pat
 
     clear_table_cache(path)
     assert not list(tmp_path.glob("ledger.xlsx.sheet-*.pkl"))
+
+
+def test_calamine_and_openpyxl_read_edge_case_workbook_identically(tmp_path: Path):
+    path = tmp_path / "reader-edges.xlsx"
+    workbook = __import__("xlsxwriter").Workbook(str(path))
+    sheet = workbook.add_worksheet("Data")
+    date_format = workbook.add_format({"num_format": "yyyy-mm-dd"})
+    datetime_format = workbook.add_format({"num_format": "yyyy-mm-dd hh:mm:ss"})
+    percent_format = workbook.add_format({"num_format": "0.00%"})
+    sheet.write_row(0, 0, [
+        "Date", "DateTime", "LongRef", "LeadingZero", "Blank", "Mixed", "Percent", "Boolean",
+        "MergedStart", "MergedEnd", "Formula",
+    ])
+    sheet.write_datetime(1, 0, datetime(2026, 10, 12), date_format)
+    sheet.write_datetime(1, 1, datetime(2026, 10, 12, 14, 30, 45), datetime_format)
+    sheet.write_string(1, 2, "12345678901234567890")
+    sheet.write_string(1, 3, "0000123")
+    sheet.write_blank(1, 4, None)
+    sheet.write_number(1, 5, 12)
+    sheet.write_number(1, 6, 0.125, percent_format)
+    sheet.write_boolean(1, 7, True)
+    sheet.merge_range(1, 8, 1, 9, "merged value")
+    sheet.write_formula(1, 10, "=1+2", None, 3)
+    sheet.write_datetime(2, 0, datetime(2026, 10, 13), date_format)
+    sheet.write_datetime(2, 1, datetime(2026, 10, 13, 9, 15), datetime_format)
+    sheet.write_string(2, 2, "123456789012345")
+    sheet.write_string(2, 3, "000000")
+    sheet.write_blank(2, 4, None)
+    sheet.write_string(2, 5, "twelve")
+    sheet.write_number(2, 6, 0.5, percent_format)
+    sheet.write_boolean(2, 7, False)
+    sheet.write_string(2, 8, "separate cell")
+    sheet.write_blank(2, 9, None)
+    sheet.write_formula(2, 10, "=2+3", None, 5)
+    workbook.close()
+
+    openpyxl_frame = pd.read_excel(path, sheet_name="Data", engine="openpyxl")
+    calamine_frame = pd.read_excel(path, sheet_name="Data", engine="calamine")
+
+    pd.testing.assert_frame_equal(openpyxl_frame, calamine_frame, check_dtype=True)
+
+
+def test_xlsx_reader_falls_back_to_openpyxl(monkeypatch, tmp_path: Path):
+    from app.reconciliation_engine.ingestion import extractor
+
+    calls = []
+
+    def read_excel(file_path, *, engine, **kwargs):
+        calls.append(engine)
+        if engine == "calamine":
+            raise ValueError("unsupported workbook feature")
+        return pd.DataFrame({"Value": [1]})
+
+    monkeypatch.setattr(extractor.pd, "read_excel", read_excel)
+
+    result = extractor._read_excel_table(tmp_path / "sample.xlsx", ".xlsx", sheet_name="Data")
+
+    assert calls == ["calamine", "openpyxl"]
+    assert result.to_dict("records") == [{"Value": 1}]
 
 
 def test_key_suggestion_uses_data_not_just_names():
