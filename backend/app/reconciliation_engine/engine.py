@@ -600,7 +600,10 @@ def _run_generic_reconciliation(
             "Date-only matching can be ambiguous because multiple transactions may occur on the same date. "
             "Select at least one additional identifying column or explicitly enable the date-only override."
         )
-    indexed_matcher = IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types) if has_keys else None
+    indexed_matcher = (
+        IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types, build_fuzzy_indexes=False)
+        if has_keys else None
+    )
     file_2_records = indexed_matcher.rows if indexed_matcher is not None else file_2_df.to_dict('records')
     is_composite_key = len(file_1_match_keys) > 1
     primary_key_1 = file_1_match_keys[0] if has_keys else None

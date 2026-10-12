@@ -62,6 +62,42 @@ def test_indexed_matcher_uses_every_composite_key_component():
     assert result.status == "Exact composite key match"
 
 
+def test_generic_index_mode_builds_only_identity_and_secondary_candidate_maps():
+    matcher = EngineCandidateMatcher(
+        pd.DataFrame({"INVOICE": ["INV-001", "INV-002"]}),
+        "INVOICE",
+        "invoice",
+        build_fuzzy_indexes=False,
+    )
+
+    assert matcher.identity_map
+    assert matcher.compact_map
+    assert matcher.token_blocks
+    assert matcher.find_exact_candidates("INV/001")[0][0] == 0
+    assert matcher.exact_map == {}
+    assert matcher.token_key_map == {}
+    assert matcher.synonym_key_map == {}
+    assert matcher.date_map == {}
+
+
+def test_default_index_mode_retains_maps_used_by_gst_best_match():
+    matcher = EngineCandidateMatcher(
+        pd.DataFrame({"INVOICE": ["INV-001", "INV-002"]}),
+        "INVOICE",
+        "invoice",
+    )
+
+    assert matcher.exact_map
+    assert matcher.compact_map
+    assert matcher.token_key_map
+    assert matcher.synonym_key_map
+    assert matcher.token_blocks
+    index, row, result = matcher.find_best_match("INV/001", "INVOICE")
+    assert index == 0
+    assert row is not None and row["INVOICE"] == "INV-001"
+    assert result is not None and result.matched
+
+
 def test_canonical_date_parser_uses_one_day_first_convention():
     assert parse_date_value("07/09/2026") == date(2026, 9, 7)
     assert parse_date_value("2026-09-07") == date(2026, 9, 7)

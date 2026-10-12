@@ -350,6 +350,7 @@ class IndexedCandidateMatcher:
         candidates_df: pd.DataFrame,
         candidate_column: str | Sequence[str],
         matcher_type: str | Sequence[str],
+        build_fuzzy_indexes: bool = True,
     ):
         self.candidates_df = candidates_df
         self.candidate_columns = [candidate_column] if isinstance(candidate_column, str) else list(candidate_column)
@@ -365,6 +366,7 @@ class IndexedCandidateMatcher:
         self.candidate_column = self.candidate_columns[0]
         self.matcher_type = "composite" if self.is_composite else matcher_types[0]
         self.threshold = match_threshold(self.matcher_type)
+        self.build_fuzzy_indexes = build_fuzzy_indexes
 
         self.rows: List[dict] = []
         self.indices: List[object] = []
@@ -415,32 +417,30 @@ class IndexedCandidateMatcher:
             if identity:
                 self.identity_map.setdefault(identity, []).append(pos)
 
-            # 1. Exact normalized map
-            norm = normalize_text(raw_val)
-            if norm:
-                self.exact_map.setdefault(norm, []).append(pos)
-
             # 2. Compact identifier map
             compact = compact_identifier(raw_val)
             if compact:
                 self.compact_map.setdefault(compact, []).append(pos)
 
-            # 3. Sorted token key map
-            t_key = sorted_token_key(raw_val)
-            if t_key:
-                self.token_key_map.setdefault(t_key, []).append(pos)
+            if self.build_fuzzy_indexes:
+                norm = normalize_text(raw_val)
+                if norm:
+                    self.exact_map.setdefault(norm, []).append(pos)
 
-            # 4. Synonym sorted token key map
-            syn_key = sorted_token_key(raw_val, use_synonyms=True)
-            if syn_key:
-                self.synonym_key_map.setdefault(syn_key, []).append(pos)
+                t_key = sorted_token_key(raw_val)
+                if t_key:
+                    self.token_key_map.setdefault(t_key, []).append(pos)
+
+                syn_key = sorted_token_key(raw_val, use_synonyms=True)
+                if syn_key:
+                    self.synonym_key_map.setdefault(syn_key, []).append(pos)
 
             # 5. Token blocks for fallback scanning
             for t in tokens(raw_val, use_synonyms=True):
                 self.token_blocks.setdefault(t, []).append(pos)
 
             # 6. Date map
-            if self.matcher_type == "date":
+            if self.build_fuzzy_indexes and self.matcher_type == "date":
                 date_val = parse_date_value(raw_val)
                 if date_val:
                     self.date_map.setdefault(date_val.isoformat(), []).append(pos)
