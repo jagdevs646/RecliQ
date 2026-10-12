@@ -228,7 +228,10 @@ def detect_primary_key_type(
     ) or bool(re.search(r"\b(?:no|number)\s*$", normalized_name))
     if explicit_identifier:
         return "identifier"
-    return detect_matcher_type(values, column_name, other_column_name)
+    sample = non_empty_values(values or [], limit=100)
+    if sample and sum(bool(re.fullmatch(r"\d{16,}", str(value).strip())) for value in sample) / len(sample) >= 0.8:
+        return "identifier"
+    return detect_matcher_type(sample, column_name, other_column_name)
 
 
 def match_threshold(matcher_type: str) -> int:

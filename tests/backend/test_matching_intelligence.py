@@ -108,6 +108,19 @@ def test_primary_key_type_uses_identifier_suffix_without_changing_credit_amounts
     assert detect_primary_key_type([100, 200], "Credit", "Credit") == "numeric"
 
 
+def test_long_digit_primary_keys_are_text_and_keep_the_last_digit_distinct(tmp_path: Path):
+    references = ["12345678901234567890", "12345678901234567891"]
+    result = _run(
+        tmp_path,
+        [{"Key": reference, "Amount": amount} for reference, amount in zip(references, (10, 20))],
+        [{"Key": reference, "Amount": amount} for reference, amount in zip(references, (10, 20))],
+        key_file_1=["Key"], key_file_2=["Key"],
+    )
+
+    assert result["summary"]["exact_matches"] == 2
+    assert result["summary"]["field_discrepancies"] == 0
+
+
 # ── Engine integration ─────────────────────────────────────────────────────
 def test_name_secondary_key_matches_after_normalization_with_explanation(tmp_path: Path):
     """The user's example: ID + Name, where the names differ only in legal form."""

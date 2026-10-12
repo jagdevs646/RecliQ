@@ -165,7 +165,7 @@ _cache_guard = threading.Lock()
 _parse_locks: dict[tuple, threading.Lock] = {}
 # Bump whenever a reader changes, so parsed sheets from an older reader are not
 # reused after the .xlsx calamine fast path is enabled.
-_READER_VERSION = 3
+_READER_VERSION = 4
 
 
 def _cache_path(file_path: Path, sheet_id: str) -> Path:
@@ -258,7 +258,7 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
     if ext in _EXCEL_ENGINES:
         return _read_excel_table(file_path, ext, sheet_name=sheet_id, nrows=nrows)
     if ext in [".csv", ".txt", ".tsv"] and not finance_format(file_path, filename):
-        return pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=nrows)
+        return pd.read_csv(file_path, sep="\t" if ext == ".tsv" else ",", nrows=nrows, dtype=object)
     return read_table_data(file_path, filename, sheet_id).head(nrows)
 
 
@@ -341,10 +341,10 @@ def _parse_table_unchecked(file_path: Path, filename: str, sheet_id: str) -> pd.
         return _read_excel_table(file_path, ext, sheet_name=sheet_id)
         
     elif ext in ['.csv', '.txt']:
-        return pd.read_csv(file_path)
+        return pd.read_csv(file_path, dtype=object)
         
     elif ext == '.tsv':
-        return pd.read_csv(file_path, sep='\t')
+        return pd.read_csv(file_path, sep='\t', dtype=object)
         
     elif ext == '.pdf':
         from app.reconciliation_engine.ingestion.pdf_tables import extract_tables, find_table

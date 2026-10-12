@@ -29,6 +29,40 @@ def test_sheets_are_parsed_once_and_callers_get_independent_copies(tmp_path: Pat
     assert not list(tmp_path.glob("ledger.xlsx.sheet-*.pkl"))
 
 
+def test_long_digit_references_remain_text_when_reading_excel(tmp_path: Path):
+    path = tmp_path / "long-references.xlsx"
+    workbook = __import__("xlsxwriter").Workbook(str(path))
+    sheet = workbook.add_worksheet("Data")
+    sheet.write_row(0, 0, ["Reference", "Amount"])
+    sheet.write_string(1, 0, "12345678901234567890")
+    sheet.write_number(1, 1, 10)
+    sheet.write_string(2, 0, "12345678901234567891")
+    sheet.write_number(2, 1, 20)
+    sheet.write_number(3, 0, 1.25)
+    sheet.write_number(3, 1, 30)
+    sheet.write_blank(4, 0, None)
+    sheet.write_number(4, 1, 40)
+    workbook.close()
+
+    result = read_table_data(path, path.name, "Data")
+
+    assert result["Reference"].iloc[:2].tolist() == ["12345678901234567890", "12345678901234567891"]
+
+
+def test_long_digit_references_remain_text_when_reading_csv(tmp_path: Path):
+    path = tmp_path / "long-references.csv"
+    path.write_text(
+        "Reference,Amount\n12345678901234567890,10\n12345678901234567891,20\n1.25,30\n,40\n",
+        encoding="utf-8",
+    )
+
+    result = read_table_data(path, path.name, "default")
+
+    assert result["Reference"].iloc[:2].tolist() == ["12345678901234567890", "12345678901234567891"]
+    sample = read_table_sample(path, path.name, "default", 2)
+    assert sample["Reference"].tolist() == ["12345678901234567890", "12345678901234567891"]
+
+
 def test_calamine_and_openpyxl_read_edge_case_workbook_identically(tmp_path: Path):
     path = tmp_path / "reader-edges.xlsx"
     workbook = __import__("xlsxwriter").Workbook(str(path))
