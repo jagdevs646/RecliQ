@@ -83,6 +83,32 @@ def test_precheck_blocks_missing_columns_and_passes_clean_data():
     assert broken["status"] == "blockers" and "NET AMOUNT" in _issues(broken)["missing_column"][0]["message"]
 
 
+def test_precheck_types_keys_and_compared_fields_the_way_the_run_does():
+    references = [f"98765432109876543{i:03d}" for i in range(1, 9)]  # 20-digit bank references.
+    rows = [
+        {"UTR": reference, "Invoice Value": f"INV-{i:03d}", "Tax Code": f"GST{(5, 12, 18, 28)[i % 4]}", "Inv Amt": 100 + i}
+        for i, reference in enumerate(references, 1)
+    ]
+    with TestClient(app) as client:
+        source = upload(client, "books.xlsx", {"S": [*rows[:-1], {**rows[-1], "Inv Amt": "TBD"}]})
+        destination = upload(client, "bank.xlsx", {"D": rows})
+        result = _precheck(client, single_rule_plan(source, destination, "S", "D", **{
+            "matching_strategy": {"primary_key_source": ["UTR"], "primary_key_destination": ["UTR"]},
+            "reconciliation_mapping": [
+                {"file_1_fields": [column], "file_2_fields": [column]} for column in ("Invoice Value", "Tax Code", "Inv Amt")
+            ],
+        }))
+
+    issues = _issues(result)
+    # The run keeps long references distinct, so none repeats.
+    assert "duplicate_keys" not in issues
+    # The run compares invoice references and tax codes as identifiers, even
+    # under an amount-like header, so neither is "compared as an amount".
+    assert "type_mismatch" not in issues
+    # The run compares Inv Amt as an amount, so its "TBD" is reported.
+    assert [(issue["column"], issue["count"]) for issue in issues["non_numeric"]] == [("INV AMT", 1)]
+
+
 def test_local_precheck_runs_as_a_persisted_background_task(monkeypatch):
     from app.core.config import get_settings
 

@@ -14,6 +14,7 @@ import pandas as pd
 from app.reconciliation_engine.cache import normalize_text
 from app.reconciliation_engine.matching.indexed_matcher import (
     detect_matcher_type,
+    detect_primary_key_type,
     non_empty_values,
     normalized_identity_value,
 )
@@ -72,7 +73,8 @@ def _score_pair(df1: pd.DataFrame, df2: pd.DataFrame, source: str, destination: 
     completeness = (sample_1.notna().mean() + sample_2.notna().mean()) / 2
     if completeness < 0.9:
         return None
-    matcher_type = detect_matcher_type(
+    # Typed as the run would type this pair if it were chosen as the key.
+    matcher_type = detect_primary_key_type(
         non_empty_values(list(sample_1.head(100)) + list(sample_2.head(100))), source, destination
     )
     values_1, values_2 = _normalized_values(sample_1, matcher_type), _normalized_values(sample_2, matcher_type)

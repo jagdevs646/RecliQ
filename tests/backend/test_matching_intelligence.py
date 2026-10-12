@@ -108,6 +108,112 @@ def test_primary_key_type_uses_identifier_suffix_without_changing_credit_amounts
     assert detect_primary_key_type([100, 200], "Credit", "Credit") == "numeric"
 
 
+@pytest.mark.parametrize("header", [
+    "INVOICE VALUE", "INVOICE AMOUNT", "INV TOTAL", "Taxable Invoice Value", "Total Invoice Value",
+    "Invoice Tax Amount", "Inv Amt", "Invoice Val", "Tax Invoice Value",
+])
+def test_invoice_amount_headers_with_numeric_values_are_compared_as_numbers(header):
+    from app.reconciliation_engine.matching.indexed_matcher import detect_compared_field_type
+
+    assert detect_compared_field_type(["708", "472", "1180"], header, header) == "numeric"
+
+
+def test_invoice_number_headers_keep_identifier_semantics():
+    from app.reconciliation_engine.matching.indexed_matcher import detect_compared_field_type, detect_primary_key_type
+
+    assert detect_compared_field_type(["INV-001", "INV-002"], "INVOICE NO.", "INVOICE NO.") == "invoice"
+    assert detect_compared_field_type([1001, 1002], "INVOICE NO.", "INVOICE NO.") == "invoice"
+    assert detect_compared_field_type([1001, 1002], "Invoice Number", "Inv #") == "invoice"
+    assert detect_compared_field_type([1001, 1002], "INVOICE", "INVOICE") == "invoice"
+    assert detect_compared_field_type([1001, 1002], "Invoice/Credit Note No", "Invoice/Credit Note No") == "invoice"
+    assert detect_compared_field_type(["01/08/2026", "02/08/2026"], "INVOICE DATE", "INVOICE DATE") == "date"
+    # Primary keys are unchanged: a key column keeps identifier semantics.
+    assert detect_primary_key_type([708, 1180], "INVOICE VALUE", "INVOICE VALUE") == "invoice"
+
+
+@pytest.mark.parametrize("header", [
+    "Tax Invoice", "Tax Invoice #", "Tax Invoice ID", "Tax Invoice Ref", "Creditor Invoice", "Credit Invoice",
+    "Debit Invoice", "Invoice/Credit Note", "Invoice/Credit Note Ref", "Debit Note/Invoice", "Inv Num", "Invoice Code",
+])
+def test_invoice_document_type_and_reference_headers_stay_invoice_numbers(header):
+    """Tax, credit or debit naming the document, or an identifier ending such
+    as "#", "ID" or "Ref", is not an amount on the invoice."""
+    from app.reconciliation_engine.matching.indexed_matcher import detect_compared_field_type, detect_matcher_type
+
+    assert detect_matcher_type([], header, header) == "invoice"
+    assert detect_compared_field_type([1001, 1002], header, header) == "invoice"
+    assert detect_compared_field_type(["INV-001", "INV-002"], header, header) == "invoice"
+
+
+@pytest.mark.parametrize("header", ["Tax Invoice", "Tax Invoice #", "Creditor Invoice", "Invoice/Credit Note Ref"])
+def test_all_digit_invoice_numbers_are_not_added_up_when_rows_combine(tmp_path: Path, header):
+    source = [
+        {"Voucher No": "V1", header: 1001, "Amount": 600},
+        {"Voucher No": "V1", header: 1001, "Amount": 400},
+        {"Voucher No": "V2", header: 1002, "Amount": 50},
+    ]
+    destination = [
+        {"Voucher No": "V1", header: 1001, "Amount": 1000},
+        {"Voucher No": "V2", header: 1002, "Amount": 50},
+    ]
+
+    result = _run(
+        tmp_path, source, destination, key_file_1=["Voucher No"], key_file_2=["Voucher No"],
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}, {"file_1_fields": [header], "file_2_fields": [header]}],
+    )
+
+    assert result["universal_data"]["exceptions"] == []  # Not 1001 + 1001 = 2002 against 1001.
+    assert result["summary"]["fully_matched_records"] == 2
+
+
+def test_mostly_digit_invoice_numbers_with_a_prefixed_one_still_combine_rows(tmp_path: Path):
+    numbers = {f"V{i}": 1000 + i for i in range(3, 12)}
+    source = [
+        {"Voucher No": "V2", "Tax Invoice": "A-17", "Amount": 50},
+        {"Voucher No": "V2", "Tax Invoice": "A-17", "Amount": 25},
+        *({"Voucher No": key, "Tax Invoice": number, "Amount": 10} for key, number in numbers.items()),
+    ]
+    destination = [
+        {"Voucher No": "V2", "Tax Invoice": "A-17", "Amount": 75},
+        *({"Voucher No": key, "Tax Invoice": number, "Amount": 10} for key, number in numbers.items()),
+    ]
+
+    # Typed as amounts, "A-17" would stop the whole run when V2's rows combine.
+    result = _run(
+        tmp_path, source, destination, key_file_1=["Voucher No"], key_file_2=["Voucher No"],
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}, {"file_1_fields": ["Tax Invoice"], "file_2_fields": ["Tax Invoice"]}],
+    )
+
+    assert result["universal_data"]["exceptions"] == []
+    assert result["summary"]["fully_matched_records"] == 10
+
+
+def test_invoice_value_is_summed_when_rows_combine_and_differences_are_numeric(tmp_path: Path):
+    source = [
+        {"INVOICE NO.": "INV-002", "INVOICE VALUE": 708},
+        {"INVOICE NO.": "INV-002", "INVOICE VALUE": 472},
+        {"INVOICE NO.": "INV-004", "INVOICE VALUE": 590},
+    ]
+    destination = [
+        {"INVOICE NO.": "INV-002", "INVOICE VALUE": 1180},
+        {"INVOICE NO.": "INV-004", "INVOICE VALUE": 595},
+    ]
+    options = {
+        "key_file_1": ["INVOICE NO."], "key_file_2": ["INVOICE NO."],
+        "rules": [{"file_1_fields": ["INVOICE VALUE"], "file_2_fields": ["INVOICE VALUE"]}],
+    }
+
+    result = _run(tmp_path, source, destination, **options)
+    differences = {row["Primary Key"]: row for row in result["universal_data"]["exceptions"]}
+    assert set(differences) == {"INV-004"}  # 708 + 472 = 1180 is no difference.
+    assert differences["INV-004"]["Difference"] == pytest.approx(-5)
+
+    within = _run(tmp_path, source, destination, tolerances=[{"field": "INVOICE VALUE", "amount": 5}], **options)
+    assert within["universal_data"]["exceptions"] == []
+    assert within["summary"]["fully_matched_records"] == 2
+    assert within["summary"]["within_tolerance_records"] == 1
+
+
 def test_long_digit_primary_keys_are_text_and_keep_the_last_digit_distinct(tmp_path: Path):
     references = ["12345678901234567890", "12345678901234567891"]
     result = _run(

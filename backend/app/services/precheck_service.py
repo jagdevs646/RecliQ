@@ -22,7 +22,13 @@ import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.reconciliation_engine.cache import is_blank, normalize_header, to_number, use_date_convention
-from app.reconciliation_engine.matching.indexed_matcher import detect_matcher_type, non_empty_values, normalized_identity_value
+from app.reconciliation_engine.matching.indexed_matcher import (
+    detect_compared_field_type,
+    detect_matcher_type,
+    detect_primary_key_type,
+    non_empty_values,
+    normalized_identity_value,
+)
 from app.reconciliation_engine.normalization.entities import build_normalizer, use_normalizer
 from app.reconciliation_engine.transformations import apply_transformations
 from app.schemas.reconciliation import ReconciliationPlan
@@ -179,8 +185,10 @@ def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
     # ── Keys ──────────────────────────────────────────────────────────────
     identities: dict[str, pd.Series] = {}
     if keys["source"]:
+        # Typed as the run types its keys, so "Invoice Value" or "Tax ID" keys
+        # keep the identity the run gives them.
         key_types = [
-            detect_matcher_type(non_empty_values(list(df1[s].head(500)) + list(df2[d].head(500)), limit=200), s, d)
+            detect_primary_key_type(non_empty_values(list(df1[s].head(500)) + list(df2[d].head(500)), limit=200), s, d)
             for s, d in zip(keys["source"], keys["destination"])
         ]
         for side, df in frames.items():
@@ -235,7 +243,11 @@ def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
         if len(left) != 1 or len(right) != 1:
             continue
         column_1, column_2 = left[0], right[0]
-        kind = detect_matcher_type(non_empty_values(list(df1[column_1].head(300)) + list(df2[column_2].head(300)), limit=200), column_1, column_2)
+        # Typed as the run types compared fields: by the values of both columns,
+        # with the headers only refining identifiers and names.
+        kind = detect_compared_field_type(
+            non_empty_values(df1[column_1].head(100)) + non_empty_values(df2[column_2].head(100)), column_1, column_2
+        )
         share_1, bad_1 = _numeric_share(df1[column_1])
         share_2, bad_2 = _numeric_share(df2[column_2])
         if kind == "numeric" or (share_1 >= 0.9 and share_2 >= 0.9):
@@ -257,7 +269,9 @@ def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
             issues.append(_issue("warning", "type_mismatch",
                                  f"{column_1} ↔ {column_2}: one side holds numbers and the other text, so values will rarely agree.",
                                  column=f"{column_1} ↔ {column_2}"))
-        if kind == "date":
+        # A column named as a date is checked even when its values do not read as
+        # dates under the current day/month order: that is what the check is for.
+        if kind == "date" or detect_matcher_type([], column_1, column_2) == "date":
             date_columns["source"].add(column_1)
             date_columns["destination"].add(column_2)
 

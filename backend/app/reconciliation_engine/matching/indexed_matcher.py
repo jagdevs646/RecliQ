@@ -63,6 +63,23 @@ NUMERIC_NAME_HINTS = (
     "total",
 )
 
+# An amount word turns an "Invoice ..." header into an amount on the invoice
+# ("Invoice Value", "Inv Total"), not the invoice number.
+INVOICE_AMOUNT_NAME_HINTS = NUMERIC_NAME_HINTS + (
+    "taxable", "gross", "net", "sum", "price", "cost", "fee", "charge", "val",
+)
+
+# A header that ends like an identifier ("Invoice No.", "Tax Invoice #",
+# "Invoice/Credit Note Ref") names the invoice itself. Read from the raw
+# header, because normalize_text drops the "#".
+_IDENTIFIER_ENDING = re.compile(r"(?:(?<![a-z0-9])(?:no|number|num|id|ref|reference|code)|#)[\s.:]*$")
+
+# Words in an invoice header that are not amounts: "creditor" (a party, which
+# would otherwise match "credit"), and tax, credit or debit naming the kind of
+# document just before invoice/inv/note ("Tax Invoice", "Credit Invoice",
+# "Invoice/Credit Note", "Debit Note/Invoice").
+_INVOICE_NON_AMOUNT_WORDS = re.compile(r"\bcreditors?\b|\b(?:(?:tax|credit|debit)\s+)+(?=(?:invoice|inv|note)\b)")
+
 DATE_NAME_HINTS = ("date", "dt", "period")
 NAME_HINTS = ("name", "party", "vendor", "supplier", "customer", "trader", "firm", "company")
 
@@ -108,6 +125,18 @@ def _name_has_hint(column_name: str, hints: Sequence[str]) -> bool:
     )
 
 
+def _names_invoice_amount(column_name: str, other_column_name: str) -> bool:
+    """An "Invoice Value" or "INV TOTAL" header holds an amount. A header that
+    ends like an identifier ("Tax Invoice #", "Invoice/Credit Note No") or only
+    names the kind of document ("Tax Invoice", "Credit Invoice") still names the
+    invoice itself, so all-digit invoice numbers are never added up."""
+    names = (str(column_name), str(other_column_name))
+    if any(_IDENTIFIER_ENDING.search(name.strip().lower()) for name in names):
+        return False
+    words = " ".join(_INVOICE_NON_AMOUNT_WORDS.sub(" ", normalize_text(name)) for name in names)
+    return _name_has_hint(words, INVOICE_AMOUNT_NAME_HINTS)
+
+
 def _looks_like_gstin(value: object) -> bool:
     compact = compact_identifier(value).upper()
     return bool(re.fullmatch(r"\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]", compact))
@@ -138,7 +167,7 @@ def detect_matcher_type(
     if _name_has_hint(combined_name, ("pan",)):
         return "pan"
     if _name_has_hint(combined_name, ("invoice", "inv")):
-        return "invoice"
+        return "numeric" if _names_invoice_amount(column_name, other_column_name) else "invoice"
     if _name_has_hint(combined_name, DATE_NAME_HINTS):
         return "date"
     if _name_has_hint(combined_name, NUMERIC_NAME_HINTS):

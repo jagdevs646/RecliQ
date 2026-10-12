@@ -143,6 +143,18 @@ def test_key_suggestion_uses_data_not_just_names():
     assert result["date_columns_2"] == ["POSTING DATE"]
 
 
+def test_key_suggestion_keeps_long_digit_references_distinct():
+    """The run reads 16+ digit references as text, so the suggestion must too."""
+    references = [f"98765432109876543{i:03d}" for i in range(1, 60)]
+    source = prepare_dataframe(pd.DataFrame({"UTR": references, "Amount": [i * 10 for i in range(1, 60)]}))
+    destination = prepare_dataframe(pd.DataFrame({"UTR": references, "Amount": [i * 10 for i in range(1, 60)]}))
+
+    result = analyze_keys(source, destination)
+
+    assert result["recommended_key"] == ["UTR"]
+    assert result["recommended_key_destination"] == ["UTR"]
+
+
 def test_short_name_hints_match_whole_words_only():
     assert detect_matcher_type([], "Invoice Date", "Invoice Date") == "date"
     assert detect_matcher_type([], "Company", "Company") == "company_name"  # Not a PAN.
