@@ -409,6 +409,46 @@ def test_duplicate_numeric_rows_with_a_non_numeric_value_are_rejected(tmp_path: 
         )
 
 
+def test_numeric_field_report_keeps_subcent_differences(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.234"]}),
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.238"]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+        write_report=False,
+    )
+
+    assert result["summary"]["field_discrepancies"] == 1
+    assert result["universal_data"]["exceptions"][0]["Difference"] == pytest.approx(-0.004)
+    assert result["universal_data"]["metadata"]["numeric_precision"][0] == {
+        "file_1_fields": ["AMOUNT"],
+        "file_2_fields": ["AMOUNT"],
+        "decimal_places": 3,
+        "source": "detected",
+    }
+
+
+def test_numeric_rule_can_configure_comparison_precision(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.231"]}),
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.234"]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"], "comparison_type": "numeric", "decimal_precision": 2}],
+        write_report=False,
+    )
+
+    assert result["summary"]["field_discrepancies"] == 0
+    assert result["universal_data"]["metadata"]["numeric_precision"][0]["source"] == "configured"
+
+
 def test_secondary_key_alone_never_pairs_records_with_unrelated_keys(tmp_path: Path):
     """A missing invoice is 'not found', not 'ambiguous', when vendors repeat."""
     file1 = tmp_path / "online.xlsx"

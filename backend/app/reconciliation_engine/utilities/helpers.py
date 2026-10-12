@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Iterable, Sequence
 
 import pandas as pd
 
-from app.reconciliation_engine.cache import is_blank, to_number
+from app.reconciliation_engine.cache import is_blank, to_decimal, to_number
 
 
 def collect_rule_value(row: dict, fields: list[str]) -> tuple[object, str | None]:
     values = [row[field] for field in fields if field in row]
-    numbers = [to_number(value) for value in values]
+    numbers = [to_decimal(value) for value in values]
 
     if values and all(number is not None or is_blank(value) for value, number in zip(values, numbers)):
         if len(values) > 1:
-            return round(sum(number or 0.0 for number in numbers), 2), "numeric"
+            return sum((number or Decimal(0) for number in numbers), Decimal(0)), "numeric"
         if numbers and numbers[0] is not None:
             return values[0], "numeric"
 

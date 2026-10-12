@@ -159,7 +159,7 @@ def test_execution_rules_keep_each_file_pair_and_sheet_rule_independent():
                                 "primary_key_source": ["Invoice"],
                                 "primary_key_destination": ["Document"],
                             },
-                            "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Net"], "comparison_type": "numeric"}],
+                            "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Net"], "comparison_type": "numeric", "decimal_precision": 3}],
                             "report_label": "North reconciliation",
                         }
                     ],
@@ -192,6 +192,7 @@ def test_execution_rules_keep_each_file_pair_and_sheet_rule_independent():
     assert rules[1]["key_file_1"] == ["Reference", "Entity"]
     assert rules[0]["rules"][0]["file_1_fields"] == ["Amount"]
     assert rules[0]["rules"][0]["comparison_type"] == "numeric"
+    assert rules[0]["rules"][0]["decimal_precision"] == 3
     assert rules[1]["rules"][0]["file_1_fields"] == ["Paid"]
 
 

@@ -106,6 +106,27 @@ def test_numeric_key_identity_uses_integer_form_for_whole_number_values():
     assert normalized_identity_value(1001.25, "numeric") == "1001.25"
 
 
+def test_numeric_comparison_preserves_differences_beyond_two_decimal_places():
+    result = compare_values("1.234", "1.238", "Amount", "Amount", "numeric")
+
+    assert not result.matched
+    assert result.detail == "Difference: -0.004"
+
+
+def test_numeric_comparison_honors_explicit_decimal_precision():
+    result = compare_values("1.231", "1.234", "Amount", "Amount", "numeric", decimal_precision=2)
+
+    assert result.matched
+
+
+def test_decimal_precision_inference_uses_maximum_scale_and_rejects_non_finite_values():
+    from app.reconciliation_engine.cache import infer_decimal_precision, to_decimal
+
+    assert infer_decimal_precision(["1", "2.30", "3.456", "NaN", "Infinity"]) == 3
+    assert to_decimal("NaN") is None
+    assert to_decimal("Infinity") is None
+
+
 def test_canonical_date_parser_uses_one_day_first_convention():
     assert parse_date_value("07/09/2026") == date(2026, 9, 7)
     assert parse_date_value("2026-09-07") == date(2026, 9, 7)

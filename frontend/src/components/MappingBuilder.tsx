@@ -223,7 +223,16 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
     {toleranceNotice}
     {editTolerances && rules.length > 0 && <div className="mapping-list-heading"><span>Mapped fields</span><span>Tolerance (optional) <ToleranceHelp destinationLabel={file2Name ?? "the destination file"} /></span></div>}
     <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}>
-      <div className="mapping-rule-source"><span>{rule.file_1_fields.join(" + ")}</span><label className="mapping-comparison-type"><span>Compare as</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${comparedFieldLabel(rule)}`} onChange={(event) => commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, comparison_type: (event.target.value || undefined) as RuleMapping["comparison_type"] } : item))}><option value="">Automatic</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label></div>
+      <div className="mapping-rule-source"><span>{rule.file_1_fields.join(" + ")}</span><label className="mapping-comparison-type"><span>Compare as</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${comparedFieldLabel(rule)}`} onChange={(event) => commit(rules.map((item, itemIndex) => {
+        if (itemIndex !== index) return item;
+        const comparisonType = (event.target.value || undefined) as RuleMapping["comparison_type"];
+        return { ...item, comparison_type: comparisonType, ...(comparisonType === "numeric" ? {} : { decimal_precision: undefined }) };
+      }))}><option value="">Automatic</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
+        {rule.comparison_type === "numeric" && <label className="mapping-comparison-type"><span>Decimal places</span><select value={rule.decimal_precision ?? ""} aria-label={`Decimal places for ${comparedFieldLabel(rule)}`} onChange={(event) => {
+          const value = event.target.value;
+          commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, decimal_precision: value === "" ? undefined : Number(value) } : item));
+        }}><option value="">Automatic</option>{Array.from({ length: 13 }, (_, places) => <option key={places} value={places}>{places}</option>)}</select></label>}
+      </div>
       <ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>
       {editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}
       <button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button>

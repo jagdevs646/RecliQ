@@ -150,6 +150,7 @@ export interface RuleMapping {
   file_1_fields: string[];
   file_2_fields: string[];
   comparison_type?: "numeric" | "date" | "invoice" | "gstin" | "pan" | "identifier" | "company_name" | "person_name" | "text";
+  decimal_precision?: number;
 }
 
 export type SecondaryComparisonMethod = "exact_text" | "normalized_date" | "numeric_tolerance" | "matcher_based";

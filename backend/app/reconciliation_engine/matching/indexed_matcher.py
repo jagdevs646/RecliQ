@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import Enum
 from bisect import bisect_left, bisect_right
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import pandas as pd
@@ -21,6 +22,8 @@ from app.reconciliation_engine.cache import (
     normalize_text,
     parse_date_value,
     sorted_token_key,
+    infer_decimal_precision,
+    to_decimal,
     to_number,
     tokens,
 )
@@ -277,15 +280,21 @@ def composite_identity_key(values: Sequence[object], matcher_types: Sequence[str
     return tuple(component for component in components if component is not None)
 
 
-def _compare_numeric(value1: object, value2: object) -> MatchResult | None:
-    num1 = to_number(value1)
-    num2 = to_number(value2)
+def _compare_numeric(value1: object, value2: object, decimal_precision: int | None = None) -> MatchResult | None:
+    num1 = to_decimal(value1)
+    num2 = to_decimal(value2)
     if num1 is None or num2 is None:
         return None
-    diff = round(num1 - num2, 2)
-    if abs(diff) <= 0.005:
-        return MatchResult(True, 100, "numeric", "Exact numeric match", value1_normalized=str(num1), value2_normalized=str(num2))
-    return MatchResult(False, 0, "numeric", "Numeric difference", f"Difference: {diff}", str(num1), str(num2))
+    precision = decimal_precision if decimal_precision is not None else infer_decimal_precision([value1, value2])
+    quantum = Decimal(1).scaleb(-precision)
+    comparable_1 = num1.quantize(quantum, rounding=ROUND_HALF_UP)
+    comparable_2 = num2.quantize(quantum, rounding=ROUND_HALF_UP)
+    diff = comparable_1 - comparable_2
+    value1_normalized = format(comparable_1, "f")
+    value2_normalized = format(comparable_2, "f")
+    if diff == 0:
+        return MatchResult(True, 100, "numeric", "Exact numeric match", value1_normalized=value1_normalized, value2_normalized=value2_normalized)
+    return MatchResult(False, 0, "numeric", "Numeric difference", f"Difference: {format(diff, 'f')}", value1_normalized, value2_normalized)
 
 
 def _compare_date(value1: object, value2: object) -> MatchResult | None:
@@ -382,11 +391,12 @@ def compare_values(
     column1: str = "",
     column2: str = "",
     matcher_type: str | None = None,
+    decimal_precision: int | None = None,
 ) -> MatchResult:
     matcher_type = matcher_type or detect_matcher_type([value1, value2], column1, column2)
 
     if matcher_type == "numeric":
-        result = _compare_numeric(value1, value2)
+        result = _compare_numeric(value1, value2, decimal_precision)
         if result is not None:
             return result
 

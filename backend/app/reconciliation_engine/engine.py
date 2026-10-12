@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -11,6 +12,8 @@ from app.reconciliation_engine.cache import (
     normalize_header,
     normalize_text,
     parse_date_value,
+    infer_decimal_precision,
+    to_decimal,
     to_number,
     use_date_convention,
 )
@@ -114,6 +117,7 @@ def compare_rule_values(
     file_2_fields: list[str],
     rules_sink: list[str] | None = None,
     matcher_type_override: str | None = None,
+    decimal_precision: int | None = None,
 ) -> dict:
     file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields)
     file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields)
@@ -145,6 +149,7 @@ def compare_rule_values(
         fields_label(file_1_fields),
         fields_label(file_2_fields),
         matcher_type,
+        decimal_precision=decimal_precision,
     )
 
     if rules_sink is not None and result.rules:
@@ -153,12 +158,12 @@ def compare_rule_values(
         return {}
 
     if result.matcher_type == "numeric":
-        value_1 = to_number(file_1_value) or 0.0
-        value_2 = to_number(file_2_value) or 0.0
+        value_1 = to_decimal(file_1_value) or Decimal(0)
+        value_2 = to_decimal(file_2_value) or Decimal(0)
         return {
             f"{label} (FILE 1)": file_1_value,
             f"{label} (FILE 2)": file_2_value,
-            f"{label} DIFF": round(value_1 - value_2, 2),
+            f"{label} DIFF": float(value_1 - value_2),
             f"{label} STATUS": result.status if result.matched else "Mismatch",
         }
 
@@ -490,12 +495,14 @@ def _run_generic_reconciliation(
 
     normalized_rules: list[tuple[list[str], list[str]]] = []
     comparison_type_overrides: list[str | None] = []
+    decimal_precision_overrides: list[int | None] = []
     for rule in rules:
         left = normalize_fields(rule.get("file_1_fields", []))
         right = normalize_fields(rule.get("file_2_fields", []))
         if left and right:
             normalized_rules.append((left, right))
             comparison_type_overrides.append(rule.get("comparison_type"))
+            decimal_precision_overrides.append(rule.get("decimal_precision"))
     file_1_extra = normalize_fields(include_columns_file_1 or [])
     file_2_extra = normalize_fields(include_columns_file_2 or [])
     normalized_secondary_conditions = _normalize_secondary_conditions(secondary_conditions)
@@ -530,6 +537,34 @@ def _run_generic_reconciliation(
                 + non_empty_values(file_2_df[right[0]].head(100))
             )
             comparison_types.append(detect_compared_field_type(sample, left[0], right[0]))
+
+    comparison_precisions: list[int | None] = []
+    precision_metadata: list[dict] = []
+    for (left, right), comparison_type, override in zip(
+        normalized_rules, comparison_types, decimal_precision_overrides
+    ):
+        if comparison_type != "numeric":
+            comparison_precisions.append(None)
+            continue
+        if override is not None and not 0 <= int(override) <= 12:
+            raise ValueError("Decimal precision must be between 0 and 12 places.")
+        precision = (
+            int(override)
+            if override is not None
+            else infer_decimal_precision(
+                value
+                for frame, columns in ((file_1_df, left), (file_2_df, right))
+                for column in columns
+                for value in frame[column]
+            )
+        )
+        comparison_precisions.append(precision)
+        precision_metadata.append({
+            "file_1_fields": left,
+            "file_2_fields": right,
+            "decimal_places": precision,
+            "source": "configured" if override is not None else "detected",
+        })
 
     # Key types come from the raw values. Name/text keys keep their raw values
     # for matching, so business normalization can see word boundaries;
@@ -1067,7 +1102,9 @@ def _run_generic_reconciliation(
         has_field_difference = False
         field_rules: list[str] = []
         resolved_differences: list[str] = []
-        for (file_1_fields, file_2_fields), comparison_type in zip(normalized_rules, comparison_types):
+        for (file_1_fields, file_2_fields), comparison_type, decimal_precision in zip(
+            normalized_rules, comparison_types, comparison_precisions
+        ):
             differences = compare_rule_values(
                 file_1_row,
                 file_2_row,
@@ -1075,6 +1112,7 @@ def _run_generic_reconciliation(
                 file_2_fields,
                 field_rules,
                 matcher_type_override=comparison_type,
+                decimal_precision=decimal_precision,
             )
             if differences and evaluator is not None:
                 label = fields_label(file_1_fields)
@@ -1179,6 +1217,7 @@ def _run_generic_reconciliation(
             "pass_counts": pass_counts,
             "normalization_rules_used": normalization_counts,
             "date_convention": "Day first (DD/MM/YYYY)" if date_dayfirst else "Month first (MM/DD/YYYY)",
+            "numeric_precision": precision_metadata,
             "resolution_rules": [f"{rule.label()}: {describe_rule(rule)}" for rule in (evaluator.rules if evaluator else [])],
             "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
             "tolerance_bands": [band.describe() for band in tolerance_bands],

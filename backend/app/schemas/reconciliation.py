@@ -12,6 +12,7 @@ class RuleMapping(BaseModel):
         "numeric", "date", "invoice", "gstin", "pan", "identifier",
         "company_name", "person_name", "text",
     ] | None = None
+    decimal_precision: int | None = Field(default=None, ge=0, le=12)
 
 
 class FileSource(BaseModel):

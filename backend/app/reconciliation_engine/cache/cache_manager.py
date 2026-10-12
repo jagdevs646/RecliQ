@@ -4,6 +4,7 @@ import math
 import re
 import unicodedata
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
@@ -152,6 +153,36 @@ def to_number(value: object) -> float | None:
             return None
         return float(value)
     return cached_to_number_from_str(str(value))
+
+
+def to_decimal(value: object) -> Decimal | None:
+    """Parse a numeric cell without losing precision through a float roundtrip."""
+    if is_blank(value):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return Decimal(value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return Decimal(str(value))
+    try:
+        number = Decimal(cached_unicode_clean(str(value)).strip())
+        return number if number.is_finite() else None
+    except InvalidOperation:
+        number = to_number(value)
+        return Decimal(str(number)) if number is not None else None
+
+
+def infer_decimal_precision(values, maximum: int = 12) -> int:
+    """Return the largest observed decimal scale, bounded for stable UI input."""
+    scales = []
+    for value in values:
+        number = to_decimal(value)
+        if number is not None:
+            scales.append(max(0, -number.as_tuple().exponent))
+    return min(max(scales, default=0), maximum)
 
 
 @lru_cache(maxsize=32768)
