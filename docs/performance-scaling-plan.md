@@ -1,6 +1,6 @@
 # Scaling RecliQ to 1,000,000 rows per file
 
-**Status: a plan. Nothing in it has been built.** It records how large reconciliations run today, how long they take, why, and what to change so that one million rows per file is a routine run. Every number comes from a measurement that can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
+**Status: Phase 0 and the Phase 1 code changes are built.** Phase 1's output, test and repeatability gates pass. Its 100,000-row run was under the 65-second target, but machine conditions were not verified, so that timing is not comparable and must be repeated by the owner on mains power with no competing work and no sleep. Phase 0 live-container sizing still needs owner access; Phases 1b onward are not built. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
 
 - Code measured: `main` at commit `2a3a10c` (1 October 2026); measurements taken 1 to 3 October 2026. `main` has since moved to `4197f58` (3 October), which changed the tolerance editor, number display and workbook pairing but not the engine's matching code. The last round of checks (reader comparison, results-page cost, text-score batch, one prototype per process, and the test suite with the three engine changes) ran on `4197f58`. Line references are to `4197f58`. Re-run the baseline table on the current code before closing Phase 0.
 - Machine: laptop, AMD Ryzen 5 3550H (4 cores, 8 threads), 21.9 GB RAM, Windows 11, Python 3.12.10, pandas 2.2.2, on mains power with nothing else running.
@@ -151,6 +151,20 @@ Re-recorded in one session for Phase 0, on the same laptop on mains power and ke
 - `.xlsx` reading now falls on a straight line (about 37 s per 100,000 rows of both files).
 - Peak memory at 10,000 rows is missing because `psutil` was not installed in the backend environment until that run had finished.
 - The keyless run at 10,000 rows (2.0 s) is much faster than section 3.1's 4.4 s, and grows faster than the row count (18.9 s at 50,000). This was not investigated.
+
+### 3.5 Phase 1 after (12 October 2026)
+
+Measured on the same Windows development machine using `bench.py <rows> read keyed` at the same three sizes. The run environment was not verified to be idle, on mains power or kept awake, so these measurements are indicative and **not comparable** with section 3.4. The owner must repeat the 100,000-row measurement under the stated conditions before treating the timing target as verified. Keyless runs were not part of this check.
+
+| Rows per file | Read two `.xlsx` | Keyed: match and compare | Excel report | Result data | Keyed total from `.xlsx` | Keyless: match and compare | Peak memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | 0.61 s | 1.95 s | 1.26 s | 1.01 s | 4.83 s | not run | 0.16 GB |
+| 50,000 | 2.97 s | 10.20 s | 7.41 s | 5.37 s | 25.95 s | not run | 0.41 GB |
+| 100,000 | 6.12 s | 19.92 s | 12.95 s | 10.99 s | 49.98 s | not run | 0.71 GB |
+
+- At 100,000 rows the outcome counts match section 3.4: 96,244 matched, 12,181 report differences, 10,999 within tolerance, 3,756 only in File 1 and 3,000 only in File 2.
+- The 100,000-row reader check compared openpyxl and calamine cell by cell: openpyxl 18.27 s, calamine 2.90 s, no differences. The benchmark read both workbooks in 6.12 s combined.
+- The keyed total is the sum of the two `.xlsx` reads, matching engine run, Excel report and result-data timings. Values are rounded to two decimals.
 
 ## 4. Why it is slow: the causes, in order of cost
 
@@ -400,6 +414,20 @@ No change to results. Each item is a small pull request with its own before-and-
 | 1.7 | Build only the index maps the general engine reads (identity, compact form, tokens). The normalized-text, token-key and synonym-key maps are read only by `find_best_match`, which only the GST path calls | | `indexed_matcher.py:417-435` | Part of the 8% of engine time spent building the index (not measured) |
 
 Done when: `quickwins.py compare` reports identical output for the keyed, keyless and exact-text "must also match" scenarios at 20,000 rows and for the similar-text scenario at 4,000 rows; the backend tests pass; the 100,000-row keyed run takes under 65 s end to end from `.xlsx` (today 124 s; expected about 60 s: 7 s reading, 27 s matching and comparing, 14 s report, 12 s result data), or under 40 s for reading plus matching and comparing.
+
+**Status (12 October 2026):**
+
+| Item | State and commit | Measured effect / evidence |
+|---|---|---|
+| 1.1 | Done: `74d73ed` | Skipping type detection for values identical as read reduced the 20,000-row keyed scenario from 11.43 s to 4.62 s; all result data remained identical. |
+| 1.2 | Done: `f810a7f` | Filtering secondary checks to exact-key candidates reduced the 20,000-row exact-secondary scenario from 59.82 s to 5.57 s; output remained identical. |
+| 1.3 | Done: `f06f83e` | Caching and bounding secondary candidate search reduced the 4,000-row similar-secondary scenario from 226.55 s to 1.57 s; output remained identical. |
+| 1.4 | Done: `3ff429b` | Calamine and openpyxl returned identical cells on the 100,000-row workbook; reader time was 2.90 s vs 18.27 s. The complete two-workbook read took 6.12 s in the non-comparable run above. |
+| 1.5 | Done: `2b4faef` | Generic row-loop database cancellation checks are limited to once per second, avoiding up to 40,000 checks per million rows (calculated); stage-boundary cancellation checks remain. |
+| 1.6 | Done: `788bba8` | File 2 is materialized once and reused in both keyed and keyless paths (verified by tests; previously converted multiple times). |
+| 1.7 | Done: `7f04a03` | Generic matching builds only its identity, compact and token-block indexes; the default full fuzzy/date indexes remain enabled for GST `find_best_match`. No isolated timing was recorded. |
+
+The four complete result comparisons are identical to their saved pre-change baselines. The repository-root suite passed (251 tests), the backend-local suite passed (58 tests), and repeatability passed for keyed, keyless and exact-secondary scenarios at 2,000 rows. The final 100,000-row benchmark measured 49.98 s end to end (under the target), but is not comparable because machine conditions were not verified; the owner must repeat it before the timing criterion is considered verified.
 
 Phase 1 makes 100,000 rows per file fast (about a minute end to end from `.xlsx`) and removes the quadratic case. Larger files also need Phase 2 for the results page and a worker with enough memory (4.1): peak memory is barely changed by Phase 1, and 300,000 rows has not been measured.
 
