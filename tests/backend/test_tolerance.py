@@ -63,6 +63,19 @@ def test_the_exact_limit_is_within_tolerance(tmp_path: Path):
     assert "U1" in _matched(result)
 
 
+def test_specific_field_tolerance_blocks_a_looser_wildcard_fallback(tmp_path: Path):
+    result = _reco(
+        tmp_path,
+        [_bank("U1", 105)],
+        [_books("U1", 100)],
+        [{"field": "DEBIT", "amount": 0.05}, {"field": "*", "amount": 10}],
+    )
+
+    assert "U1" in _differences(result)
+    assert "DEBIT" in _differences(result)["U1"]
+    assert "U1" not in _matched(result)
+
+
 def test_a_percentage_tolerance_is_measured_against_the_other_files_value(tmp_path: Path):
     result = _reco(tmp_path, [_bank("U1", 1010), _bank("U2", 1011)], [_books("U1", 1000), _books("U2", 1000)],
                    [{"field": "DEBIT", "percent": 1}])

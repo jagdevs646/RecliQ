@@ -98,27 +98,27 @@ def accepted_reason(label: str, value_1: object, value_2: object, difference: ob
     labels = {label, destination_label} - {""}
     diff = to_number(difference)
     score = to_number(str(confidence).rstrip("%")) if confidence not in (None, "") else None
-    for band in bands:
-        if not band.applies_to(labels):
-            continue
-        if diff is not None:
-            size = abs(diff)
-            if band.amount and size <= band.amount + _EPSILON:
-                return f"{label} differs by {_money(size)}, within ±{band.amount:g}"
-            base = to_number(value_2)
-            if band.percent and base:
-                share = size / abs(base) * 100
-                if share <= band.percent + _EPSILON:
-                    return f"{label} differs by {_money(size)} ({_share(share)}), within ±{band.percent:g}%"
-            continue
-        date_1, date_2 = parse_date_value(value_1), parse_date_value(value_2)
-        if date_1 is not None and date_2 is not None:
-            gap = abs((date_1 - date_2).days)
-            if band.days and gap <= band.days:
-                return f"{label} differs by {gap} day{'s' if gap != 1 else ''}, within ±{band.days} day{'s' if band.days != 1 else ''}"
-            continue  # Dates are never accepted for looking alike.
-        if band.similarity and score is not None and score >= band.similarity:
-            return f"{label} is {score:g}% similar, at least {band.similarity}% required"
+    band = next((candidate for candidate in bands if candidate.applies_to(labels)), None)
+    if band is None:
+        return None
+    if diff is not None:
+        size = abs(diff)
+        if band.amount and size <= band.amount + _EPSILON:
+            return f"{label} differs by {_money(size)}, within ±{band.amount:g}"
+        base = to_number(value_2)
+        if band.percent and base:
+            share = size / abs(base) * 100
+            if share <= band.percent + _EPSILON:
+                return f"{label} differs by {_money(size)} ({_share(share)}), within ±{band.percent:g}%"
+        return None
+    date_1, date_2 = parse_date_value(value_1), parse_date_value(value_2)
+    if date_1 is not None and date_2 is not None:
+        gap = abs((date_1 - date_2).days)
+        if band.days and gap <= band.days:
+            return f"{label} differs by {gap} day{'s' if gap != 1 else ''}, within ±{band.days} day{'s' if band.days != 1 else ''}"
+        return None  # Dates are never accepted for looking alike.
+    if band.similarity and score is not None and score >= band.similarity:
+        return f"{label} is {score:g}% similar, at least {band.similarity}% required"
     return None
 
 
