@@ -253,7 +253,7 @@ def normalized_identity_value(value: object, matcher_type: str) -> str | None:
         normalized = parsed.isoformat() if parsed else ""
     elif matcher_type == "numeric":
         number = to_number(value)
-        normalized = str(number) if number is not None else ""
+        normalized = (str(int(number)) if number.is_integer() else str(number)) if number is not None else ""
     else:
         # Names and text: deterministic business normalization ("ABC Pvt Ltd"
         # and "ABC PRIVATE LIMITED" share one identity). Never fuzzy.

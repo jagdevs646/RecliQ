@@ -98,6 +98,14 @@ def test_default_index_mode_retains_maps_used_by_gst_best_match():
     assert result is not None and result.matched
 
 
+def test_numeric_key_identity_uses_integer_form_for_whole_number_values():
+    from app.reconciliation_engine.matching.indexed_matcher import normalized_identity_value
+
+    assert normalized_identity_value(1001.0, "numeric") == "1001"
+    assert normalized_identity_value("1001", "numeric") == "1001"
+    assert normalized_identity_value(1001.25, "numeric") == "1001.25"
+
+
 def test_canonical_date_parser_uses_one_day_first_convention():
     assert parse_date_value("07/09/2026") == date(2026, 9, 7)
     assert parse_date_value("2026-09-07") == date(2026, 9, 7)
