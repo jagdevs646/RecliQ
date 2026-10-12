@@ -115,7 +115,7 @@ def job_setup(
     return JobPlanResponse(
         job_id=job_id,
         orientation=plan.orientation,
-        file_pairs=[pair.model_dump(mode="json") for pair in plan.file_pairs],
+        file_pairs=[pair.model_dump(mode="json", exclude_none=True) for pair in plan.file_pairs],
         files=[UploadedFileOut.model_validate(record) for record in files],
     )
 
