@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, ArrowRight, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { decimalColumns, formatRecordValue, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
@@ -21,6 +21,10 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
   const [category, setCategory] = useState<PreviewCategory>("discrepancies");
   const [page, setPage] = useState(0);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [isComposingQuery, setIsComposingQuery] = useState(false);
+  const [sortBy, setSortBy] = useState("");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [message, setMessage] = useState("");
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [viewStage, setViewStage] = useState<"results" | "customize" | "download">("results");
@@ -30,6 +34,12 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
   const [savedNote, setSavedNote] = useState("");
   const [emailOpen, setEmailOpen] = useState(false);
   const columnLayout = useColumnLayout();
+
+  useEffect(() => {
+    if (isComposingQuery) return;
+    const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => window.clearTimeout(timer);
+  }, [query, isComposingQuery]);
 
   const filePairs = jobSummary.file_pairs ?? [];
   const isMultiPair = filePairs.length > 1;
@@ -51,10 +61,21 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
 
   useEffect(() => {
     if (!job?.id || !previewOpen) return;
+    const controller = new AbortController();
     setLoadingPreview(true);
-    api.getReportPreview(job.id, category, page * 25, scope).then(setPreview).catch((error: Error) => setMessage(error.message)).finally(() => setLoadingPreview(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job?.id, previewOpen, category, page, scope.filePairId, scope.sheetRuleId]);
+    setMessage("");
+    api.getReportPreview(job.id, category, page * 25, scope, {
+      search: debouncedQuery,
+      sortBy: sortBy || undefined,
+      sortDirection,
+      signal: controller.signal,
+    }).then(setPreview).catch((error: Error) => {
+      if (!controller.signal.aborted && error.name !== "AbortError") setMessage(error.message);
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoadingPreview(false);
+    });
+    return () => controller.abort();
+  }, [job?.id, previewOpen, category, page, scope.filePairId, scope.sheetRuleId, debouncedQuery, sortBy, sortDirection]);
 
   function selectFilePair(nextFilePairId: string) {
     setFilePairId(nextFilePairId); setRuleIndex(-1); setPage(0);
@@ -86,12 +107,18 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
       { category: "auto_resolved" as const, title: "Auto-resolved", label: "Recurring exceptions explained by your rules, with the rule and GL account", count: summary.auto_resolved ?? 0, icon: Wand2, tone: "green" },
     ] : []),
   ];
-  const displayedRows = useMemo(() => preview?.rows.filter((row) => Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(query.toLowerCase()))) ?? [], [preview, query]);
+  const displayedRows = preview?.rows ?? [];
   // Numbers are rounded for display only; the rows keep their exact values.
   const roundedColumns = useMemo(() => decimalColumns(preview?.rows ?? []), [preview]);
 
   function openPreview(nextCategory: PreviewCategory) {
-    setCategory(nextCategory); setPage(0); setQuery(""); setPreviewOpen(true);
+    setCategory(nextCategory); setPage(0); setQuery(""); setDebouncedQuery(""); setSortBy(""); setSortDirection("asc"); setPreviewOpen(true);
+  }
+
+  function toggleSort(column: string) {
+    if (sortBy === column) setSortDirection((current) => current === "asc" ? "desc" : "asc");
+    else { setSortBy(column); setSortDirection("asc"); }
+    setPage(0);
   }
 
   const decisionKey = (row: Record<string, unknown>) => `${row["MATCH KEY"] ?? ""}||${row["CANDIDATE KEY"] ?? ""}`;
@@ -217,7 +244,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
     <section><div className="section-heading"><div><h2>What needs attention</h2><p>Open a group to see its records, 25 at a time.</p></div></div><div className={`result-card-grid${cards.length > 4 ? " is-three-column" : ""}`}>{cards.map(({ category: cardCategory, title, label, count, icon: Icon, tone }) => count > 0
       ? <article className={`result-card tone-${tone}`} key={cardCategory}><Icon size={20} aria-hidden="true" /><span>{title}</span><strong>{count.toLocaleString()}</strong><p>{label}</p><button type="button" className="text-command" onClick={() => openPreview(cardCategory)}><Eye size={16} />View records</button></article>
       : <article className="result-card is-empty" key={cardCategory}><Icon size={18} aria-hidden="true" /><span>{title}</span><strong>0</strong><p>None in this run.</p></article>)}</div></section>
-    {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{cards.find((card) => card.category === preview.category)?.title ?? preview.sheet_name}{activeRule ? ` · ${activeRule.report_label}` : activePair ? ` · ${activePair.label}` : ""}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><div className="table-tools"><button type="button" className="secondary compact" aria-pressed={columnLayout.wrap} onClick={columnLayout.toggleWrap} title="Show long text on several lines"><WrapText size={15} />Wrap text</button>{columnLayout.customized && <button type="button" className="secondary compact" onClick={columnLayout.resetWidths}><RotateCcw size={15} />Reset widths</button>}<label className="search-field"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter visible rows" /></label></div></div><p className="table-hint">Drag a column's edge to resize it, or double-click the edge to fit its text.</p><div className={`table-scroll${columnLayout.wrap ? " is-wrapped" : ""}`}><table><thead><tr>{showDecisions && <th>Your decision</th>}{preview.columns.map((column) => <th key={column}><div className="cell-text" style={columnLayout.widthStyle(column)} title={column}>{column}</div><ColumnResizer column={column} width={columnLayout.widths[column]} onResize={(width) => columnLayout.setWidth(column, width)} /></th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length + (showDecisions ? 1 : 0))}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{showDecisions && <td className="decision-cell">{reviewable(row) ? (decisions[decisionKey(row)] ? <span className={`badge ${decisions[decisionKey(row)] === "accept" ? "success" : "danger"}`}>{decisions[decisionKey(row)] === "accept" ? "Confirmed" : "Rejected"}</span> : <><button type="button" className="icon-button" title="Confirm this match" aria-label="Confirm this match" onClick={() => decide(row, "accept")}><ThumbsUp size={14} /></button><button type="button" className="icon-button" title="Not the same record" aria-label="Not the same record" onClick={() => decide(row, "reject")}><ThumbsDown size={14} /></button></>) : null}</td>}{preview.columns.map((column) => { const exact = String(row[column] ?? "—"); const value = formatRecordValue(row[column], column, roundedColumns); return <td key={column}><div className="cell-text" style={columnLayout.widthStyle(column)} title={value !== exact ? `Exact value: ${exact}` : value.length > 24 ? value : undefined}>{value}</div></td>; })}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No visible rows match this filter.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
+    {preview && <section className="preview-panel"><div className="section-heading"><div><h2>{cards.find((card) => card.category === preview.category)?.title ?? preview.sheet_name}{activeRule ? ` · ${activeRule.report_label}` : activePair ? ` · ${activePair.label}` : ""}</h2><p>{preview.total_rows.toLocaleString()} rows in the workbook</p></div><div className="table-tools"><button type="button" className="secondary compact" aria-pressed={columnLayout.wrap} onClick={columnLayout.toggleWrap} title="Show long text on several lines"><WrapText size={15} />Wrap text</button>{columnLayout.customized && <button type="button" className="secondary compact" onClick={columnLayout.resetWidths}><RotateCcw size={15} />Reset widths</button>}<label className="search-field"><Search size={16} /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(0); }} onCompositionStart={() => setIsComposingQuery(true)} onCompositionEnd={(event) => { setIsComposingQuery(false); setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search all result rows" aria-label="Search all result rows" /></label></div></div><p className="table-hint">Drag a column's edge to resize it, or double-click the edge to fit its text.</p><div className={`table-scroll${columnLayout.wrap ? " is-wrapped" : ""}`}><table><thead><tr>{showDecisions && <th>Your decision</th>}{preview.columns.map((column) => <th key={column} aria-sort={sortBy === column ? (sortDirection === "asc" ? "ascending" : "descending") : undefined}><button type="button" className="preview-sort-button" onClick={() => toggleSort(column)} title={`Sort by ${column} ${sortBy === column && sortDirection === "asc" ? "descending" : "ascending"}`}>{column}{sortBy === column ? (sortDirection === "asc" ? <ArrowUp size={14} aria-hidden="true" /> : <ArrowDown size={14} aria-hidden="true" />) : <ArrowUpDown size={14} aria-hidden="true" />}</button><ColumnResizer column={column} width={columnLayout.widths[column]} onResize={(width) => columnLayout.setWidth(column, width)} /></th>)}</tr></thead><tbody>{loadingPreview ? <tr><td colSpan={Math.max(1, preview.columns.length + (showDecisions ? 1 : 0))}>Loading preview...</td></tr> : displayedRows.length ? displayedRows.map((row, index) => <tr key={index}>{showDecisions && <td className="decision-cell">{reviewable(row) ? (decisions[decisionKey(row)] ? <span className={`badge ${decisions[decisionKey(row)] === "accept" ? "success" : "danger"}`}>{decisions[decisionKey(row)] === "accept" ? "Confirmed" : "Rejected"}</span> : <><button type="button" className="icon-button" title="Confirm this match" aria-label="Confirm this match" onClick={() => decide(row, "accept")}><ThumbsUp size={14} /></button><button type="button" className="icon-button" title="Not the same record" aria-label="Not the same record" onClick={() => decide(row, "reject")}><ThumbsDown size={14} /></button></>) : null}</td>}{preview.columns.map((column) => { const exact = String(row[column] ?? "—"); const value = formatRecordValue(row[column], column, roundedColumns); return <td key={column}><div className="cell-text" style={columnLayout.widthStyle(column)} title={value !== exact ? `Exact value: ${exact}` : value.length > 24 ? value : undefined}>{value}</div></td>; })}</tr>) : <tr><td colSpan={Math.max(1, preview.columns.length)}>No rows match this search.</td></tr>}</tbody></table></div><div className="pagination"><span>Showing {Math.min(preview.offset + 1, preview.total_rows)}–{Math.min(preview.offset + preview.rows.length, preview.total_rows)} of {preview.total_rows}</span><div><button type="button" className="icon-button" onClick={() => setPage((current) => Math.max(0, current - 1))} disabled={page === 0 || loadingPreview} title="Previous preview page"><ArrowLeft size={16} /></button><button type="button" className="icon-button" onClick={() => setPage((current) => current + 1)} disabled={preview.offset + preview.rows.length >= preview.total_rows || loadingPreview} title="Next preview page"><ArrowRight size={16} /></button></div></div></section>}
     {job.status === "completed_with_errors" && <section className="rule-errors"><h2><AlertTriangle size={18} />Some sheet rules failed</h2><p>Successful sheet rules are included above and in the report. These rules produced no results:</p><ul>{failedRules.map((rule) => <li key={rule.sheet_rule_id}><strong>{rule.report_label}</strong><span>{rule.error}</span></li>)}</ul></section>}
     {message && <p className="error-text">{message}</p>}
     {emailOpen && job && <ReportEmailDialog job={job} onClose={() => setEmailOpen(false)} />}

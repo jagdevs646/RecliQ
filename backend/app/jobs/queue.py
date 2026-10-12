@@ -9,15 +9,17 @@
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 from app.core.config import get_settings
 
 logger = logging.getLogger("recliq.jobs")
 _local_executor: ThreadPoolExecutor | None = None
+_precheck_executor: ProcessPoolExecutor | None = None
 
 RUNNER_PATH = "app.jobs.runner.run_job"
 EMAIL_RUNNER_PATH = "app.jobs.email_runner.process_email_delivery"
+PRECHECK_RUNNER_PATH = "app.jobs.precheck_runner.run_precheck_task"
 
 
 def rq_job_id(job_id: str) -> str:
@@ -42,6 +44,35 @@ def _executor() -> ThreadPoolExecutor:
     if _local_executor is None:
         _local_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="recliq-job")
     return _local_executor
+
+
+def _precheck_process_executor() -> ProcessPoolExecutor:
+    global _precheck_executor
+    if _precheck_executor is None:
+        _precheck_executor = ProcessPoolExecutor(max_workers=2)
+    return _precheck_executor
+
+
+def enqueue_precheck(task_id: str) -> None:
+    """Run the memory-heavy check in a worker, never in an API request."""
+    settings = get_settings()
+    backend = settings.job_queue_backend.lower()
+    from app.jobs.precheck_runner import run_precheck_task
+
+    if backend == "redis":
+        rq_queue().enqueue(
+            PRECHECK_RUNNER_PATH,
+            task_id,
+            job_id=f"precheck-{task_id}",
+            job_timeout=settings.job_timeout_seconds,
+            result_ttl=24 * 3600,
+            failure_ttl=7 * 24 * 3600,
+            description=f"Reconciliation precheck {task_id}",
+        )
+    elif backend == "sync":
+        run_precheck_task(task_id)
+    else:
+        _precheck_process_executor().submit(run_precheck_task, task_id)
 
 
 def enqueue_job(job_id: str) -> None:

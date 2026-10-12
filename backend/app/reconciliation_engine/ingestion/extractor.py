@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import tempfile
 import threading
@@ -154,23 +155,22 @@ def extract_file_metadata(file_path: Path, filename: str) -> List[Dict[str, Any]
 
 
 # ── Parsed-sheet cache ─────────────────────────────────────────────────────
-# Parsing a large workbook dominates setup time (a 50k-row sheet takes ~12s
-# with openpyxl), and one reconciliation reads each sheet several times
-# (analysis, columns, execution). Each sheet is parsed once, kept in a small
-# in-memory LRU and in a pickle beside the upload so other workers reuse it.
+# Parsed sheets are cached beside uploads as column-readable Parquet. The
+# compact facts file lets setup screens inspect headers without loading rows.
 _CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv", ".sta", ".mt940", ".940", ".bai", ".bai2", ".xml", ".json", ".pdf"}
-_MEMORY_CACHE_SIZE = 6
-_memory_cache: "OrderedDict[tuple, pd.DataFrame]" = OrderedDict()
 _cache_guard = threading.Lock()
 _parse_locks: dict[tuple, threading.Lock] = {}
-# Bump whenever a reader changes, so parsed sheets from an older reader are not
-# reused after the .xlsx calamine fast path is enabled.
-_READER_VERSION = 4
+# Bump whenever parsing or the cache format changes.
+_READER_VERSION = 5
 
 
 def _cache_path(file_path: Path, sheet_id: str) -> Path:
     digest = hashlib.sha1(str(sheet_id).encode("utf-8")).hexdigest()[:12]
-    return file_path.with_name(f"{file_path.name}.sheet-{digest}-r{_READER_VERSION}.pkl")
+    return file_path.with_name(f"{file_path.name}.sheet-{digest}-r{_READER_VERSION}.parquet")
+
+
+def _facts_path(parquet_path: Path) -> Path:
+    return parquet_path.with_suffix(".facts.json")
 
 
 def _cache_key(file_path: Path, sheet_id: str) -> tuple | None:
@@ -181,60 +181,112 @@ def _cache_key(file_path: Path, sheet_id: str) -> tuple | None:
     return (str(file_path.resolve()), stat.st_mtime_ns, stat.st_size, str(sheet_id))
 
 
-def _write_pickle(df: pd.DataFrame, disk_path: Path) -> None:
-    """Atomic write: a concurrent reader never sees a half-written cache."""
+def _is_null_scalar(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        result = pd.isna(value)
+        return isinstance(result, (bool, type(pd.NA))) and bool(result)
+    except (TypeError, ValueError):
+        return False
+
+
+def _column_type(series: pd.Series) -> str:
+    kinds: set[str] = set()
+    for value in series:
+        if _is_null_scalar(value):
+            continue
+        if isinstance(value, (bool,)):
+            kinds.add("boolean")
+        elif isinstance(value, (pd.Timestamp,)) or hasattr(value, "year") and hasattr(value, "month") and hasattr(value, "day"):
+            kinds.add("date")
+        elif pd.api.types.is_number(value):
+            kinds.add("numeric")
+        else:
+            kinds.add("text")
+        if len(kinds) > 1:
+            return "mixed"
+    return next(iter(kinds), "empty")
+
+
+def _write_parquet(df: pd.DataFrame, disk_path: Path) -> None:
+    """Atomically publish a typed Parquet cache and its non-executable facts."""
     partial = disk_path.with_name(f"{disk_path.name}.{os.getpid()}.part")
-    df.to_pickle(partial)
-    os.replace(partial, disk_path)
+    facts_path = _facts_path(disk_path)
+    facts_partial = facts_path.with_name(f"{facts_path.name}.{os.getpid()}.part")
+    stored = df.copy()
+    column_facts = []
+    for column in stored.columns:
+        kind = _column_type(stored[column])
+        if kind == "mixed":
+            stored[column] = stored[column].map(lambda value: None if _is_null_scalar(value) else str(value))
+        column_facts.append({"name": str(column), "type": kind})
+    facts = {"row_count": len(stored), "columns": column_facts, "reader_version": _READER_VERSION}
+    try:
+        stored.to_parquet(partial, index=False, compression="zstd", engine="pyarrow")
+        with facts_partial.open("w", encoding="utf-8") as handle:
+            json.dump(facts, handle, ensure_ascii=False, separators=(",", ":"))
+        os.replace(partial, disk_path)
+        os.replace(facts_partial, facts_path)
+    finally:
+        partial.unlink(missing_ok=True)
+        facts_partial.unlink(missing_ok=True)
 
 
-def _remember(key: tuple, df: pd.DataFrame) -> None:
-    with _cache_guard:
-        _memory_cache[key] = df
-        _memory_cache.move_to_end(key)
-        while len(_memory_cache) > _MEMORY_CACHE_SIZE:
-            _memory_cache.popitem(last=False)
+def _read_facts(disk_path: Path) -> dict[str, Any] | None:
+    try:
+        with _facts_path(disk_path).open(encoding="utf-8") as handle:
+            facts = json.load(handle)
+        return facts if facts.get("reader_version") == _READER_VERSION else None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
-def read_table_data(file_path: Path, filename: str, sheet_id: str) -> pd.DataFrame:
+def _read_parquet(disk_path: Path, columns: list[str] | None = None) -> pd.DataFrame:
+    available = None
+    facts = _read_facts(disk_path)
+    if facts is not None:
+        available = {item["name"] for item in facts.get("columns", [])}
+    if available is None:
+        import pyarrow.parquet as pq
+
+        available = set(pq.ParquetFile(disk_path).schema.names)
+    selected = [column for column in dict.fromkeys(columns or []) if column in available] if columns is not None else None
+    return pd.read_parquet(disk_path, columns=selected, engine="pyarrow")
+
+
+def read_table_data(file_path: Path, filename: str, sheet_id: str, columns: list[str] | None = None) -> pd.DataFrame:
     """Read one sheet/table, parsing each workbook sheet at most once.
 
-    Callers receive a copy, so mutating the result never alters the cache.
+    ``columns`` projects a rule's working set at the Parquet reader. No full
+    DataFrame is retained in the API process between requests.
     """
     key = _cache_key(file_path, sheet_id) if get_file_extension(filename) in _CACHEABLE_EXTENSIONS else None
     if key is None:
-        return _parse_table_data(file_path, filename, sheet_id)
+        frame = _parse_table_data(file_path, filename, sheet_id)
+        return frame if columns is None else frame[[column for column in columns if column in frame.columns]]
 
     with _cache_guard:
-        cached = _memory_cache.get(key)
         lock = _parse_locks.setdefault(key, threading.Lock())
-    if cached is not None:
-        return cached.copy()
 
-    # One parse per sheet: concurrent requests (e.g. the upload warm-up and an
-    # analysis call) wait for the first parse instead of repeating it.
+    # Concurrent requests wait for the first parse instead of repeating it.
     with lock:
-        with _cache_guard:
-            cached = _memory_cache.get(key)
-        if cached is not None:
-            return cached.copy()
         disk_path = _cache_path(file_path, sheet_id)
-        df = None
         if not disk_path.exists():
             _await_warm_up(file_path)
         if disk_path.exists() and disk_path.stat().st_mtime_ns >= key[1]:
             try:
-                df = pd.read_pickle(disk_path)
+                frame = _read_parquet(disk_path, columns)
+                return _enforce_row_limit(frame, sheet_id)
             except Exception:
-                df = None
-        if df is None:
-            df = _parse_table_data(file_path, filename, sheet_id)
-            try:
-                _write_pickle(df, disk_path)
-            except OSError:
-                pass  # Read-only or temporary storage: memory cache only.
-        _remember(key, df)
-    return df.copy()
+                disk_path.unlink(missing_ok=True)
+                _facts_path(disk_path).unlink(missing_ok=True)
+        frame = _parse_table_data(file_path, filename, sheet_id)
+        try:
+            _write_parquet(frame, disk_path)
+        except OSError:
+            pass  # Read-only or temporary storage: parse in memory for this call.
+        return frame if columns is None else frame[[column for column in columns if column in frame.columns]]
 
 
 def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int) -> pd.DataFrame:
@@ -243,15 +295,16 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
     Setup analysis only needs a sample; reading it directly takes about a
     second even while the full sheet is still being parsed in the background.
     """
-    key = _cache_key(file_path, sheet_id)
-    with _cache_guard:
-        cached = _memory_cache.get(key) if key else None
-    if cached is not None:
-        return cached.head(nrows).copy()
     disk_path = _cache_path(file_path, sheet_id)
+    key = _cache_key(file_path, sheet_id)
     if key and disk_path.exists() and disk_path.stat().st_mtime_ns >= key[1]:
         try:
-            return pd.read_pickle(disk_path).head(nrows)
+            import duckdb
+
+            with duckdb.connect(config={"threads": "1"}) as connection:
+                return connection.execute(
+                    "SELECT * FROM read_parquet(?) LIMIT ?", [str(disk_path), max(0, nrows)]
+                ).df()
         except Exception:
             pass
     ext = get_file_extension(filename)
@@ -265,10 +318,17 @@ def read_table_sample(file_path: Path, filename: str, sheet_id: str, nrows: int)
 def read_table_columns(file_path: Path, filename: str, sheet_id: str) -> list[str]:
     """Return a sheet's header row without parsing its data rows when possible."""
     key = _cache_key(file_path, sheet_id)
-    with _cache_guard:
-        cached = _memory_cache.get(key) if key else None
-    if cached is not None:
-        return [str(column) for column in cached.columns]
+    disk_path = _cache_path(file_path, sheet_id)
+    if key and disk_path.exists() and disk_path.stat().st_mtime_ns >= key[1]:
+        facts = _read_facts(disk_path)
+        if facts is not None:
+            return [item["name"] for item in facts.get("columns", [])]
+        try:
+            import pyarrow.parquet as pq
+
+            return [str(column) for column in pq.ParquetFile(disk_path).schema.names]
+        except Exception:
+            pass
     ext = get_file_extension(filename)
     if ext in _EXCEL_ENGINES:
         return [str(column) for column in _read_excel_table(file_path, ext, sheet_name=sheet_id, nrows=0).columns]
@@ -278,12 +338,12 @@ def read_table_columns(file_path: Path, filename: str, sheet_id: str) -> list[st
 
 
 def _parse_sheets_to_disk(file_path: str, filename: str) -> None:
-    """Worker-process entry point: write every sheet's parsed pickle."""
+    """Worker-process entry point: write every sheet's parsed Parquet cache."""
     path = Path(file_path)
     for sheet in extract_file_metadata(path, filename):
         disk_path = _cache_path(path, sheet["id"])
         if not disk_path.exists():
-            _write_pickle(_parse_table_data(path, filename, sheet["id"]), disk_path)
+            _write_parquet(_parse_table_data(path, filename, sheet["id"]), disk_path)
 
 
 # Parsing is CPU-bound. In a thread it would hold the GIL and slow every
@@ -317,8 +377,9 @@ def _await_warm_up(file_path: Path, timeout: float = 120) -> None:
 
 def clear_table_cache(file_path: Path) -> None:
     """Drop on-disk parsed sheets when their upload is deleted."""
-    for cached in file_path.parent.glob(f"{file_path.name}.sheet-*.pkl"):
-        cached.unlink(missing_ok=True)
+    for cached in file_path.parent.glob(f"{file_path.name}.sheet-*"):
+        if cached.suffix in {".pkl", ".parquet", ".json", ".part"}:
+            cached.unlink(missing_ok=True)
 
 
 def _parse_table_data(file_path: Path, filename: str, sheet_id: str) -> pd.DataFrame:

@@ -328,6 +328,13 @@ export interface PrecheckResult {
   rules: PrecheckRuleResult[];
 }
 
+export interface PrecheckTask {
+  id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  result: PrecheckResult | null;
+  error: string | null;
+}
+
 export interface TemplateSummary {
   id: string;
   name: string;

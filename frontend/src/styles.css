@@ -438,6 +438,8 @@ dd { overflow-wrap: anywhere; margin: 0; color: var(--color-text); font-size: va
 .table-scroll { overflow: auto; border: 1px solid var(--color-border-subtle); border-radius: 6px; }
 /* Review tables: reviewers drag a header edge to resize a column and can wrap long text. */
 .table-scroll th { position: relative; }
+.preview-sort-button { display: inline-flex; width: 100%; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px 0 0; border: 0; background: transparent; color: inherit; font: inherit; letter-spacing: 0; text-align: left; cursor: pointer; }
+.preview-sort-button:focus-visible { border-radius: 3px; outline: 2px solid var(--color-primary); outline-offset: 2px; }
 .table-scroll .cell-text { max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
 .table-scroll.is-wrapped td { vertical-align: top; }
 .table-scroll.is-wrapped td .cell-text { width: max-content; white-space: normal; overflow-wrap: anywhere; }

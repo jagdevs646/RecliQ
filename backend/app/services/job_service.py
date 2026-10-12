@@ -179,9 +179,9 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
         report = db.query(Report).filter(Report.id == report_id).first()
         if report:
             if storage:
-                from app.storage.base import report_data_path
+                from app.storage.base import report_data_storage_paths
 
-                for path in (report.storage_path, report_data_path(report.storage_path)):
+                for path in (report.storage_path, *report_data_storage_paths(report.storage_path)):
                     try:
                         storage.delete_file(path)
                     except Exception:

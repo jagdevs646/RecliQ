@@ -23,10 +23,10 @@ def test_sheets_are_parsed_once_and_callers_get_independent_copies(tmp_path: Pat
     second = read_table_data(path, path.name, "Data")
     assert second.loc[0, "Amount"] == 1
     assert len(read_table_sample(path, path.name, "Data", 2)) == 2
-    assert list(tmp_path.glob("ledger.xlsx.sheet-*.pkl"))  # Reused by other workers.
+    assert list(tmp_path.glob("ledger.xlsx.sheet-*.parquet"))  # Reused by other workers.
 
     clear_table_cache(path)
-    assert not list(tmp_path.glob("ledger.xlsx.sheet-*.pkl"))
+    assert not list(tmp_path.glob("ledger.xlsx.sheet-*.parquet"))
 
 
 def test_long_digit_references_remain_text_when_reading_excel(tmp_path: Path):

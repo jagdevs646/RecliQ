@@ -35,7 +35,7 @@ from app.services.audit_service import AuditActor, record_event
 from app.services.job_service import _job_file_ids, delete_job
 from app.services.quota_service import release_storage
 from app.storage import get_storage
-from app.storage.base import report_data_path
+from app.storage.base import report_data_storage_paths
 
 logger = logging.getLogger("recliq.retention")
 ACTIVE_STATUSES = ("queued", "processing")
@@ -110,7 +110,7 @@ def purge_expired_guest_data(db: Session | None = None, storage=None, *, now: da
         ).all():
             scope = report.session_id
             _delete_report_emails(db, ReportEmailDelivery.report_id == report.id)
-            for path in (report.storage_path, report_data_path(report.storage_path)):
+            for path in (report.storage_path, *report_data_storage_paths(report.storage_path)):
                 _delete_object(storage, path)
             release_storage(db, scope, report.size_bytes + report.data_size_bytes)
             db.delete(report)

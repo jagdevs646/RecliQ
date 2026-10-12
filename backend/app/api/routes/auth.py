@@ -40,7 +40,7 @@ from app.services.policy_service import effective_features
 from app.services.policy_service import effective_limits
 from app.services.quota_service import merge_workspace_usage, release_storage, reserve_storage
 from app.storage import get_storage
-from app.storage.base import report_data_path
+from app.storage.base import report_data_storage_paths
 
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -847,14 +847,13 @@ def import_guest_workspace(
             new_path = f"reports/{target_scope}/{old_path[len(prefix):]}"
             storage.save_file(storage.resolve_path(old_path), new_path)
             copied_paths.append(new_path)
-            old_data_path = report_data_path(old_path)
-            new_data_path = report_data_path(new_path)
-            try:
-                storage.save_file(storage.resolve_path(old_data_path), new_data_path)
-                copied_paths.append(new_data_path)
-                old_paths.append(old_data_path)
-            except FileNotFoundError:
-                pass
+            for old_data_path, new_data_path in zip(report_data_storage_paths(old_path), report_data_storage_paths(new_path)):
+                try:
+                    storage.save_file(storage.resolve_path(old_data_path), new_data_path)
+                    copied_paths.append(new_data_path)
+                    old_paths.append(old_data_path)
+                except FileNotFoundError:
+                    continue
             path_updates.append((record, old_path, new_path))
             old_paths.append(old_path)
             total_storage_bytes += record.size_bytes + record.data_size_bytes

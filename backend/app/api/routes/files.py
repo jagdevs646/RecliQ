@@ -74,9 +74,10 @@ def upload_file(
                 f"The {extension or 'unknown'} format is not enabled for this workspace. Allowed formats: {allowed}.",
                 415,
             )
-        # Content, size and row limits are checked before anything is stored.
+        # Upload accepts the configured file-size ceiling; the worker enforces
+        # the per-sheet row limit when the user runs the data check.
         validated = validate_upload(
-            filename, file.file, max_bytes=max_bytes, max_rows=limits["max_rows_per_sheet"]
+            filename, file.file, max_bytes=max_bytes, max_rows=None
         )
     except UploadRejected as exc:
         record_event(

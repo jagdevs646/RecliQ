@@ -294,7 +294,7 @@ def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
 
 
 def run_precheck(db: Session, session_id: str, plan: ReconciliationPlan) -> dict[str, Any]:
-    from app.api.routes.analysis import _load_and_consolidate
+    from app.api.routes.analysis import _load_and_consolidate, _rule_columns
     from app.schemas.reconciliation import FileSource
 
     results = []
@@ -310,8 +310,14 @@ def run_precheck(db: Session, session_id: str, plan: ReconciliationPlan) -> dict
             sources_1 = [FileSource(**item) for item in rule["source_files_1"]]
             sources_2 = [FileSource(**item) for item in rule["source_files_2"]]
             with use_date_convention(bool(rule.get("date_dayfirst", True))), use_normalizer(build_normalizer(rule.get("normalization"))):
-                df1 = _load_and_consolidate(db, session_id, sources_1)
-                df2 = _load_and_consolidate(db, session_id, sources_2)
+                df1 = _load_and_consolidate(
+                    db, session_id, sources_1,
+                    needed_columns=_rule_columns(rule, "source"), orientation=plan.orientation,
+                )
+                df2 = _load_and_consolidate(
+                    db, session_id, sources_2,
+                    needed_columns=_rule_columns(rule, "destination"), orientation=plan.orientation,
+                )
                 for df in (df1, df2):
                     if "_ROW_NO" not in df.columns:
                         df["_ROW_NO"] = df.index + 2

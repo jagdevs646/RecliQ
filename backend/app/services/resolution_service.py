@@ -204,7 +204,18 @@ def preview(rule_payload: dict, report_data: dict, learning: LearningContext | N
     column is in the file)."""
     evaluator = Evaluator([compile_rule({**rule_payload, "enabled": True})], learning)
     category = evaluator.rules[0].category
-    matches: list[dict] = []
+    match_count = 0
+    sample: list[dict] = []
+
+    def record_match(record: dict) -> None:
+        nonlocal match_count
+        match_count += 1
+        if len(sample) < limit:
+            sample.append({
+                key: value for key, value in record.items()
+                if not str(key).startswith(("NORM_", "__", "File Pair ID", "Sheet Rule ID"))
+            })
+
     if category in {"only_in_source", "only_in_destination"}:
         section = "missing_in_file_2" if category == "only_in_source" else "missing_in_file_1"
         side = "source" if category == "only_in_source" else "destination"
@@ -212,23 +223,19 @@ def preview(rule_payload: dict, report_data: dict, learning: LearningContext | N
             if record.get("IDENTITY CLASSIFICATION") == "AMBIGUOUS_MATCH":
                 continue
             if evaluator.unmatched(record, side):
-                matches.append(record)
+                record_match(record)
     elif category == "field_difference":
         for record in report_data.get("exceptions", []):
             if evaluator.difference(record.get("Field", ""), record.get("File 1 Value"), record.get("File 2 Value"), record.get("Difference"), record):
-                matches.append(record)
+                record_match(record)
     else:
         for record in report_data.get("identity_resolution", []):
             if record.get("IDENTITY CLASSIFICATION") != "EXCEPTION_MATCH":
                 continue
             confidence = int(str(record.get("MATCH CONFIDENCE", "0")).rstrip("%") or 0)
             if evaluator.confirmation(record, record.get("MATCH KEY"), record.get("CANDIDATE KEY"), confidence, record.get("MATCH METHOD") or record.get("MATCH PASS") or ""):
-                matches.append(record)
-    visible = [
-        {key: value for key, value in record.items() if not str(key).startswith(("NORM_", "__", "File Pair ID", "Sheet Rule ID"))}
-        for record in matches[:limit]
-    ]
-    return {"matches": len(matches), "sample": visible, "summary": describe_rule(evaluator.rules[0])}
+                record_match(record)
+    return {"matches": match_count, "sample": sample, "summary": describe_rule(evaluator.rules[0])}
 
 
 # ── Recurring exceptions ──────────────────────────────────────────────────

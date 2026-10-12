@@ -38,21 +38,25 @@ class LocalStorage:
         relative_path = Path("reports") / str(session_id) / stored_filename
         destination = self.base_path / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source_path.read_bytes())
+        partial = destination.with_name(f"{destination.name}.part")
+        with source_path.open("rb") as source, partial.open("wb") as target:
+            copyfileobj(source, target)
+        partial.replace(destination)
         return StoredObject(
             original_filename=filename,
             stored_filename=stored_filename,
             storage_backend=self.name,
             storage_path=relative_path.as_posix(),
             size_bytes=destination.stat().st_size,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=("application/zip" if destination.suffix.lower() == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         )
 
     def save_file(self, source_path: Path, storage_path: str) -> None:
         destination = self.base_path / storage_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         partial = destination.with_name(f"{destination.name}.part")
-        partial.write_bytes(source_path.read_bytes())
+        with source_path.open("rb") as source, partial.open("wb") as target:
+            copyfileobj(source, target)
         partial.replace(destination)
 
     def resolve_path(self, storage_path: str) -> Path:

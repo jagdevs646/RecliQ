@@ -25,7 +25,8 @@ from app.services.policy_service import effective_limits, require_feature
 from app.services.quota_service import reserve_email
 from app.jobs.queue import enqueue_email_delivery
 from app.storage import get_storage
-from app.storage.base import report_data_path
+from app.storage.base import report_data_manifest_path, report_data_path
+from app.services.report_data_store import query_report_category, read_report_tables
 from pydantic import BaseModel
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
@@ -331,8 +332,22 @@ def _report_data_file(report: Report) -> Path | None:
         return None
 
 
+def _report_data_directory(report: Report) -> Path | None:
+    try:
+        return get_storage().resolve_path(report_data_manifest_path(report.storage_path)).parent
+    except FileNotFoundError:
+        return None
+
+
 def _report_preview_data(report: Report | Path) -> dict[str, Any]:
     """Stored report data, from a Report record or a local workbook path."""
+    if isinstance(report, Report):
+        directory = _report_data_directory(report)
+        if directory is not None:
+            try:
+                return read_report_tables(directory)
+            except (OSError, ValueError, KeyError) as exc:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Report table data is invalid") from exc
     raw_path = report.with_name(f"{report.stem}_data.json") if isinstance(report, Path) else _report_data_file(report)
     if raw_path is None or not raw_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report preview metadata is unavailable")
@@ -397,13 +412,17 @@ def download_job_report(
         summary=f"Downloaded report {report.filename}", metadata={"file_pair_id": file_pair_id, "report_id": report.id},
     )
     if not file_pair_id or path.suffix.lower() != ".zip":
-        # A single-pair job's only workbook is the whole report.
         return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
 
     try:
         manifest = json.loads(report.summary_json or "{}").get("file_pairs", [])
     except json.JSONDecodeError:
         manifest = []
+    if len(manifest) == 1:
+        if manifest[0].get("file_pair_id") != file_pair_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job")
+        # A capped single-pair report is a ZIP of one workbook and its full CSVs.
+        return FileResponse(path, filename=report.filename, media_type="application/zip")
     pair = next((item for item in manifest if item.get("file_pair_id") == file_pair_id), None)
     member = pair.get("report_filename") if pair else None
     if not member:
@@ -411,11 +430,26 @@ def download_job_report(
     with zipfile.ZipFile(path) as archive:
         if member not in archive.namelist():
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair report not found in archive")
-        content = archive.read(member)
-    return Response(
-        content,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{member}"'},
+        import os
+        import shutil
+        import tempfile
+
+        fd, temp_name = tempfile.mkstemp(suffix=Path(member).suffix, prefix="recliq_pair_report_")
+        os.close(fd)
+        extracted = Path(temp_name)
+        try:
+            with archive.open(member) as source, extracted.open("wb") as target:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+        except Exception:
+            extracted.unlink(missing_ok=True)
+            raise
+    from starlette.background import BackgroundTask
+
+    return FileResponse(
+        extracted,
+        filename=member,
+        media_type=_report_media_type(extracted),
+        background=BackgroundTask(lambda: extracted.unlink(missing_ok=True)),
     )
 
 
@@ -430,7 +464,11 @@ def _file_pair_universal_data(universal_data: dict[str, Any], file_pair_id: str)
     return {
         **pair_report,
         **{
-            category: [record for record in universal_data.get(category, []) if record.get("File Pair ID") == file_pair_id]
+            category: (
+                universal_data[category].for_file_pair(file_pair_id)
+                if hasattr(universal_data.get(category), "for_file_pair")
+                else [record for record in universal_data.get(category, []) if record.get("File Pair ID") == file_pair_id]
+            )
             for category in _PAIR_RECORD_CATEGORIES
         },
     }
@@ -449,29 +487,54 @@ def download_custom_report(
     storage = get_storage()
     path = storage.resolve_path(report.storage_path)
     raw_path = _report_data_file(report) or path.with_name(f"{path.stem}_data.json")
+    table_directory = _report_data_directory(report)
     is_archive = path.suffix.lower() == ".zip"
+    try:
+        file_pairs = json.loads(report.summary_json or "{}").get("file_pairs", [])
+    except json.JSONDecodeError:
+        file_pairs = []
+    if file_pair_id:
+        selected_pair = next((item for item in file_pairs if item.get("file_pair_id") == file_pair_id), None)
+        if selected_pair is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job")
+    elif len(file_pairs) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Choose a file pair to customize: each file pair has its own workbook.",
+        )
+    else:
+        selected_pair = file_pairs[0] if file_pairs else None
+        file_pair_id = selected_pair.get("file_pair_id") if selected_pair else None
     record_event(
         scope_id=session_id, actor=actor, action="report.customized", entity_type="job", entity_id=job_id,
         summary="Downloaded a customized report", after=config.model_dump(), metadata={"file_pair_id": file_pair_id},
     )
 
-    if is_archive and not file_pair_id:
-        raise HTTPException(
-            status_code=422,
-            detail="Choose a file pair to customize: each file pair has its own workbook.",
-        )
-
-    if not raw_path.exists():
+    if table_directory is not None:
+        try:
+            universal_data = read_report_tables(
+                table_directory,
+                file_pair_id=file_pair_id if is_archive and len(file_pairs) > 1 else None,
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            if isinstance(exc, KeyError):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job") from exc
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Report table data is invalid") from exc
+    elif not raw_path.exists():
         if is_archive:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report data is unavailable for customization")
         # Fallback to existing Excel file if raw data is lost
         return FileResponse(path, filename=report.filename, media_type=_report_media_type(path))
-
-    with open(raw_path, "r", encoding="utf-8") as f:
-        universal_data = json.load(f)
+    else:
+        with open(raw_path, "r", encoding="utf-8") as f:
+            universal_data = json.load(f)
     download_name = report.filename
-    if is_archive:
+    if is_archive and table_directory is None and len(file_pairs) > 1:
         universal_data = _file_pair_universal_data(universal_data, file_pair_id)
+        download_name = universal_data.get("report_filename") or "Reconciliation.xlsx"
+    elif is_archive and selected_pair:
+        download_name = selected_pair.get("report_filename") or report.filename
+    elif is_archive and table_directory is not None:
         download_name = universal_data.get("report_filename") or "Reconciliation.xlsx"
 
     # Generate new temp file
@@ -483,7 +546,7 @@ def download_custom_report(
     temp_path = Path(temp_path_str)
     
     try:
-        generate_enterprise_report(universal_data, config.model_dump(), temp_path)
+        generated = generate_enterprise_report(universal_data, config.model_dump(), temp_path)
     except Exception as e:
         if temp_path.exists():
             temp_path.unlink()
@@ -491,11 +554,21 @@ def download_custom_report(
         
     # We will let FileResponse handle it and optionally delete after? Wait, FileResponse doesn't delete automatically.
     # FastAPI background task can delete it.
+    if generated.capped:
+        archive_path = temp_path.with_suffix(".zip")
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.write(temp_path, temp_path.name)
+            for csv_path in generated.csv_paths:
+                archive.write(csv_path, csv_path.name)
+        temp_path.unlink(missing_ok=True)
+        for csv_path in generated.csv_paths:
+            csv_path.unlink(missing_ok=True)
+        temp_path = archive_path
     from starlette.background import BackgroundTask
     return FileResponse(
         temp_path, 
-        filename=f"Custom_{download_name}",
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"Custom_{Path(download_name).stem}{'.zip' if temp_path.suffix == '.zip' else '.xlsx'}",
+        media_type="application/zip" if temp_path.suffix == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         background=BackgroundTask(lambda: temp_path.unlink(missing_ok=True) if temp_path.exists() else None)
     )
 
@@ -524,6 +597,9 @@ def job_report_preview(
     limit: int = Query(default=25, ge=1, le=25),
     file_pair_id: str | None = Query(default=None),
     sheet_rule_id: str | None = Query(default=None),
+    search: str = Query(default="", max_length=200),
+    sort_by: str | None = Query(default=None, max_length=200),
+    sort_direction: str = Query(default="asc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
     session_id: str = Depends(get_session_id),
 ) -> dict[str, Any]:
@@ -531,23 +607,44 @@ def job_report_preview(
     section = _PREVIEW_SECTIONS.get(category)
     if section is None:
         raise HTTPException(status_code=422, detail="Unknown preview category")
-    data = _report_preview_data(report)
-    records = data.get(section, [])
-    if file_pair_id:
-        records = [record for record in records if record.get("File Pair ID") == file_pair_id]
-    if sheet_rule_id:
-        records = [record for record in records if record.get("Sheet Rule ID") == sheet_rule_id]
-    if category == "review":
-        records = [record for record in records if record.get("IDENTITY CLASSIFICATION") != "EXACT_MATCH"]
-    elif category in _PREVIEW_CLASSIFICATIONS:
-        records = [record for record in records if record.get("IDENTITY CLASSIFICATION") in _PREVIEW_CLASSIFICATIONS[category]]
-    columns = [
-        column
-        for column in dict.fromkeys(str(column) for record in records for column in record)
-        if _preview_column_visible(column)
-    ]
-    total_rows = len(records)
-    page = records[offset:offset + limit]
+    table_directory = _report_data_directory(report)
+    if table_directory is not None:
+        try:
+            queried = query_report_category(
+                table_directory, section, offset=offset, limit=limit,
+                file_pair_id=file_pair_id, sheet_rule_id=sheet_rule_id,
+                classifications=_PREVIEW_CLASSIFICATIONS.get(category),
+                exclude_exact_matches=category == "review", search=search,
+                sort_by=sort_by, sort_direction=sort_direction,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except (OSError, KeyError) as exc:
+            raise HTTPException(status_code=500, detail="Report preview data is unavailable") from exc
+        columns = [column for column in queried["columns"] if _preview_column_visible(column)]
+        page = queried["rows"]
+        total_rows = queried["total_rows"]
+    else:
+        data = _report_preview_data(report)
+        records = data.get(section, [])
+        if file_pair_id:
+            records = [record for record in records if record.get("File Pair ID") == file_pair_id]
+        if sheet_rule_id:
+            records = [record for record in records if record.get("Sheet Rule ID") == sheet_rule_id]
+        if category == "review":
+            records = [record for record in records if record.get("IDENTITY CLASSIFICATION") != "EXACT_MATCH"]
+        elif category in _PREVIEW_CLASSIFICATIONS:
+            records = [record for record in records if record.get("IDENTITY CLASSIFICATION") in _PREVIEW_CLASSIFICATIONS[category]]
+        if search.strip():
+            needle = search.strip().casefold()
+            records = [record for record in records if any(needle in str(value).casefold() for key, value in record.items() if _preview_column_visible(str(key)) and value is not None)]
+        if sort_by:
+            if any(sort_by not in record for record in records):
+                raise HTTPException(status_code=422, detail="The selected sort column is not available in this result.")
+            records = sorted(records, key=lambda item: (item.get(sort_by) is None, str(item.get(sort_by) or "").casefold()), reverse=sort_direction == "desc")
+        columns = [column for column in dict.fromkeys(str(column) for record in records for column in record) if _preview_column_visible(column)]
+        total_rows = len(records)
+        page = records[offset:offset + limit]
     return {
         "category": category,
         "sheet_name": section,

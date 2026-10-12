@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import logging
+import shutil
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -39,7 +40,12 @@ from app.services.job_service import append_history
 from app.services.policy_service import effective_features, effective_limits, require_feature
 from app.services.quota_service import release_job_slot, reserve_job, reserve_storage
 from app.storage import get_storage
-from app.storage.base import report_data_path
+from app.storage.base import (
+    REPORT_DATA_CATEGORIES,
+    report_data_category_path,
+    report_data_manifest_path,
+)
+from app.services.report_data_store import write_report_tables
 
 logger = logging.getLogger("recliq.jobs")
 
@@ -405,6 +411,8 @@ def _process_claimed_job(job_id: str) -> None:
     settings = get_settings()
     storage = get_storage()
     output_path: Path | None = None
+    local_artifacts: list[Path] = []
+    result_data_dir: Path | None = None
     persisted_storage_paths: list[str] = []
     report_committed = False
     try:
@@ -479,7 +487,7 @@ def _process_claimed_job(job_id: str) -> None:
         if is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
 
-        from app.api.routes.analysis import _load_and_consolidate
+        from app.api.routes.analysis import _load_and_consolidate, _rule_columns
         from app.schemas.reconciliation import FileSource
 
         if job.job_type == "generic":
@@ -577,8 +585,18 @@ def _process_claimed_job(job_id: str) -> None:
                 manifest_entry["destination_file"] = destination_record.original_filename
                 if job.job_type == "generic":
                     on_progress(int(rule_start), f"Reconciling {stage}")
-                df1 = _load_and_consolidate(db, job.session_id, sources_1)
-                df2 = _load_and_consolidate(db, job.session_id, sources_2)
+                orientation = payload.get("orientation", job.orientation)
+                projected = job.job_type == "generic"
+                df1 = _load_and_consolidate(
+                    db, job.session_id, sources_1,
+                    needed_columns=_rule_columns(pair, "source") if projected else None,
+                    orientation=orientation,
+                )
+                df2 = _load_and_consolidate(
+                    db, job.session_id, sources_2,
+                    needed_columns=_rule_columns(pair, "destination") if projected else None,
+                    orientation=orientation,
+                )
                 sheet_name_1, sheet_name_2 = s1.sheet_id or "default", s2.sheet_id or "default"
                 report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
                 manifest_entry["report_label"] = report_label
@@ -589,7 +607,7 @@ def _process_claimed_job(job_id: str) -> None:
                         file_1_df=df1,
                         file_2_df=df2,
                         output_path=output_path,
-                        orientation=payload.get("orientation", job.orientation),
+                        orientation=orientation,
                         text_threshold=int(payload.get("text_threshold", 85)),
                         progress_callback=on_progress,
                         file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
@@ -602,7 +620,7 @@ def _process_claimed_job(job_id: str) -> None:
                         file_1_df=df1, file_2_df=df2, output_path=output_path,
                         key_file_1=[key_f1] if isinstance(key_f1, str) else key_f1,
                         key_file_2=[key_f2] if isinstance(key_f2, str) else key_f2,
-                        rules=pair.get("rules", payload.get("rules", [])), orientation=payload.get("orientation", job.orientation),
+                        rules=pair.get("rules", payload.get("rules", [])), orientation=orientation,
                         include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
                         include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
                         progress_callback=rule_progress, file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
@@ -651,7 +669,6 @@ def _process_claimed_job(job_id: str) -> None:
         overall_summary["failed_rules"] = len(rule_errors)
         overall_summary["completed_rules"] = len(rule_results)
 
-        from app.utils.json_encoder import safe_json_dump
         from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
         on_progress(90, "Generating reconciliation report" if len(file_pair_manifest) == 1 else f"Generating {len(file_pair_manifest)} file-pair reports")
@@ -663,11 +680,25 @@ def _process_claimed_job(job_id: str) -> None:
             merged_ud["file_pairs"] = file_pair_manifest
             if len(file_pair_manifest) == 1:
                 _label_multi_rule_report(merged_ud, rule_manifest)
-                generate_enterprise_report(merged_ud, {}, output_path)
+                generated = generate_enterprise_report(merged_ud, {}, output_path)
+                local_artifacts.extend((output_path, *generated.csv_paths))
+                if generated.capped:
+                    archive_path = output_path.with_suffix(".zip")
+                    local_artifacts.append(archive_path)
+                    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                        archive.write(output_path, output_name)
+                        for csv_path in generated.csv_paths:
+                            archive.write(csv_path, csv_path.name)
+                    output_path.unlink(missing_ok=True)
+                    for csv_path in generated.csv_paths:
+                        csv_path.unlink(missing_ok=True)
+                    output_path = archive_path
+                    output_name = "Reconciliation_Report.zip"
             else:
                 archive_path = output_path.with_name(f"{job.id}-{_REPORT_ARCHIVE_NAME}")
+                local_artifacts.append(archive_path)
                 with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                    used_names: set[str] = set()
+                    used_stems: set[str] = set()
                     for number, pair_entry in enumerate(file_pair_manifest, start=1):
                         pair_rules = [result for result in rule_results if result["file_pair_id"] == pair_entry["file_pair_id"]]
                         if not pair_rules:
@@ -682,28 +713,54 @@ def _process_claimed_job(job_id: str) -> None:
                             for key in ("metadata", "statistics", "overall_status", "control_checks", "sheet_rules")
                         }
                         stem = _safe_report_stem(pair_entry["label"], f"Reconciliation_{number}")
-                        filename = f"{stem}.xlsx"
+                        unique_stem = stem
                         suffix = 2
-                        while filename.lower() in used_names:
-                            filename = f"{stem}_{suffix}.xlsx"
+                        while unique_stem.lower() in used_stems:
+                            unique_stem = f"{stem}_{suffix}"
                             suffix += 1
-                        used_names.add(filename.lower())
+                        used_stems.add(unique_stem.lower())
+                        workbook_name = f"{unique_stem}.xlsx"
+                        pair_path = work_dir / f"{job.id}-{number}-{workbook_name}"
+                        local_artifacts.append(pair_path)
+                        generated = generate_enterprise_report(pair_data, {}, pair_path)
+                        local_artifacts.extend(generated.csv_paths)
+                        filename = workbook_name
+                        if generated.capped:
+                            filename = f"{unique_stem}.zip"
+                            pair_archive = pair_path.with_suffix(".zip")
+                            local_artifacts.append(pair_archive)
+                            with zipfile.ZipFile(pair_archive, "w", compression=zipfile.ZIP_DEFLATED) as pair_zip:
+                                pair_zip.write(pair_path, workbook_name)
+                                for csv_path in generated.csv_paths:
+                                    pair_zip.write(csv_path, csv_path.name)
+                            archive.write(pair_archive, filename)
+                            pair_archive.unlink(missing_ok=True)
+                            for csv_path in generated.csv_paths:
+                                csv_path.unlink(missing_ok=True)
+                        else:
+                            archive.write(pair_path, filename)
+                        pair_path.unlink(missing_ok=True)
                         pair_entry["report_filename"] = filename
                         merged_ud["file_pair_reports"][pair_entry["file_pair_id"]]["report_filename"] = filename
-                        pair_path = work_dir / f"{job.id}-{number}-{filename}"
-                        generate_enterprise_report(pair_data, {}, pair_path)
-                        archive.write(pair_path, filename)
-                        pair_path.unlink(missing_ok=True)
                 output_path = archive_path
                 output_name = _REPORT_ARCHIVE_NAME
             if len(file_pair_manifest) == 1:
                 file_pair_manifest[0]["report_filename"] = output_name
         else:
-            generate_enterprise_report(merged_ud, {}, output_path)
-
-        raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-        with open(raw_path, "w", encoding="utf-8") as f:
-            safe_json_dump(merged_ud, f)
+            generated = generate_enterprise_report(merged_ud, {}, output_path)
+            local_artifacts.extend((output_path, *generated.csv_paths))
+            if generated.capped:
+                archive_path = output_path.with_suffix(".zip")
+                local_artifacts.append(archive_path)
+                with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(output_path, output_name)
+                    for csv_path in generated.csv_paths:
+                        archive.write(csv_path, csv_path.name)
+                output_path.unlink(missing_ok=True)
+                for csv_path in generated.csv_paths:
+                    csv_path.unlink(missing_ok=True)
+                output_path = archive_path
+                output_name = f"{Path(output_name).stem}.zip"
         summary = overall_summary
 
         if is_cancelled():
@@ -712,14 +769,19 @@ def _process_claimed_job(job_id: str) -> None:
         stored_report = storage.save_report(output_path, job.session_id, output_name)
         persisted_storage_paths.append(stored_report.storage_path)
 
-        # The report data is stored as its own object (local disk or blob
-        # storage), so previews and custom reports work from any worker.
-        data_size_bytes = 0
-        data_storage_path = report_data_path(stored_report.storage_path)
-        if raw_path.exists():
-            storage.save_file(raw_path, data_storage_path)
-            persisted_storage_paths.append(data_storage_path)
-            data_size_bytes = raw_path.stat().st_size
+        # Keep result rows in separate Parquet objects so previews can page
+        # them without reconstructing a full JSON result in the API process.
+        result_data_dir = work_dir / f"{job.id}-result-data"
+        data_manifest = write_report_tables(merged_ud, result_data_dir)
+        data_size_bytes = int(data_manifest["size_bytes"])
+        for category in REPORT_DATA_CATEGORIES:
+            data_path = result_data_dir / f"{category}.parquet"
+            stored_path = report_data_category_path(stored_report.storage_path, category)
+            storage.save_file(data_path, stored_path)
+            persisted_storage_paths.append(stored_path)
+        manifest_path = report_data_manifest_path(stored_report.storage_path)
+        storage.save_file(result_data_dir / "summary.json", manifest_path)
+        persisted_storage_paths.append(manifest_path)
         user = db.get(User, job.session_id.removeprefix("user-")) if job.session_id.startswith("user-") else None
         reserve_storage(db, job.session_id, stored_report.size_bytes + data_size_bytes, effective_limits(db, user)["storage_mb"])
         from app.utils.json_encoder import safe_json_dumps
@@ -857,11 +919,12 @@ def _process_claimed_job(job_id: str) -> None:
         try:
             # Input paths point at durable session-owned uploads. Only transient
             # work artifacts are removed after their copies have been saved.
+            for artifact in local_artifacts:
+                artifact.unlink(missing_ok=True)
             if output_path and output_path.exists():
                 output_path.unlink(missing_ok=True)
-                raw_path = output_path.with_name(f"{output_path.stem}_data.json")
-                if raw_path.exists():
-                    raw_path.unlink(missing_ok=True)
+            if result_data_dir is not None and result_data_dir.exists():
+                shutil.rmtree(result_data_dir, ignore_errors=True)
             if not report_committed:
                 for storage_path in persisted_storage_paths:
                     storage.delete_file(storage_path)

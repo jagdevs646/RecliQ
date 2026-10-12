@@ -74,6 +74,37 @@ def test_size_and_row_limits_are_enforced():
     assert validated.row_counts == {"Data": 31} and validated.content_type == XLSX
 
 
+def test_over_limit_csv_uploads_but_precheck_refuses_to_run_it(monkeypatch):
+    from _helpers import single_rule_plan
+    from app.jobs.precheck_runner import run_precheck_task
+    from unittest.mock import patch
+
+    data_rows = 1_000_000
+    content = io.BytesIO()
+    content.write(b"Invoice,Amount\n")
+    for index in range(data_rows):
+        content.write(f"INV-{index},{index}\n".encode())
+    content.seek(0)
+    with TestClient(app) as client:
+        monkeypatch.setattr("app.api.routes.files.warm_table_cache", lambda *_args: None)
+        uploaded = client.post("/api/files/upload", files={"file": ("large.csv", content, "text/csv")})
+        assert uploaded.status_code == 201, uploaded.text
+        source_id = uploaded.json()["id"]
+        destination_id = upload(client, "small.xlsx", {"Data": [{"Invoice": "INV-1", "Amount": 1}]})
+        plan = single_rule_plan(
+            source_id, destination_id, "Main Data", "Data",
+            matching_strategy={"primary_key_source": ["Invoice"], "primary_key_destination": ["Invoice"]},
+            reconciliation_mapping=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+        )
+        with patch("app.api.routes.analysis.enqueue_precheck", side_effect=run_precheck_task):
+            response = client.post("/api/analysis/precheck", json=plan)
+        assert response.status_code == 202, response.text
+        result = response.json()["result"]
+        assert result["status"] == "blockers"
+        errors = [issue["message"] for rule in result["rules"] for issue in rule["issues"]]
+        assert any("1,000,000 rows" in message and "500,000 rows per sheet" in message for message in errors)
+
+
 def test_oversized_request_is_refused_before_it_is_read():
     settings_limit = 50 * MB + 1024 * 1024
     with TestClient(app) as client:

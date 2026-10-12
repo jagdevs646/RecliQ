@@ -1,5 +1,6 @@
 import hashlib
 import os
+from shutil import copyfileobj
 from pathlib import Path, PurePosixPath
 from tempfile import gettempdir
 from uuid import uuid4
@@ -43,41 +44,54 @@ class AzureBlobStorage:
         partial.write_bytes(data)
         os.replace(partial, cached)
 
+    def _remember_stream(self, storage_path: str, stream) -> Path:
+        cached = self._cache_path(storage_path)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        partial = cached.with_name(f"{cached.name}.{os.getpid()}.part")
+        stream.seek(0)
+        try:
+            with partial.open("wb") as target:
+                copyfileobj(stream, target, length=1024 * 1024)
+            os.replace(partial, cached)
+        finally:
+            partial.unlink(missing_ok=True)
+        return cached
+
     def save_upload(self, file: UploadFile, session_id: str, content_type: str | None = None) -> StoredObject:
         suffix = Path(file.filename or "upload.xlsx").suffix or ".xlsx"
         stored_filename = f"{uuid4()}{suffix}"
         storage_path = f"uploads/{str(session_id)}/{stored_filename}"
         file.file.seek(0)
-        data = file.file.read()
-        self.container.upload_blob(storage_path, data, overwrite=True)
-        self._remember(storage_path, data)
+        self.container.upload_blob(storage_path, file.file, overwrite=True, max_concurrency=2)
+        cached = self._remember_stream(storage_path, file.file)
         return StoredObject(
             original_filename=file.filename or stored_filename,
             stored_filename=stored_filename,
             storage_backend=self.name,
             storage_path=storage_path,
-            size_bytes=len(data),
+            size_bytes=cached.stat().st_size,
             content_type=content_type or file.content_type,
         )
 
     def save_report(self, source_path: Path, session_id: str, filename: str) -> StoredObject:
         stored_filename = f"{uuid4()}-{filename}"
         storage_path = f"reports/{str(session_id)}/{stored_filename}"
-        data = source_path.read_bytes()
-        self.container.upload_blob(storage_path, data, overwrite=True)
+        with source_path.open("rb") as source:
+            self.container.upload_blob(storage_path, source, overwrite=True, max_concurrency=2)
         return StoredObject(
             original_filename=filename,
             stored_filename=stored_filename,
             storage_backend=self.name,
             storage_path=storage_path,
-            size_bytes=len(data),
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size_bytes=source_path.stat().st_size,
+            content_type=("application/zip" if filename.lower().endswith(".zip") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         )
 
     def save_file(self, source_path: Path, storage_path: str) -> None:
-        data = source_path.read_bytes()
-        self.container.upload_blob(storage_path, data, overwrite=True)
-        self._remember(storage_path, data)
+        with source_path.open("rb") as source:
+            self.container.upload_blob(storage_path, source, overwrite=True, max_concurrency=2)
+        with source_path.open("rb") as source:
+            self._remember_stream(storage_path, source)
 
     def resolve_path(self, storage_path: str) -> Path:
         cached = self._cache_path(storage_path)
@@ -86,10 +100,17 @@ class AzureBlobStorage:
         from azure.core.exceptions import ResourceNotFoundError
 
         try:
-            data = self.container.download_blob(storage_path).readall()
+            downloader = self.container.download_blob(storage_path)
         except ResourceNotFoundError as exc:
             raise FileNotFoundError(storage_path) from exc
-        self._remember(storage_path, data)
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        partial = cached.with_name(f"{cached.name}.{os.getpid()}.part")
+        try:
+            with partial.open("wb") as handle:
+                downloader.readinto(handle)
+            os.replace(partial, cached)
+        finally:
+            partial.unlink(missing_ok=True)
         return cached
 
     def delete_file(self, storage_path: str) -> bool:

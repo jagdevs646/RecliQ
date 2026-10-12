@@ -1,8 +1,18 @@
 """Data-quality pre-check, saved reconciliations, and alias learning."""
+import gc
+import io
+import json
+import os
+import time
+import threading
+
 from fastapi.testclient import TestClient
+import pytest
+from unittest.mock import patch
 
 from _helpers import preview, single_rule_plan, upload, wait_for_job
 from app.main import app
+from app.jobs.precheck_runner import run_precheck_task
 
 KEYED = {
     "matching_strategy": {"primary_key_source": ["Invoice"], "primary_key_destination": ["Invoice"]},
@@ -16,6 +26,19 @@ def _issues(result: dict) -> dict[str, list[dict]]:
         for issue in rule["issues"]:
             grouped.setdefault(issue["category"], []).append(issue)
     return grouped
+
+
+def _precheck(client: TestClient, plan: dict) -> dict:
+    # Keep this API test deterministic while exercising the same worker entry point.
+    with patch("app.api.routes.analysis.enqueue_precheck", side_effect=run_precheck_task):
+        response = client.post("/api/analysis/precheck", json=plan)
+    assert response.status_code == 202, response.text
+    task = response.json()
+    if task["status"] == "completed":
+        return task["result"]
+    status = client.get(f"/api/analysis/precheck/{task['id']}")
+    assert status.status_code == 200, status.text
+    return status.json()["result"]
 
 
 # ── Pre-check ──────────────────────────────────────────────────────────────
@@ -35,7 +58,7 @@ def test_precheck_reports_input_problems_before_matching():
             **KEYED,
             "reconciliation_mapping": KEYED["reconciliation_mapping"] + [{"file_1_fields": ["Date"], "file_2_fields": ["Date"]}],
         })
-        result = client.post("/api/analysis/precheck", json=plan).json()
+        result = _precheck(client, plan)
 
     issues = _issues(result)
     assert result["status"] == "blockers"
@@ -52,12 +75,98 @@ def test_precheck_blocks_missing_columns_and_passes_clean_data():
     with TestClient(app) as client:
         source = upload(client, "a.xlsx", {"S": [{"Invoice": "A", "Amount": 1}]})
         destination = upload(client, "b.xlsx", {"D": [{"Invoice": "A", "Amount": 1}]})
-        clean = client.post("/api/analysis/precheck", json=single_rule_plan(source, destination, "S", "D", **KEYED)).json()
-        broken = client.post("/api/analysis/precheck", json=single_rule_plan(source, destination, "S", "D", **{
+        clean = _precheck(client, single_rule_plan(source, destination, "S", "D", **KEYED))
+        broken = _precheck(client, single_rule_plan(source, destination, "S", "D", **{
             **KEYED, "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Net Amount"]}],
-        })).json()
+        }))
     assert clean["status"] == "ok"
     assert broken["status"] == "blockers" and "NET AMOUNT" in _issues(broken)["missing_column"][0]["message"]
+
+
+def test_local_precheck_runs_as_a_persisted_background_task(monkeypatch):
+    from app.core.config import get_settings
+
+    if get_settings().job_queue_backend.lower() != "local":
+        return
+    monkeypatch.setattr("app.api.routes.files.warm_table_cache", lambda *_args: None)
+    with TestClient(app) as client:
+        source = upload(client, "a.xlsx", {"S": [{"Invoice": "A", "Amount": 1}]})
+        destination = upload(client, "b.xlsx", {"D": [{"Invoice": "A", "Amount": 1}]})
+        response = client.post("/api/analysis/precheck", json=single_rule_plan(source, destination, "S", "D", **KEYED))
+        assert response.status_code == 202, response.text
+        task = response.json()
+        deadline = time.monotonic() + 15
+        while task["status"] in {"queued", "processing"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            task = client.get(f"/api/analysis/precheck/{task['id']}").json()
+        assert task["status"] == "completed", task
+        assert task["result"]["status"] == "ok"
+
+
+def test_500k_precheck_stays_out_of_the_api_process(monkeypatch):
+    from app.core.config import get_settings
+
+    if get_settings().job_queue_backend.lower() != "local":
+        pytest.skip("This process-isolation check uses the local process queue.")
+    try:
+        import psutil
+    except ImportError:
+        pytest.skip("psutil is needed to measure API-process memory.")
+
+    rows = 500_000
+    csv_content = ("Invoice,Amount\n" + "".join(f"INV-{index:07d},{index}\n" for index in range(rows))).encode()
+    with TestClient(app) as client:
+        monkeypatch.setattr("app.api.routes.files.warm_table_cache", lambda *_args: None)
+        source_response = client.post("/api/files/upload", files={"file": ("source.csv", io.BytesIO(csv_content), "text/csv")})
+        destination_response = client.post("/api/files/upload", files={"file": ("destination.csv", io.BytesIO(csv_content), "text/csv")})
+        assert source_response.status_code == 201, source_response.text
+        assert destination_response.status_code == 201, destination_response.text
+        source_id, destination_id = source_response.json()["id"], destination_response.json()["id"]
+        del csv_content, source_response, destination_response
+        gc.collect()
+
+        process = psutil.Process(os.getpid())
+        baseline = process.memory_info().rss
+        peak = [baseline]
+        stop = threading.Event()
+
+        def sample_api_memory():
+            while not stop.is_set():
+                peak[0] = max(peak[0], process.memory_info().rss)
+                stop.wait(0.02)
+
+        sampler = threading.Thread(target=sample_api_memory, daemon=True)
+        sampler.start()
+        plan = single_rule_plan(
+            source_id, destination_id, "Main Data", "Main Data",
+            **{
+                "matching_strategy": {"primary_key_source": ["Invoice"], "primary_key_destination": ["Invoice"]},
+                "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+            },
+        )
+        started = time.perf_counter()
+        response = client.post("/api/analysis/precheck", json=plan)
+        assert response.status_code == 202, response.text
+        task = response.json()
+        deadline = time.monotonic() + 180
+        while task["status"] in {"queued", "processing"} and time.monotonic() < deadline:
+            time.sleep(0.5)
+            task = client.get(f"/api/analysis/precheck/{task['id']}").json()
+        elapsed = time.perf_counter() - started
+        stop.set()
+        sampler.join()
+
+        assert task["status"] == "completed", task
+        assert task["result"]["status"] == "ok"
+        rule_result = task["result"]["rules"][0]
+        assert (rule_result["source_rows"], rule_result["destination_rows"]) == (rows, rows)
+        growth_mb = (peak[0] - baseline) / (1024 * 1024)
+        assert growth_mb < 64, f"API process grew by {growth_mb:.1f} MB during the worker pre-check"
+        print("phase2_precheck_metrics=" + json.dumps({
+            "rows_per_file": rows,
+            "elapsed_seconds": round(elapsed, 2),
+            "api_rss_growth_mb": round(growth_mb, 1),
+        }, separators=(",", ":")))
 
 
 def test_acknowledged_precheck_is_stored_with_the_job_and_audited():

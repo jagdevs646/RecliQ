@@ -5,6 +5,17 @@ from typing import Protocol
 from fastapi import UploadFile
 
 
+REPORT_DATA_CATEGORIES = (
+    "exceptions",
+    "matched_records",
+    "missing_in_file_1",
+    "missing_in_file_2",
+    "field_differences",
+    "identity_resolution",
+    "auto_resolved",
+)
+
+
 @dataclass(frozen=True)
 class StoredObject:
     original_filename: str
@@ -20,6 +31,30 @@ def report_data_path(report_storage_path: str) -> str:
     previews are rebuilt from it)."""
     path = PurePosixPath(report_storage_path)
     return str(path.with_name(f"{path.stem}_data.json"))
+
+
+def report_data_directory(report_storage_path: str) -> str:
+    path = PurePosixPath(report_storage_path)
+    return str(path.with_name(f"{path.stem}_data"))
+
+
+def report_data_manifest_path(report_storage_path: str) -> str:
+    return f"{report_data_directory(report_storage_path)}/summary.json"
+
+
+def report_data_category_path(report_storage_path: str, category: str) -> str:
+    if category not in REPORT_DATA_CATEGORIES:
+        raise ValueError(f"Unknown report data category: {category}")
+    return f"{report_data_directory(report_storage_path)}/{category}.parquet"
+
+
+def report_data_storage_paths(report_storage_path: str) -> tuple[str, ...]:
+    """New table files plus the legacy JSON path, for migration and cleanup."""
+    return (
+        report_data_path(report_storage_path),
+        report_data_manifest_path(report_storage_path),
+        *(report_data_category_path(report_storage_path, category) for category in REPORT_DATA_CATEGORIES),
+    )
 
 
 class StorageBackend(Protocol):

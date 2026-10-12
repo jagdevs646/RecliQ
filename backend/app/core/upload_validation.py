@@ -174,7 +174,7 @@ def _row_counts(extension: str, stream: BinaryIO) -> dict[str, int]:
     return {}  # PDF/Word tables are bounded by the file-size limit.
 
 
-def validate_upload(filename: str | None, stream: BinaryIO, *, max_bytes: int, max_rows: int) -> ValidatedUpload:
+def validate_upload(filename: str | None, stream: BinaryIO, *, max_bytes: int, max_rows: int | None = None) -> ValidatedUpload:
     extension = _extension(filename)
     if extension not in SUPPORTED_FORMATS:
         shown = extension or "files without an extension"
@@ -195,12 +195,13 @@ def validate_upload(filename: str | None, stream: BinaryIO, *, max_bytes: int, m
     row_counts = _finance_row_counts(extension, head, stream)
     if row_counts is None:
         row_counts = _row_counts(extension, stream)
-    for sheet, rows in row_counts.items():
-        data_rows = max(0, rows - 1)  # The first row is the header.
-        if data_rows > max_rows:
-            raise UploadRejected(
-                f"Sheet '{sheet}' has {data_rows:,} data rows; the limit is {max_rows:,} rows per sheet.", 413
-            )
+    if max_rows is not None:
+        for sheet, rows in row_counts.items():
+            data_rows = max(0, rows - 1)  # The first row is the header.
+            if data_rows > max_rows:
+                raise UploadRejected(
+                    f"Sheet '{sheet}' has {data_rows:,} data rows; the limit is {max_rows:,} rows per sheet.", 413
+                )
     return ValidatedUpload(extension, SUPPORTED_FORMATS[extension]["content_type"], size, row_counts)
 
 

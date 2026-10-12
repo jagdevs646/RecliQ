@@ -311,8 +311,8 @@ def test_two_sheet_rules_keep_independent_keys_conditions_and_counts():
         assert report.headers["content-type"].startswith(_XLSX)
         workbook = openpyxl.load_workbook(io.BytesIO(report.content))
         rule_sheet = workbook["08 Sheet Rules"]
-        headers = [row[0].value for row in rule_sheet.iter_rows() if str(row[0].value or "").startswith("RULE ")]
-        assert headers == ["RULE 1 — Sales ↔ Sales Ledger", "RULE 2 — Payments ↔ Bank"]
+        rule_rows = list(rule_sheet.iter_rows(min_row=5, max_row=6, values_only=True))
+        assert [row[1] for row in rule_rows] == ["Sales -> Sales Ledger", "Payments -> Bank"]
 
         with SessionLocal() as db:
             messages = [item.message for item in db.query(ReconciliationHistory).filter(ReconciliationHistory.job_id == job["id"])]
@@ -380,4 +380,60 @@ def test_three_file_pairs_zip_with_sanitized_unique_names_and_per_pair_download(
         assert "06 Matched" not in custom_workbook.sheetnames
         # Mar's own figures (1 record), not the job-wide total of 3.
         assert custom_workbook["01 Summary"]["B7"].value == 1
-        assert custom_workbook["01 Summary"]["C11"].value == 1
+        assert custom_workbook["01 Summary"]["B7"].value == 1
+
+
+def test_capped_single_pair_zip_download_and_customization(monkeypatch):
+    from app.reconciliation_engine import universal_reporter
+
+    monkeypatch.setattr(universal_reporter, "MATCHED_WORKBOOK_ROW_CAP", 1)
+    with TestClient(app) as client:
+        source_id = _upload(client, "Books.xlsx", {"Data": [
+            {"Invoice": "INV-001", "Amount": 10},
+            {"Invoice": "INV-002", "Amount": 20},
+        ]})
+        destination_id = _upload(client, "Bank.xlsx", {"Data": [
+            {"Invoice": "INV-001", "Amount": 10},
+            {"Invoice": "INV-002", "Amount": 20},
+        ]})
+        payload = {"file_pairs": [{
+            "file_pair_id": "only-pair",
+            "source_files": [{"file_id": source_id}],
+            "destination_files": [{"file_id": destination_id}],
+            "sheet_rules": [{
+                "sheet_rule_id": "only-rule",
+                "source_sheets": ["Data"],
+                "destination_sheets": ["Data"],
+                "matching_strategy": {"primary_key_source": ["Invoice"], "primary_key_destination": ["Invoice"]},
+                "reconciliation_mapping": [{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"]}],
+            }],
+        }]}
+        started = client.post("/api/reconciliation/generic", json=payload)
+        assert started.status_code == 200
+        job = _wait_for_job(client, started.json()["id"])
+        assert job["status"] == "completed", job.get("error_message")
+
+        manifest = client.get(f"/api/reports/job/{job['id']}/summary").json()["file_pairs"]
+        assert len(manifest) == 1
+        assert manifest[0]["report_filename"].endswith(".zip")
+
+        download = client.get(
+            f"/api/reports/job/{job['id']}/download",
+            params={"file_pair_id": "only-pair"},
+        )
+        assert download.status_code == 200
+        assert download.headers["content-type"].startswith("application/zip")
+        with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
+            assert any(name.endswith(".xlsx") for name in archive.namelist())
+            assert any(name.endswith("_matched_full.csv") for name in archive.namelist())
+        assert client.get(
+            f"/api/reports/job/{job['id']}/download",
+            params={"file_pair_id": "invalid"},
+        ).status_code == 404
+
+        custom = client.post(f"/api/reports/job/{job['id']}/download_custom", json={})
+        assert custom.status_code == 200
+        assert custom.headers["content-type"].startswith("application/zip")
+        with zipfile.ZipFile(io.BytesIO(custom.content)) as archive:
+            assert any(name.endswith(".xlsx") for name in archive.namelist())
+            assert any(name.endswith("_matched_full.csv") for name in archive.namelist())

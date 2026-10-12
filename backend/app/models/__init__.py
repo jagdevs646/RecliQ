@@ -5,6 +5,7 @@ from app.models.base import Base
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
+from app.models.precheck import ReconciliationPrecheck
 from app.models.report import Report
 from app.models.resolution import ExceptionPattern, ResolutionRule
 from app.models.review import ReviewOutcome
@@ -26,6 +27,7 @@ __all__ = [
     "UploadedFile",
     "Report",
     "ReconciliationJob",
+    "ReconciliationPrecheck",
     "ReconciliationHistory",
     "ReconciliationTemplate",
     "ReconciliationTemplateVersion",

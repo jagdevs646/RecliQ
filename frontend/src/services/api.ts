@@ -1,4 +1,4 @@
-import type { AccountIdentity, AdminEmailDeliveryRecord, AdminEmailDeliverySummary, AdminOverview, AdminUser, AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, GstJobPlan, Job, JobPlan, LearningOverview, PrecheckResult, PreviewCategory, ReconciliationSummary, ReportEmailDelivery, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile, WorkspaceOverview, SupportTicket, SupportTicketMessage } from "../types";
+import type { AccountIdentity, AdminEmailDeliveryRecord, AdminEmailDeliverySummary, AdminOverview, AdminUser, AliasSuggestion, AnalysisResponse, AuditEvent, EntityAlias, FileMetadataResponse, FileSource, GenericPlanPayload, GstConfiguration, GstJobPlan, Job, JobPlan, LearningOverview, PrecheckResult, PrecheckTask, PreviewCategory, ReconciliationSummary, ReportEmailDelivery, ReportPreview, ReportScope, ResolutionRule, RuleCatalog, RuleDraft, RulePreviewResult, RuleSuggestion, SupportedFormats, TemplateResolution, TemplateRunRequest, TemplateSummary, UploadedFile, WorkspaceOverview, SupportTicket, SupportTicketMessage } from "../types";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 const SESSION_STORAGE_KEY = "recliq_session_id";
@@ -169,7 +169,15 @@ export class ApiClient {
 
   /** Data-quality pre-check of a planned run (same body as the run request). */
   async precheck(payload: GenericPlanPayload): Promise<PrecheckResult> {
-    return this.request<PrecheckResult>("/analysis/precheck", { method: "POST", body: JSON.stringify(payload) });
+    let task = await this.request<PrecheckTask>("/analysis/precheck", { method: "POST", body: JSON.stringify(payload) });
+    const deadline = Date.now() + 30 * 60 * 1000;
+    while (true) {
+      if (task.status === "completed" && task.result) return task.result;
+      if (task.status === "failed") throw new Error(task.error || "The data check could not be completed.");
+      if (Date.now() >= deadline) throw new Error("The data check is taking longer than expected. Try again in a moment.");
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      task = await this.request<PrecheckTask>(`/analysis/precheck/${task.id}`);
+    }
   }
 
   // ── Saved reconciliations ──────────────────────────────────────────────
@@ -600,11 +608,20 @@ export class ApiClient {
     return this.request<ReconciliationSummary>(`/reports/job/${jobId}/summary`);
   }
 
-  async getReportPreview(jobId: string, category: PreviewCategory, offset = 0, scope: ReportScope = {}): Promise<ReportPreview> {
+  async getReportPreview(
+    jobId: string,
+    category: PreviewCategory,
+    offset = 0,
+    scope: ReportScope = {},
+    options: { search?: string; sortBy?: string; sortDirection?: "asc" | "desc"; signal?: AbortSignal } = {},
+  ): Promise<ReportPreview> {
     const params = new URLSearchParams({ category, offset: String(offset), limit: "25" });
     if (scope.filePairId) params.append("file_pair_id", scope.filePairId);
     if (scope.sheetRuleId) params.append("sheet_rule_id", scope.sheetRuleId);
-    return this.request<ReportPreview>(`/reports/job/${jobId}/preview?${params.toString()}`);
+    if (options.search?.trim()) params.append("search", options.search.trim());
+    if (options.sortBy) params.append("sort_by", options.sortBy);
+    if (options.sortDirection) params.append("sort_direction", options.sortDirection);
+    return this.request<ReportPreview>(`/reports/job/${jobId}/preview?${params.toString()}`, { signal: options.signal });
   }
 
   reportUrl(jobId: string, filePairId?: string): string {
