@@ -251,7 +251,7 @@ export const TOLERANCE_KINDS: Array<{ value: ToleranceKind; label: string; limit
 
 export const TOLERANCE_LIMITS: Record<ToleranceLimit, { label: string; placeholder: string; step: string; max?: number; whole?: boolean }> = {
   amount: { label: "± Amount", placeholder: "± amount", step: "0.01" },
-  percent: { label: "± %", placeholder: "± %", step: "0.1", max: 100 },
+  percent: { label: "± % of the larger amount", placeholder: "± %", step: "0.1", max: 100 },
   days: { label: "± Days", placeholder: "± days", step: "1", max: 366, whole: true },
   similarity: { label: "Text similar ≥ %", placeholder: "similar ≥ %", step: "1", max: 100, whole: true },
 };
