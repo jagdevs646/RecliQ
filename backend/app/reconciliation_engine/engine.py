@@ -728,6 +728,44 @@ def _run_generic_reconciliation(
         elif secondary_mismatch:
             pass  # The primary key exists but its secondary keys differ: not a match.
         elif normalized_secondary_conditions:
+            # Similar-key proposals are deferred until every exact key has
+            # been reserved. Otherwise an earlier fuzzy row can steal the
+            # only destination row belonging to a later exact row.
+            pass
+
+        if file_2_row is not None:
+            matched_file_2_indices.add(best_idx)
+        outcome.update(
+            classification=classification, key_result=key_result, threshold=required_threshold, best_idx=best_idx,
+            file_2_row=file_2_row, candidate_row=candidate_row, secondary_mismatch=secondary_mismatch,
+            pass_label="Primary key" if file_2_row is not None else "",
+        )
+
+    # ── Pass 1b: similar primary keys after all exact matches are reserved ──
+    if has_keys and normalized_secondary_conditions:
+        for row_idx, outcome in enumerate(outcomes):
+            if row_idx % 25 == 0:
+                now = time.monotonic()
+                if next_cancel_check is None or now >= next_cancel_check:
+                    next_cancel_check = now + 1.0
+                    if is_cancelled and is_cancelled():
+                        raise InterruptedError("Reconciliation cancelled by user")
+            if outcome["classification"] is not MatchClassification.NOT_FOUND or outcome["secondary_mismatch"]:
+                continue
+
+            file_1_row = outcome["row"]
+            file_1_id = (
+                [file_1_row.get(key) for key in file_1_match_keys]
+                if is_composite_key
+                else file_1_row.get(primary_key_1)
+            )
+            classification = MatchClassification.NOT_FOUND
+            key_result: MatchResult | None = None
+            required_threshold: int | None = None
+            best_idx = None
+            file_2_row = None
+            candidate_row = None
+            method = ""
             secondary_candidates = indexed_matcher.bounded_secondary_candidates(
                 file_1_row,
                 normalized_secondary_conditions,
@@ -768,17 +806,15 @@ def _run_generic_reconciliation(
             elif len(scored) == 1 and not outcome["learned_note"]:
                 # One secondary candidate whose key is too different: explain why.
                 _, candidate_row, key_result = scored[0]
+            if len(qualifying) == 1:
+                method = f"Similar key ({key_result.matcher_type.replace('_', ' ')})"
 
-        if file_2_row is not None:
-            matched_file_2_indices.add(best_idx)
-        method = ""
-        if classification is MatchClassification.EXCEPTION_MATCH and key_result is not None:
-            method = f"Similar key ({key_result.matcher_type.replace('_', ' ')})"
-        outcome.update(
-            classification=classification, key_result=key_result, threshold=required_threshold, best_idx=best_idx,
-            file_2_row=file_2_row, candidate_row=candidate_row, secondary_mismatch=secondary_mismatch,
-            pass_label="Primary key" if file_2_row is not None else "", method=method,
-        )
+            if file_2_row is not None:
+                matched_file_2_indices.add(best_idx)
+            outcome.update(
+                classification=classification, key_result=key_result, threshold=required_threshold, best_idx=best_idx,
+                file_2_row=file_2_row, candidate_row=candidate_row, method=method,
+            )
 
     # ── Later passes: keyless matching on records still unmatched ─────────
     if passes:

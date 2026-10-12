@@ -411,3 +411,27 @@ def test_secondary_key_alone_never_pairs_records_with_unrelated_keys(tmp_path: P
     assert result["exact_matches"] == 1
     assert result["ambiguous_matches"] == 0
     assert result["not_found_matches"] == 1
+
+
+def test_exact_key_is_reserved_before_an_earlier_similar_key_can_take_it(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame([
+            {"ID": "INV-1002X", "BRANCH": "East", "AMOUNT": 10},
+            {"ID": "INV-1002", "BRANCH": "East", "AMOUNT": 10},
+        ]),
+        pd.DataFrame([{"ID": "INV-1002", "BRANCH": "East", "AMOUNT": 10}]),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+        secondary_conditions=[{"source_column": "BRANCH", "destination_column": "BRANCH", "comparison_method": "exact_text"}],
+        similarity_policy={"matcher_type_override": "text", "threshold": 80},
+        write_report=False,
+    )
+
+    identities = result["universal_data"]["identity_resolution"]
+    assert identities[0]["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
+    assert identities[1]["IDENTITY CLASSIFICATION"] == "EXACT_MATCH"
+    assert result["universal_data"]["matched_records"][0]["ROW (FILE 1)"] == 3
