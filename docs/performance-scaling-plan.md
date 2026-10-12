@@ -1,6 +1,6 @@
 # Scaling RecliQ to 1,000,000 rows per file
 
-**Status: Phase 0 and the Phase 1 code changes are built.** Phase 1's output, test and repeatability gates pass. Its 100,000-row run was under the 65-second target, but machine conditions were not verified, so that timing is not comparable and must be repeated by the owner on mains power with no competing work and no sleep. Phase 0 live-container sizing still needs owner access; Phases 1b onward are not built. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
+**Status: Phase 0, Phase 1 and the Phase 1b implementation are built.** Phase 1's timing is verified by the owner at 57.80 seconds end to end and 25.82 seconds for reading and matching. Phase 1b's defect tests, backend suites and repeatability checks pass; its latest 100,000-row local trial was faster than the Phase 1 measurement, but the machine conditions were not independently verified, so the Phase 1b timing gate remains open for an owner-controlled rerun. Phase 0 live-container sizing still needs owner access. Stop before Phase 1c, Phases 2-4, and the deferred formula-injection fix (Phase 2.5) pending the decisions and infrastructure listed below. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
 
 - Code measured: `main` at commit `2a3a10c` (1 October 2026); measurements taken 1 to 3 October 2026. `main` has since moved to `4197f58` (3 October), which changed the tolerance editor, number display and workbook pairing but not the engine's matching code. The last round of checks (reader comparison, results-page cost, text-score batch, one prototype per process, and the test suite with the three engine changes) ran on `4197f58`. Line references are to `4197f58`. Re-run the baseline table on the current code before closing Phase 0.
 - Machine: laptop, AMD Ryzen 5 3550H (4 cores, 8 threads), 21.9 GB RAM, Windows 11, Python 3.12.10, pandas 2.2.2, on mains power with nothing else running.
@@ -154,7 +154,7 @@ Re-recorded in one session for Phase 0, on the same laptop on mains power and ke
 
 ### 3.5 Phase 1 after (12 October 2026)
 
-Measured on the same Windows development machine using `bench.py <rows> read keyed` at the same three sizes. The run environment was not verified to be idle, on mains power or kept awake, so these measurements are indicative and **not comparable** with section 3.4. The owner must repeat the 100,000-row measurement under the stated conditions before treating the timing target as verified. Keyless runs were not part of this check.
+Measured on the same Windows development machine using `bench.py <rows> read keyed` at the same three sizes. The run environment was not verified to be idle, on mains power or kept awake, so these measurements are indicative and **not comparable** with section 3.4. A later owner rerun under verified conditions is recorded in section 3.6. Keyless runs were not part of this check.
 
 | Rows per file | Read two `.xlsx` | Keyed: match and compare | Excel report | Result data | Keyed total from `.xlsx` | Keyless: match and compare | Peak memory |
 |---:|---:|---:|---:|---:|---:|---:|---:|
@@ -165,6 +165,39 @@ Measured on the same Windows development machine using `bench.py <rows> read key
 - At 100,000 rows the outcome counts match section 3.4: 96,244 matched, 12,181 report differences, 10,999 within tolerance, 3,756 only in File 1 and 3,000 only in File 2.
 - The 100,000-row reader check compared openpyxl and calamine cell by cell: openpyxl 18.27 s, calamine 2.90 s, no differences. The benchmark read both workbooks in 6.12 s combined.
 - The keyed total is the sum of the two `.xlsx` reads, matching engine run, Excel report and result-data timings. Values are rounded to two decimals.
+
+### 3.6 Owner rerun after closing heavy apps (12 October 2026)
+
+The owner reran `bench.py 100000 read keyed` and confirmed that all applications were closed, the laptop was plugged in throughout and it stayed awake.
+
+| Rows per file | Read two `.xlsx` | Keyed: match and compare | Excel report | Result data | Keyed total from `.xlsx` | Read + match | Report size | Result JSON size | Peak memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100,000 | 6.53 s | 19.29 s | 12.18 s | 9.80 s | 57.80 s | 25.82 s | 3.2 MB | 64.3 MB | 0.71 GB |
+
+- Both timing targets pass numerically: under 65 seconds end to end, and under 40 seconds for reading plus matching. The total is the two `.xlsx` reads plus matching, report and result-data generation.
+- CSV reads were 0.34 s for Books and 0.29 s for Bank. Output counts match the earlier runs: 96,244 matched, 12,181 differences, 10,999 within tolerance, 3,756 only in File 1, 3,000 only in File 2, with 0 ambiguous and 0 needing confirmation.
+- The run meets both timing targets under the plan's measurement conditions: no competing applications, mains power and no sleep interruption. Its timing is comparable with the Phase 0 baseline.
+
+### 3.7 Phase 1b result baseline (12 October 2026)
+
+Results intentionally change under D1-D9. These are the new result snapshots from the current engine. The 100,000-row run was unprofiled and used the generated benchmark workbooks; this Codex run did not independently verify that the laptop was otherwise idle or on mains power, so its timing is provisional and **not comparable** with section 3.6. The owner must repeat it under the conditions recorded there before the Phase 1b timing gate is closed.
+
+| Rows per file | Read two `.xlsx` | Keyed: match and compare | Excel report | Result data | Keyed total from `.xlsx` | Read + match | Report size | Result JSON size | Peak memory |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100,000 | 6.15 s | 13.18 s | 15.65 s | 11.02 s | 46.00 s | 19.33 s | 3.1 MB | 61.8 MB | 0.71 GB |
+
+The outcome was 96,244 paired records, 22,822 report rows with field differences, 358 within-tolerance records, 3,756 only in File 1, 3,000 only in File 2, and 0 ambiguous or awaiting-confirmation matches. The changed difference and tolerance counts are the result of the intentional D1-D9 corrections, not an unchanged-output comparison.
+
+The four smaller scenarios establish the corrected result baseline. Timings are engine-only; output counts are shown so future runs can be compared:
+
+| Scenario | Rows per file | Engine | Paired | Differences | Only File 1 | Only File 2 | Ambiguous | To confirm | Within tolerance |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Keyed | 20,000 | 2.53 s | 19,243 | 4,590 | 757 | 600 | 0 | 0 | 67 |
+| Keyless | 20,000 | 1.94 s | 18,457 | 3,618 | 1,725 | 1,567 | 4 | 576 | 0 |
+| Exact secondary condition | 20,000 | 4.37 s | 19,235 | 3,964 | 765 | 741 | 0 | 0 | 0 |
+| Similar secondary condition | 4,000 | 1.69 s | 3,855 | 816 | 145 | 132 | 0 | 0 | 0 |
+
+After the performance follow-up (`d74c781`), `quickwins.py compare` reported identical results in all four scenarios versus the pre-optimization Phase 1b output. The 100,000-row trial measured 46.00 s end to end and 19.33 s for reading plus matching, numerically below the verified Phase 1 values in section 3.6; because machine conditions were not confirmed, this does not close the timing gate. Once the owner confirms a controlled rerun passes, update the repository variable `PERF_BASELINE_VERSION` to a new value so the nightly job records the new intended baseline.
 
 ## 4. Why it is slow: the causes, in order of cost
 
@@ -434,6 +467,25 @@ Phase 1 makes 100,000 rows per file fast (about a minute end to end from `.xlsx`
 ### Phase 1b. Fix the result defects (1 to 2 weeks)
 
 Fix each defect of section 10.1 in the row engine, each with a test that fails before the fix. Then record new baselines: results change on purpose. Done when every listed defect has a passing test and the 100,000-row keyed run is no slower than after Phase 1.
+
+**Status (12 October 2026): implementation and correctness gates complete; owner timing confirmation pending.** Each D1-D9 defect was reproduced by a test before its fix. D10 is intentionally deferred to Phase 2.5, where the report-writing architecture will be replaced.
+
+| Item | State and commit | Evidence / effect |
+|---|---|---|
+| D1 | Done: `41878db` | Exact matches are reserved before similar-key searches; the row-order reproducer passes. |
+| D2 | Done: `194d43d` | Compared-field types are inferred once from both columns, with name-based tie-breaking and user override. |
+| D3 | Done: `c5b24eb` | Primary keys retain identifier semantics even when their names look numeric; identifier regression tests pass. |
+| D4 | Done: `c646e4e` | Whole-number float keys normalize as integer identities; blank-cell regression passes. |
+| D5 | Done: `c96621f` | Long numeric references remain exact text instead of losing precision through floats. |
+| D6 | Done: `08603f9` | Tolerance evaluation stops at the first applicable field band; the strict-field/wildcard regression passes. |
+| D7 | Done: `93cb529` | Duplicate rows are not combined when any value cannot be added; invalid input is reported. |
+| D8 | Done: `020a48c` | Numeric comparison uses explicit per-rule decimal precision; schema, engine and mapping UI support the precision. |
+| D9 | Done: `ce3c8b0` | Regional number formats are detected per file and can be configured; parsing and report metadata tests pass. |
+| Rerun-plan compatibility | Done: `c84f12f` | Full-suite testing exposed unset optional mapping fields being serialized as null; rerun-plan response compatibility is preserved. |
+| Performance follow-up | Done: `d74c781` | Reuses the inferred type during single-column row comparisons and avoids irrelevant tolerance date parsing; all four Phase 1b outputs remain identical. |
+| D10 | Deferred to Phase 2.5 | Formula-injection escaping belongs in the replacement report writer; intentionally not changed in Phase 1b. |
+
+Verification: repository-root backend suite, 272 passed; backend-local suite, 58 passed; repeatability passed for keyed, keyless and exact-secondary at 2,000 rows. The four post-D9/pre-optimization result snapshots compare identical to the optimized output. Frontend type-check, 38 frontend tests and production build passed after the D9 mapping UI change. The local 100,000-row trial was 46.00 s end to end and 19.33 s read-plus-match versus 57.80 s and 25.82 s after Phase 1, but its idle/power conditions were not verified; owner rerun required before marking the phase fully done. Set `PERF_BASELINE_VERSION` to a new repository variable value only after accepting that controlled rerun.
 
 ### Phase 1c. Split the engine function (3 to 5 days)
 
