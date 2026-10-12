@@ -125,8 +125,12 @@ def compare_rule_values(
     number_format_file_1: str | None = None,
     number_format_file_2: str | None = None,
 ) -> dict:
-    file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields, number_format_file_1)
-    file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields, number_format_file_2)
+    file_1_value, type_hint_1 = collect_rule_value(
+        file_1_row, file_1_fields, number_format_file_1, matcher_type_override
+    )
+    file_2_value, type_hint_2 = collect_rule_value(
+        file_2_row, file_2_fields, number_format_file_2, matcher_type_override
+    )
     label = fields_label(file_1_fields)
     # A blank side has no type of its own; the populated side decides.
     matcher_type = matcher_type_override or type_hint_1 or type_hint_2

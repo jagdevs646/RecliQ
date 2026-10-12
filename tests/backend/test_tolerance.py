@@ -98,6 +98,20 @@ def test_a_days_tolerance_accepts_nearby_dates(tmp_path: Path):
     assert "VALUE DATE" in _differences(result)["U2"]
 
 
+def test_similarity_tolerance_skips_date_parsing_when_score_is_too_low():
+    from unittest.mock import patch
+
+    from app.reconciliation_engine.tolerance import Band, accepted_reason
+
+    with patch("app.reconciliation_engine.tolerance.parse_date_value", side_effect=AssertionError):
+        reason = accepted_reason(
+            "Narration", "Payment", "Different text", None,
+            [Band(field="Narration", similarity=75)], "Description", 60,
+        )
+
+    assert reason is None
+
+
 def test_a_field_can_be_named_by_its_destination_column(tmp_path: Path):
     result = _reco(tmp_path, [_bank("U1", 50, "11/08/2026")], [_books("U1", 50, "10/08/2026")], [{"field": "Posting Date", "days": 1}])
     assert "U1" in _matched(result)

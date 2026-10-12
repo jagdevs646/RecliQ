@@ -111,6 +111,12 @@ def accepted_reason(label: str, value_1: object, value_2: object, difference: ob
             if share <= band.percent + _EPSILON:
                 return f"{label} differs by {_money(size)} ({_share(share)}), within ±{band.percent:g}%"
         return None
+
+    if not band.days and not band.similarity:
+        return None
+    if not band.days and (score is None or score < band.similarity):
+        return None
+
     date_1, date_2 = parse_date_value(value_1), parse_date_value(value_2)
     if date_1 is not None and date_2 is not None:
         gap = abs((date_1 - date_2).days)

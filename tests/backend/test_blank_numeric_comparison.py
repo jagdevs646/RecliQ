@@ -57,6 +57,17 @@ def test_numeric_comparison_is_unchanged_when_both_sides_have_values():
     assert _compare("AMOUNT", 100, "AMOUNT", 90)["AMOUNT DIFF"] == 10
 
 
+def test_preinferred_single_column_type_skips_row_level_numeric_parsing():
+    from unittest.mock import patch
+
+    from app.reconciliation_engine.utilities.helpers import collect_rule_value
+
+    with patch("app.reconciliation_engine.utilities.helpers.to_decimal", side_effect=AssertionError):
+        assert collect_rule_value(
+            {"Reference": "INV-005"}, ["Reference"], known_matcher_type="invoice"
+        ) == ("INV-005", "invoice")
+
+
 def test_reconciliation_treats_zero_and_blank_amounts_as_equal(tmp_path: Path):
     file1, file2, output = tmp_path / "books.xlsx", tmp_path / "bank.xlsx", tmp_path / "report.xlsx"
     pd.DataFrame([

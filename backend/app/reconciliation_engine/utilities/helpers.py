@@ -9,9 +9,25 @@ from app.reconciliation_engine.cache import is_blank, to_decimal, to_number
 
 
 def collect_rule_value(
-    row: dict, fields: list[str], number_format: str | None = None
+    row: dict,
+    fields: list[str],
+    number_format: str | None = None,
+    known_matcher_type: str | None = None,
 ) -> tuple[object, str | None]:
     values = [row[field] for field in fields if field in row]
+
+    # The engine has already inferred this single column's type from both
+    # files. Avoid reparsing every row just to rediscover the same type.
+    if known_matcher_type is not None and len(values) == 1:
+        value = values[0]
+        if is_blank(value):
+            return "", known_matcher_type
+        if known_matcher_type == "numeric" or isinstance(value, (int, float, Decimal)):
+            return value, known_matcher_type
+        if isinstance(value, str):
+            return value.strip(), known_matcher_type
+        return str(value).strip(), known_matcher_type
+
     numbers = [to_decimal(value, number_format) for value in values]
 
     if values and all(number is not None or is_blank(value) for value, number in zip(values, numbers)):
