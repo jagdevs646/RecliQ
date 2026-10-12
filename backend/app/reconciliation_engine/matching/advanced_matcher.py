@@ -19,7 +19,12 @@ def find_duplicates(df: pd.DataFrame, key_cols: List[str]) -> Tuple[pd.DataFrame
     return deduped_df, duplicates_df
 
 
-def consolidate_duplicate_keys(df: pd.DataFrame, key_cols: List[str], amount_cols: List[str]) -> pd.DataFrame:
+def consolidate_duplicate_keys(
+    df: pd.DataFrame,
+    key_cols: List[str],
+    amount_cols: List[str],
+    file_label: str = "File",
+) -> pd.DataFrame:
     """Merge rows that share a complete key into one record before matching.
 
     Several invoices booked under the same key (e.g. ID + vendor) reconcile as
@@ -42,13 +47,22 @@ def consolidate_duplicate_keys(df: pd.DataFrame, key_cols: List[str], amount_col
     if not repeated.any():
         return df
 
-    from app.reconciliation_engine.cache import to_number
+    from app.reconciliation_engine.cache import is_blank, to_number
 
     groups = df[repeated].copy()
     group_ids = keys[repeated].apply(tuple, axis=1)
     for column in amount_cols:
         if column in groups.columns and column not in key_cols:
-            groups[column] = groups[column].map(to_number)
+            converted = groups[column].map(to_number)
+            invalid = converted.isna() & ~groups[column].map(is_blank)
+            if invalid.any():
+                row = groups.loc[invalid].iloc[0]
+                row_number = row.get("_ROW_NO", "unknown")
+                raise ValueError(
+                    f"Cannot combine duplicate-key rows in {file_label}: numeric field '{column}' "
+                    f"contains non-numeric value {row[column]!r} at row {row_number}."
+                )
+            groups[column] = converted
     aggregations = {column: "first" for column in groups.columns if column not in {"__GROUP_COUNT__", "__GROUPED_ROWS__"}}
     for column in amount_cols:
         if column in groups.columns and column not in key_cols:

@@ -391,6 +391,24 @@ def test_secondary_key_is_mandatory_and_duplicate_keys_are_combined(tmp_path: Pa
     assert [row["ID"] for row in result["universal_data"]["missing_in_file_1"]] == ["INV-008"]
 
 
+def test_duplicate_numeric_rows_with_a_non_numeric_value_are_rejected(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    source = pd.DataFrame({"ID": ["R1"] * 4, "AMOUNT": [10, "-", 20, 30]})
+    destination = pd.DataFrame({"ID": ["R1"], "AMOUNT": [60]})
+
+    with pytest.raises(ValueError, match="Cannot combine duplicate-key rows.*AMOUNT.*non-numeric value '-'.*row 3"):
+        run_engine(
+            source,
+            destination,
+            tmp_path / "unused.xlsx",
+            key_file_1=["ID"],
+            key_file_2=["ID"],
+            rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+            write_report=False,
+        )
+
+
 def test_secondary_key_alone_never_pairs_records_with_unrelated_keys(tmp_path: Path):
     """A missing invoice is 'not found', not 'ambiguous', when vendors repeat."""
     file1 = tmp_path / "online.xlsx"

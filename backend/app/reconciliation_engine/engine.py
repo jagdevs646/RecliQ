@@ -50,7 +50,6 @@ from app.reconciliation_engine.report_generator import (
 )
 from app.reconciliation_engine.utilities import (
     collect_rule_value,
-    is_numeric_column,
     validate_columns,
     validate_combined_numeric_rules,
 )
@@ -233,9 +232,9 @@ def _add_key_identity_columns(df: pd.DataFrame, match_keys: list[str], matcher_t
 
 
 def _numeric_rule_columns(df: pd.DataFrame, field_lists: list[list[str]]) -> list[str]:
-    """Mapped columns whose values are all numeric: these are summed when grouped."""
+    """Mapped fields already classified as numeric for this reconciliation."""
     fields = dict.fromkeys(field for fields in field_lists for field in fields)
-    return [field for field in fields if field in df.columns and is_numeric_column(df[field])]
+    return [field for field in fields if field in df.columns]
 
 
 def _secondary_mismatches(file_1_row: dict, file_2_row: dict, conditions: list[dict]) -> list[str]:
@@ -599,11 +598,19 @@ def _run_generic_reconciliation(
         identity_1 = _add_key_identity_columns(file_1_df, file_1_match_keys, key_matcher_types)
         identity_2 = _add_key_identity_columns(file_2_df, file_2_match_keys, key_matcher_types)
         group_keys_1, group_keys_2 = _add_secondary_group_keys(file_1_df, file_2_df, normalized_secondary_conditions)
+        numeric_fields_1 = [left for (left, _), kind in zip(normalized_rules, comparison_types) if kind == "numeric"]
+        numeric_fields_2 = [right for (_, right), kind in zip(normalized_rules, comparison_types) if kind == "numeric"]
         file_1_df = consolidate_duplicate_keys(
-            file_1_df, identity_1 + group_keys_1, _numeric_rule_columns(file_1_df, [left for left, _ in normalized_rules])
+            file_1_df,
+            identity_1 + group_keys_1,
+            _numeric_rule_columns(file_1_df, numeric_fields_1),
+            "File 1",
         )
         file_2_df = consolidate_duplicate_keys(
-            file_2_df, identity_2 + group_keys_2, _numeric_rule_columns(file_2_df, [right for _, right in normalized_rules])
+            file_2_df,
+            identity_2 + group_keys_2,
+            _numeric_rule_columns(file_2_df, numeric_fields_2),
+            "File 2",
         )
 
     if is_cancelled and is_cancelled():
