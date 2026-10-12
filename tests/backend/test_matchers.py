@@ -148,3 +148,38 @@ def test_direct_secondary_pair_check_matches_indexed_candidates(method, source_v
         for position, row in enumerate(matcher.rows)
         if matcher.matches_conditions(source_row, row, [condition])
     } == indexed_positions
+
+
+def test_bounded_secondary_search_caches_values_and_narrows_large_groups(monkeypatch):
+    rows = [
+        {"KEY": "ZZ-9001", "DESTINATION": "Shared branch"},
+        {"KEY": "ZZ-9002", "DESTINATION": "Shared branch"},
+        *({"KEY": f"INV-{index:03d}", "DESTINATION": "Shared branch"} for index in range(2, 40)),
+    ]
+    matcher = EngineCandidateMatcher(pd.DataFrame(rows), "KEY", "invoice")
+    source_row = {"SOURCE": "Shared branch"}
+    conditions = [{
+        "source_column": "SOURCE",
+        "destination_column": "DESTINATION",
+        "comparison_method": "exact_text",
+    }]
+    used_indices = {0}
+    indexed, _ = matcher.find_secondary_candidates(source_row, conditions, used_indices)
+    token_indices = matcher.token_candidate_indices("ZZ-9002")
+    expected = [candidate for candidate in indexed if candidate[0] in token_indices]
+
+    calls = 0
+    original = matcher._candidate_positions_for_condition
+
+    def count_condition_index_builds(condition):
+        nonlocal calls
+        calls += 1
+        return original(condition)
+
+    monkeypatch.setattr(matcher, "_candidate_positions_for_condition", count_condition_index_builds)
+    first = matcher.bounded_secondary_candidates(source_row, conditions, used_indices, 25, "ZZ-9002")
+    second = matcher.bounded_secondary_candidates(source_row, conditions, used_indices, 25, "ZZ-9002")
+
+    assert [index for index, _ in first] == [index for index, _ in expected] == [1]
+    assert [index for index, _ in second] == [index for index, _ in expected]
+    assert calls == 1

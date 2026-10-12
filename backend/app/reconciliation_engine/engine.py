@@ -718,18 +718,16 @@ def _run_generic_reconciliation(
         elif secondary_mismatch:
             pass  # The primary key exists but its secondary keys differ: not a match.
         elif normalized_secondary_conditions:
-            secondary_candidates, _ = indexed_matcher.find_secondary_candidates(
+            secondary_candidates = indexed_matcher.bounded_secondary_candidates(
                 file_1_row,
                 normalized_secondary_conditions,
                 matched_file_2_indices,
+                _MAX_DIRECT_SIMILARITY_CANDIDATES,
+                file_1_id,
             )
             # Secondary keys alone never identify a record: a candidate must also
-            # have a similar primary key. Large candidate sets (e.g. every row
-            # of one vendor) are first cut down through the primary-key token
-            # index, so the similarity check stays bounded.
-            if len(secondary_candidates) > _MAX_DIRECT_SIMILARITY_CANDIDATES:
-                similar_positions = indexed_matcher.token_candidate_indices(file_1_id)
-                secondary_candidates = [candidate for candidate in secondary_candidates if candidate[0] in similar_positions]
+            # have a similar primary key. Large candidate sets are narrowed by
+            # the primary-key token index inside the indexed matcher.
             scored = []
             for candidate_idx, secondary_row in secondary_candidates:
                 similarity_result, required_threshold = _primary_similarity_result(

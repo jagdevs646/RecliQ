@@ -381,6 +381,7 @@ class IndexedCandidateMatcher:
         self.condition_date_maps: Dict[str, Dict[str, List[int]]] = {}
         self.condition_numeric_values: Dict[str, List[tuple[float, int]]] = {}
         self.condition_token_blocks: Dict[str, Dict[str, List[int]]] = {}
+        self._condition_candidate_cache: Dict[tuple, frozenset[int]] = {}
 
         self._build_index()
 
@@ -491,17 +492,20 @@ class IndexedCandidateMatcher:
             if self.indices[position] not in used_indices
         ]
 
-    def token_candidate_indices(self, target_value: object | Sequence[object]) -> Set[object]:
-        """Rows sharing a primary-key token with the target (bounded fuzzy scope).
-
-        Composite identities have no token index: they only match exactly.
-        """
+    def _token_candidate_positions(self, target_value: object | Sequence[object]) -> Set[int]:
         if self.is_composite or is_blank(target_value):
             return set()
         positions: Set[int] = set(self.compact_map.get(compact_identifier(target_value), []))
         for token in tokens(target_value, use_synonyms=True):
             positions.update(self.token_blocks.get(token, []))
-        return {self.indices[position] for position in positions}
+        return positions
+
+    def token_candidate_indices(self, target_value: object | Sequence[object]) -> Set[object]:
+        """Rows sharing a primary-key token with the target (bounded fuzzy scope).
+
+        Composite identities have no token index: they only match exactly.
+        """
+        return {self.indices[position] for position in self._token_candidate_positions(target_value)}
 
     def _condition_exact_map(self, column: str) -> Dict[str, List[int]]:
         if column not in self.condition_exact_maps:
@@ -588,6 +592,67 @@ class IndexedCandidateMatcher:
             return valid_positions, f"{destination_column} explicit matcher"
 
         return set(), f"Unsupported comparison method: {method}"
+
+    def _cached_candidate_positions(self, source_row: dict, configured_condition: dict) -> frozenset[int]:
+        condition = dict(configured_condition)
+        source_column = str(condition.get("source_column", ""))
+        source_value = source_row.get(source_column)
+        condition["source_value"] = source_value
+        cache_key = (
+            condition.get("comparison_method"),
+            condition.get("destination_column"),
+            condition.get("numeric_tolerance"),
+            type(source_value).__name__,
+            source_value,
+        )
+        try:
+            cached = self._condition_candidate_cache.get(cache_key)
+        except (TypeError, ValueError):
+            return frozenset(self._candidate_positions_for_condition(condition)[0])
+        if cached is None:
+            cached = frozenset(self._candidate_positions_for_condition(condition)[0])
+            try:
+                self._condition_candidate_cache[cache_key] = cached
+            except (TypeError, ValueError):
+                pass
+        return cached
+
+    def bounded_secondary_candidates(
+        self,
+        source_row: dict,
+        conditions: Sequence[dict],
+        used_indices: Set[object] | None,
+        limit: int,
+        target_value: object | Sequence[object],
+    ) -> list[tuple[object, dict]]:
+        """Find secondary candidates, switching to primary-key tokens after ``limit`` hits."""
+        used_indices = used_indices or set()
+        condition_sets = [self._cached_candidate_positions(source_row, condition) for condition in conditions]
+        if not condition_sets or any(not positions for positions in condition_sets):
+            return []
+
+        condition_sets.sort(key=len)
+        smallest, remaining = condition_sets[0], condition_sets[1:]
+        found: list[int] = []
+        for position in smallest:
+            if self.indices[position] in used_indices:
+                continue
+            if all(position in positions for positions in remaining):
+                found.append(position)
+                if len(found) > limit:
+                    break
+
+        if len(found) <= limit:
+            return [(self.indices[position], self.rows[position]) for position in sorted(found)]
+
+        token_positions = self._token_candidate_positions(target_value)
+        narrowed = [
+            position
+            for position in token_positions
+            if self.indices[position] not in used_indices
+            and all(position in positions for positions in condition_sets)
+        ]
+        return [(self.indices[position], self.rows[position]) for position in sorted(narrowed)]
 
     def _condition_matches_values(self, source_value: object, destination_value: object, condition: dict) -> bool:
         """Apply the same predicate used by the secondary-condition indexes to one pair."""
