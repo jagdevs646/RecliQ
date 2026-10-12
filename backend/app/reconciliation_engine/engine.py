@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -662,9 +663,14 @@ def _run_generic_reconciliation(
     # ── Pass 1: primary key (and mandatory secondary keys) ────────────────
     file_1_records = file_1_df.to_dict('records')
     outcomes: list[dict] = []
+    next_cancel_check: float | None = None
     for row_idx, file_1_row in enumerate(file_1_records):
-        if is_cancelled and row_idx % 25 == 0 and is_cancelled():
-            raise InterruptedError("Reconciliation cancelled by user")
+        if is_cancelled and row_idx % 25 == 0:
+            now = time.monotonic()
+            if next_cancel_check is None or now >= next_cancel_check:
+                next_cancel_check = now + 1.0
+                if is_cancelled():
+                    raise InterruptedError("Reconciliation cancelled by user")
 
         outcome = {
             "row_idx": row_idx, "row": file_1_row, "classification": MatchClassification.NOT_FOUND,

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
@@ -9,6 +10,28 @@ import pandas as pd
 import pytest
 
 from app.reconciliation.generic import run_generic_reconciliation
+
+
+def test_generic_reconciliation_throttles_row_cancellation_checks(monkeypatch, tmp_path: Path):
+    from app.reconciliation_engine import engine
+
+    monkeypatch.setattr(engine, "time", SimpleNamespace(monotonic=lambda: 100.0))
+    checks = []
+    rows = 300
+
+    result = engine.run_generic_reconciliation(
+        pd.DataFrame({"ID": [f"INV-{index}" for index in range(rows)], "AMOUNT": range(rows)}),
+        pd.DataFrame({"ID": [f"INV-{index}" for index in range(rows)], "AMOUNT": range(rows)}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+        is_cancelled=lambda: checks.append(True) or False,
+        write_report=False,
+    )
+
+    assert result["matched_records"] == rows
+    assert len(checks) <= 5
 
 
 def test_generic_reconciliation_creates_report(tmp_path: Path):
