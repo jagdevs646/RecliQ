@@ -205,6 +205,32 @@ def detect_compared_field_type(
     return "text"
 
 
+def detect_primary_key_type(
+    values: Iterable[object] | None,
+    column_name: str = "",
+    other_column_name: str = "",
+) -> str:
+    """Prefer identifier semantics for explicitly labeled primary-key fields."""
+    combined_name = f"{column_name} {other_column_name}"
+    if re.search(r"\bdate\b", normalize_text(combined_name)):
+        return "date"
+    if _name_has_hint(combined_name, ("gstin", "gst no", "gstn")):
+        return "gstin"
+    if _name_has_hint(combined_name, ("pan",)):
+        return "pan"
+    if _name_has_hint(combined_name, ("invoice", "inv")):
+        return "invoice"
+
+    normalized_name = normalize_text(combined_name)
+    explicit_identifier = _name_has_hint(
+        normalized_name,
+        ("voucher", "po", "purchase order", "order no", "challan", "reference", "ref", "document", "doc", "code", "id"),
+    ) or bool(re.search(r"\b(?:no|number)\s*$", normalized_name))
+    if explicit_identifier:
+        return "identifier"
+    return detect_matcher_type(values, column_name, other_column_name)
+
+
 def match_threshold(matcher_type: str) -> int:
     if matcher_type in {"numeric", "date", "invoice", "gstin", "pan", "identifier"}:
         return 95

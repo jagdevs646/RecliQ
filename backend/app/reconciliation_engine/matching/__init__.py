@@ -21,6 +21,7 @@ from app.reconciliation_engine.matching.indexed_matcher import (
     compare_values,
     detect_compared_field_type,
     detect_matcher_type,
+    detect_primary_key_type,
     match_threshold,
     non_empty_values,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "MatchClassification",
     "detect_matcher_type",
     "detect_compared_field_type",
+    "detect_primary_key_type",
     "compare_values",
     "match_threshold",
     "IndexedCandidateMatcher",

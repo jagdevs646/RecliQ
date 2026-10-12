@@ -87,6 +87,27 @@ def test_mapped_field_type_can_be_explicitly_overridden(tmp_path: Path):
     assert record["Field"] == "AMOUNT"
 
 
+def test_credit_note_number_primary_key_is_not_normalized_as_an_amount(tmp_path: Path):
+    result = _run(
+        tmp_path,
+        [{"Credit Note No": "001", "Amount": 25}],
+        [{"Document No": "1", "Amount": 25}],
+        key_file_1=["Credit Note No"], key_file_2=["Document No"],
+    )
+
+    assert result["summary"]["exact_matches"] == 0
+    assert result["summary"]["only_in_file_1"] == 1
+    assert result["summary"]["only_in_file_2"] == 1
+
+
+def test_primary_key_type_uses_identifier_suffix_without_changing_credit_amounts():
+    from app.reconciliation_engine.matching.indexed_matcher import detect_primary_key_type
+
+    assert detect_primary_key_type(["001"], "Credit Note No", "Document No") == "identifier"
+    assert detect_primary_key_type(["2026-10-12"], "Invoice Date", "Posting Date") == "date"
+    assert detect_primary_key_type([100, 200], "Credit", "Credit") == "numeric"
+
+
 # ── Engine integration ─────────────────────────────────────────────────────
 def test_name_secondary_key_matches_after_normalization_with_explanation(tmp_path: Path):
     """The user's example: ID + Name, where the names differ only in legal form."""

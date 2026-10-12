@@ -21,6 +21,7 @@ from app.reconciliation_engine.matching import (
     compare_values,
     detect_compared_field_type,
     detect_matcher_type,
+    detect_primary_key_type,
     match_threshold,
     non_empty_values,
 )
@@ -535,7 +536,7 @@ def _run_generic_reconciliation(
     # for matching, so business normalization can see word boundaries;
     # identifier keys are compacted (INV-005 == INV/005) as before.
     raw_key_types = [
-        detect_matcher_type(
+        detect_primary_key_type(
             non_empty_values(list(file_1_df[source].head(500)) + list(file_2_df[destination].head(500)), limit=200),
             source,
             destination,
@@ -576,7 +577,7 @@ def _run_generic_reconciliation(
     ]
 
     key_matcher_types = [
-        detect_matcher_type(
+        detect_primary_key_type(
             list(file_1_df[source_key]) + list(file_2_df[destination_key]),
             source_column,
             destination_column,
