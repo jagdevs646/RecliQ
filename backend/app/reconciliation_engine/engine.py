@@ -19,6 +19,7 @@ from app.reconciliation_engine.matching import (
     MatchClassification,
     MatchResult,
     compare_values,
+    detect_compared_field_type,
     detect_matcher_type,
     match_threshold,
     non_empty_values,
@@ -112,12 +113,13 @@ def compare_rule_values(
     file_1_fields: list[str],
     file_2_fields: list[str],
     rules_sink: list[str] | None = None,
+    matcher_type_override: str | None = None,
 ) -> dict:
     file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields)
     file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields)
     label = fields_label(file_1_fields)
     # A blank side has no type of its own; the populated side decides.
-    matcher_type = type_hint_1 or type_hint_2
+    matcher_type = matcher_type_override or type_hint_1 or type_hint_2
 
     try:
         identical_as_read = type(file_1_value) is type(file_2_value) and bool(file_1_value == file_2_value)
@@ -486,14 +488,14 @@ def _run_generic_reconciliation(
         raise ValueError("At least one primary-key column is required (or an amount/date matching pass).")
     has_keys = bool(file_1_id_col)
 
-    normalized_rules = [
-        (
-            normalize_fields(rule.get("file_1_fields", [])),
-            normalize_fields(rule.get("file_2_fields", [])),
-        )
-        for rule in rules
-    ]
-    normalized_rules = [(left, right) for left, right in normalized_rules if left and right]
+    normalized_rules: list[tuple[list[str], list[str]]] = []
+    comparison_type_overrides: list[str | None] = []
+    for rule in rules:
+        left = normalize_fields(rule.get("file_1_fields", []))
+        right = normalize_fields(rule.get("file_2_fields", []))
+        if left and right:
+            normalized_rules.append((left, right))
+            comparison_type_overrides.append(rule.get("comparison_type"))
     file_1_extra = normalize_fields(include_columns_file_1 or [])
     file_2_extra = normalize_fields(include_columns_file_2 or [])
     normalized_secondary_conditions = _normalize_secondary_conditions(secondary_conditions)
@@ -515,6 +517,19 @@ def _run_generic_reconciliation(
         validate_columns(file_1_df, [config[f] for f in ("amount_source", "date_source", "narrative_source") if config.get(f)], "File 1 matching pass")
         validate_columns(file_2_df, [config[f] for f in ("amount_destination", "date_destination", "narrative_destination") if config.get(f)], "File 2 matching pass")
     validate_combined_numeric_rules(file_1_df, file_2_df, normalized_rules)
+
+    comparison_types: list[str] = []
+    for (left, right), override in zip(normalized_rules, comparison_type_overrides):
+        if override:
+            comparison_types.append(override)
+        elif len(left) > 1 or len(right) > 1:
+            comparison_types.append("numeric")
+        else:
+            sample = (
+                non_empty_values(file_1_df[left[0]].head(100))
+                + non_empty_values(file_2_df[right[0]].head(100))
+            )
+            comparison_types.append(detect_compared_field_type(sample, left[0], right[0]))
 
     # Key types come from the raw values. Name/text keys keep their raw values
     # for matching, so business normalization can see word boundaries;
@@ -1044,8 +1059,15 @@ def _run_generic_reconciliation(
         has_field_difference = False
         field_rules: list[str] = []
         resolved_differences: list[str] = []
-        for file_1_fields, file_2_fields in normalized_rules:
-            differences = compare_rule_values(file_1_row, file_2_row, file_1_fields, file_2_fields, field_rules)
+        for (file_1_fields, file_2_fields), comparison_type in zip(normalized_rules, comparison_types):
+            differences = compare_rule_values(
+                file_1_row,
+                file_2_row,
+                file_1_fields,
+                file_2_fields,
+                field_rules,
+                matcher_type_override=comparison_type,
+            )
             if differences and evaluator is not None:
                 label = fields_label(file_1_fields)
                 value_1, value_2 = differences.get(f"{label} (FILE 1)"), differences.get(f"{label} (FILE 2)")

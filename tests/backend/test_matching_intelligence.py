@@ -65,6 +65,28 @@ def test_text_comparison_reports_the_rule_and_keeps_fuzzy_for_review():
     assert fuzzy.confidence < 100  # A typo is never an exact match.
 
 
+def test_compared_field_type_uses_both_column_samples_before_conflicting_headers():
+    from app.reconciliation_engine.matching.indexed_matcher import detect_compared_field_type
+
+    assert detect_compared_field_type(["100.00", "101.00"], "Vendor Name", "Amount") == "numeric"
+    assert detect_compared_field_type(["ABC Pvt Ltd", "ABC Private Limited"], "Amount", "Memo") == "text"
+    assert detect_compared_field_type(["INV001", "INV002"], "Invoice No", "Invoice Number") == "invoice"
+
+
+def test_mapped_field_type_can_be_explicitly_overridden(tmp_path: Path):
+    result = _run(
+        tmp_path,
+        [{"ID": "1", "Amount": 100}],
+        [{"ID": "1", "Amount": 101}],
+        key_file_1=["ID"], key_file_2=["ID"],
+        rules=[{"file_1_fields": ["Amount"], "file_2_fields": ["Amount"], "comparison_type": "text"}],
+    )
+
+    record = result["universal_data"]["exceptions"][0]
+    assert record["Difference"] is None
+    assert record["Field"] == "AMOUNT"
+
+
 # ── Engine integration ─────────────────────────────────────────────────────
 def test_name_secondary_key_matches_after_normalization_with_explanation(tmp_path: Path):
     """The user's example: ID + Name, where the names differ only in legal form."""

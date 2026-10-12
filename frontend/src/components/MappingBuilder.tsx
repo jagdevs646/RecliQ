@@ -29,6 +29,17 @@ interface Props {
 
 type MappingMode = "drag" | "rows";
 type AutoMatch = { source: string; destination: string; confidence: number };
+const COMPARISON_TYPES: Array<{ value: NonNullable<RuleMapping["comparison_type"]>; label: string }> = [
+  { value: "numeric", label: "Numeric" },
+  { value: "date", label: "Date" },
+  { value: "invoice", label: "Invoice number" },
+  { value: "gstin", label: "GSTIN" },
+  { value: "pan", label: "PAN" },
+  { value: "identifier", label: "Identifier" },
+  { value: "company_name", label: "Company name" },
+  { value: "person_name", label: "Person name" },
+  { value: "text", label: "General text" },
+];
 
 export interface MappingBuilderUIState {
   pickedKinds: Record<string, ToleranceKind>;
@@ -211,7 +222,12 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
     />}
     {toleranceNotice}
     {editTolerances && rules.length > 0 && <div className="mapping-list-heading"><span>Mapped fields</span><span>Tolerance (optional) <ToleranceHelp destinationLabel={file2Name ?? "the destination file"} /></span></div>}
-    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}><span>{rule.file_1_fields.join(" + ")}</span><ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>{editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}<button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button></div>)}</div>
+    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}>
+      <div className="mapping-rule-source"><span>{rule.file_1_fields.join(" + ")}</span><label className="mapping-comparison-type"><span>Compare as</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${comparedFieldLabel(rule)}`} onChange={(event) => commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, comparison_type: (event.target.value || undefined) as RuleMapping["comparison_type"] } : item))}><option value="">Automatic</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label></div>
+      <ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>
+      {editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}
+      <button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button>
+    </div>)}</div>
     {editTolerances && tolerances.some((band) => !toleranceIsComplete(band, { rules })) && <p className="field-hint is-warning">A tolerance of 0 accepts nothing: enter a value above 0, or clear the box for no tolerance.</p>}
     {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
     <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button></div>

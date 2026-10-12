@@ -169,6 +169,42 @@ def detect_matcher_type(
     return "text"
 
 
+def detect_compared_field_type(
+    values: Iterable[object] | None,
+    column_name: str = "",
+    other_column_name: str = "",
+) -> str:
+    """Infer a mapped field's type from both columns' values, using headers only
+    to refine otherwise ambiguous identifiers and text/name fields.
+    """
+    sample = non_empty_values(values or [], limit=200)
+    header_type = detect_matcher_type([], column_name, other_column_name)
+    if not sample:
+        return header_type
+
+    total = len(sample)
+    numeric_ratio = sum(to_number(value) is not None for value in sample) / total
+    date_ratio = sum(parse_date_value(value) is not None for value in sample) / total
+    gstin_ratio = sum(_looks_like_gstin(value) for value in sample) / total
+    pan_ratio = sum(_looks_like_pan(value) for value in sample) / total
+    identifier_ratio = sum(_looks_like_identifier(value) for value in sample) / total
+    identifier_types = {"invoice", "gstin", "pan", "identifier"}
+
+    if gstin_ratio >= 0.8:
+        return "gstin"
+    if pan_ratio >= 0.8:
+        return "pan"
+    if numeric_ratio >= 0.8:
+        return header_type if header_type in identifier_types else "numeric"
+    if date_ratio >= 0.8:
+        return "date"
+    if identifier_ratio >= 0.6:
+        return header_type if header_type in identifier_types else "identifier"
+    if header_type in {"company_name", "person_name"}:
+        return header_type
+    return "text"
+
+
 def match_threshold(matcher_type: str) -> int:
     if matcher_type in {"numeric", "date", "invoice", "gstin", "pan", "identifier"}:
         return 95

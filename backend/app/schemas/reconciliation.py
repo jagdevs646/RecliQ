@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field, model_validator
 class RuleMapping(BaseModel):
     file_1_fields: list[str] = Field(default_factory=list)
     file_2_fields: list[str] = Field(default_factory=list)
+    comparison_type: Literal[
+        "numeric", "date", "invoice", "gstin", "pan", "identifier",
+        "company_name", "person_name", "text",
+    ] | None = None
 
 
 class FileSource(BaseModel):
