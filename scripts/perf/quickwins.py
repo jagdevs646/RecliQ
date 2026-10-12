@@ -35,7 +35,12 @@ def patched_engine(fixes: set[str]):
     target.write_text(engine_patches.patched_source(ENGINE, fixes), encoding="utf8")
     spec = importlib.util.spec_from_file_location(f"engine_fix_{tag}", target)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(spec.name, None)
+        raise
     return module, tag
 
 
