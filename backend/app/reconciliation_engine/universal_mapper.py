@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from app.reconciliation_engine.cache import to_number
+from app.reconciliation_engine.tolerance import percent_base
+
 def build_universal_data_model(
     job_type: str,
     file_1_name: str,
@@ -78,14 +81,13 @@ def build_universal_data_model(
                         
                     exc_type_counts[exc_type] = exc_type_counts.get(exc_type, 0) + 1
                     
+                    # A share of the larger of the two values, the measure a
+                    # "± %" tolerance uses, so the column agrees with it.
                     diff_pct = None
-                    if diff is not None and f2_val is not None:
-                        try:
-                            f2_num = float(f2_val)
-                            if f2_num != 0:
-                                diff_pct = float(diff) / f2_num
-                        except (ValueError, TypeError):
-                            diff_pct = None
+                    if diff is not None and to_number(f1_val) is not None and to_number(f2_val) is not None:
+                        base = percent_base(f1_val, f2_val)
+                        if base:
+                            diff_pct = float(diff) / base
                         
                     exceptions.append({
                         **record_context,

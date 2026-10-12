@@ -9,6 +9,7 @@ import pytest
 from app.reconciliation_engine.cache import canonical_date_value
 from app.reconciliation_engine.engine import run_generic_reconciliation
 from app.reconciliation_engine.preprocessing import prepare_dataframe
+from app.reconciliation_engine.tolerance import Band, accepted_reason
 from app.reconciliation_engine.transformations import round_half_up
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 from app.schemas.reconciliation import ToleranceBand
@@ -76,11 +77,42 @@ def test_specific_field_tolerance_blocks_a_looser_wildcard_fallback(tmp_path: Pa
     assert "U1" not in _matched(result)
 
 
-def test_a_percentage_tolerance_is_measured_against_the_other_files_value(tmp_path: Path):
+def test_a_percentage_tolerance_is_measured_against_the_larger_value(tmp_path: Path):
     result = _reco(tmp_path, [_bank("U1", 1010), _bank("U2", 1011)], [_books("U1", 1000), _books("U2", 1000)],
                    [{"field": "DEBIT", "percent": 1}])
-    assert _matched(result)["U1"]["WITHIN TOLERANCE"] == "DEBIT differs by 10.00 (1.00%), within ±1%"
-    assert "DEBIT" in _differences(result)["U2"]
+    assert _matched(result)["U1"]["WITHIN TOLERANCE"] == "DEBIT differs by 10.00 (0.99% of the larger value), within ±1%"
+    assert "DEBIT" in _differences(result)["U2"]  # 11 is 1.09% of 1,011.
+
+
+@pytest.mark.parametrize("file_1, file_2, percent, accepted", [
+    (100, 95, 5, True),       # 5 is 5% of 100 (but 5.26% of 95, the File 2 value).
+    (95, 100, 5, True),
+    (1000, 900, 10, True),    # 100 is 10% of 1,000 (11.1% of 900).
+    (100, 94, 5, False),      # 6 is 6% of 100.
+    (-100, -95, 5, True),     # The sign does not matter: 5 is 5% of 100.
+    (-100, -94, 5, False),
+])
+def test_a_percentage_means_a_share_of_the_larger_amount(tmp_path: Path, file_1, file_2, percent, accepted):
+    result = _reco(tmp_path, [_bank("U1", file_1)], [_books("U1", file_2)], [{"field": "DEBIT", "percent": percent}])
+    assert ("U1" in _matched(result)) is accepted
+    assert ("U1" in _differences(result)) is not accepted
+
+
+@pytest.mark.parametrize("file_1, file_2", [(100, 95), (1000, 952), (100, 94), (-100, -95)])  # 48 is 4.8% of 1,000 but 5.04% of 952.
+def test_swapping_the_files_gives_the_same_percentage_outcome(tmp_path: Path, file_1, file_2):
+    def outcome(bank: float, books: float):
+        result = _reco(tmp_path, [_bank("U1", bank)], [_books("U1", books)], [{"field": "DEBIT", "percent": 5}])
+        return _matched(result).get("U1", {}).get("WITHIN TOLERANCE"), "U1" in _differences(result)
+
+    assert outcome(file_1, file_2) == outcome(file_2, file_1)
+
+
+def test_a_percentage_needs_a_value_to_measure_against(tmp_path: Path):
+    result = _reco(tmp_path, [_bank("U1", 100)], [_books("U1", 0)], [{"field": "DEBIT", "percent": 5}])
+    assert "DEBIT" in _differences(result)["U1"]  # 100 is all of the larger value.
+    # With nothing to measure against, only an amount limit can accept.
+    assert accepted_reason("DEBIT", 0, "", 0.01, [Band(percent=5)]) is None
+    assert accepted_reason("DEBIT", 0, "", 0.01, [Band(amount=0.05, percent=5)]) == "DEBIT differs by 0.01, within ±0.05"
 
 
 def test_amount_or_percentage_either_limit_is_enough(tmp_path: Path):
@@ -197,6 +229,21 @@ def test_the_report_explains_each_accepted_difference(tmp_path: Path):
     assert matched[1][matched[0].index("Comment")] == "Matched within tolerance: DEBIT differs by 0.03, within ±0.05"
     summary = [row for row in workbook["01 Summary"].iter_rows(values_only=True) if row[1] == "Tolerance (after matching)"]
     assert summary and "1 difference(s) accepted; 1 record(s) moved" in summary[0][2]
+
+
+def test_the_difference_percent_column_uses_the_tolerance_measure(tmp_path: Path):
+    # 6 is 6% of 100, the larger value, whichever file holds it; the sign is the difference's.
+    result = _reco(tmp_path, [_bank("U1", 100), _bank("U2", 94), _bank("U3", None)],
+                   [_books("U1", 94), _books("U2", 100), _books("U3", 100)], [{"field": "DEBIT", "percent": 5}])
+    differences = _differences(result)
+    assert differences["U1"]["DEBIT"]["Difference %"] == pytest.approx(0.06)
+    assert differences["U2"]["DEBIT"]["Difference %"] == pytest.approx(-0.06)
+    assert differences["U3"]["DEBIT"]["Difference %"] is None  # A blank is not a number to measure.
+    path = tmp_path / "report.xlsx"
+    generate_enterprise_report(result["universal_data"], {}, path)
+    header, *rows = list(openpyxl.load_workbook(path)["02 Differences"].iter_rows(min_row=4, values_only=True))
+    shown = {row[0]: row[header.index("Difference %")] for row in rows}
+    assert shown["U1"] == pytest.approx(0.06) and shown["U2"] == pytest.approx(-0.06) and shown["U3"] is None
 
 
 # ── Round ──────────────────────────────────────────────────────────────────

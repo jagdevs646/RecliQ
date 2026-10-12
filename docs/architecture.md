@@ -56,7 +56,7 @@ flowchart TD
 - **Preparation** (`transformations.py`): a fixed list of steps (trim, remove prefixes, invert signs, debit/credit to a signed amount, round half up, and more) applied to working copies. The report keeps the original values.
 - **Key matching** (`matching/`, `normalization/`): keys are compared after removing spacing, case and punctuation, with company-name normalization (legal forms, abbreviations, word order) and approved aliases. Near matches become "matches to confirm". Reviewers' rejected pairings are not proposed again.
 - **Passes** (`matching/pass_matcher.py`): pair records the key did not find, only when the pairing is unique on both sides.
-- **Tolerances** (`tolerance.py`): after matching, differences within a band (an amount, a percentage of the destination value, a number of days, or a text similarity) are accepted. The report says why in the comment.
+- **Tolerances** (`tolerance.py`): after matching, differences within a band (an amount, a percentage of the larger of the two values, a number of days, or a text similarity) are accepted. The report says why in the comment, and its Difference % column uses the same percentage.
 - **Auto-resolution** (`resolution.py`): the session's rules, in order, label exceptions such as bank charges; the report lists them on the Auto-resolved sheet.
 - **Report** (`universal_mapper.py`, `universal_reporter.py`): builds the Summary, Differences, Only in File 1, Only in File 2, Match Review, Matched, Checks, Sheet Rules and Auto-resolved sheets.
 

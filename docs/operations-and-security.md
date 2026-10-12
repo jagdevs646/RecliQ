@@ -266,8 +266,10 @@ Per sheet rule, in order:
    follow the rule's day-first or month-first setting.
 5. **Tolerances** (optional), after matching and before the report. Each
    band names a compared field (or every field) and one or more limits: an
-   amount, a percentage of the destination value (either limit is enough),
-   a number of days for dates, or a minimum text similarity. A difference
+   amount, a percentage of the larger of the two values (either limit is
+   enough; 100 against 95 is 5% whichever file holds which, and the
+   Differences tab's Difference % uses the same measure), a number of days
+   for dates, or a minimum text similarity. A difference
    within a band is accepted; a record with no differences left moves to
    Matched with a comment giving the reason for each field ("AMOUNT differs
    by 3.98, within ±5"). Records still to be confirmed stay in review. The

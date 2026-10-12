@@ -86,14 +86,23 @@ def _share(percent: float) -> str:
     return f"{percent:.2f}%" if percent >= 0.01 else "under 0.01%"
 
 
+def percent_base(value_1: object, value_2: object) -> float:
+    """What a percentage difference is measured against: the larger of the two
+    values, ignoring sign, so swapping the files never changes the result. A
+    side that is not a number is left out; 0 means there is no base."""
+    numbers = [abs(number) for number in (to_number(value_1), to_number(value_2)) if number is not None]
+    return max(numbers, default=0.0)
+
+
 def accepted_reason(label: str, value_1: object, value_2: object, difference: object, bands: list[Band],
                     destination_label: str = "", confidence: object = None) -> str | None:
     """Why this field's difference is within tolerance, or None if it is not.
 
     Numbers use the amount or percentage limit (either is enough; percent of
-    the destination value, as in the report's Difference % column); dates
-    use the days limit; other text uses the minimum similarity, compared
-    with ``confidence``, the engine's similarity score for the two values.
+    the larger of the two values, as in the report's Difference % column, so
+    100 against 95 is a 5% difference whichever file holds which); dates use
+    the days limit; other text uses the minimum similarity, compared with
+    ``confidence``, the engine's similarity score for the two values.
     """
     labels = {label, destination_label} - {""}
     diff = to_number(difference)
@@ -105,11 +114,11 @@ def accepted_reason(label: str, value_1: object, value_2: object, difference: ob
         size = abs(diff)
         if band.amount and size <= band.amount + _EPSILON:
             return f"{label} differs by {_money(size)}, within ±{band.amount:g}"
-        base = to_number(value_2)
+        base = percent_base(value_1, value_2)
         if band.percent and base:
-            share = size / abs(base) * 100
+            share = size / base * 100
             if share <= band.percent + _EPSILON:
-                return f"{label} differs by {_money(size)} ({_share(share)}), within ±{band.percent:g}%"
+                return f"{label} differs by {_money(size)} ({_share(share)} of the larger value), within ±{band.percent:g}%"
         return None
 
     if not band.days and not band.similarity:

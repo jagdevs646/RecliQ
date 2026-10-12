@@ -13,7 +13,7 @@ from app.main import app
 from app.reconciliation_engine.engine import run_generic_reconciliation
 from app.reconciliation_engine.learning import build_context, wilson_lower_bound
 from app.reconciliation_engine.preprocessing import prepare_dataframe
-from app.reconciliation_engine.resolution import compile_rule, describe_rule, text_signature
+from app.reconciliation_engine.resolution import Evaluator, compile_rule, describe_rule, text_signature
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 VENDOR_KEYED = dict(
@@ -196,6 +196,16 @@ def test_rules_resolve_recurring_exceptions_with_an_audit_trail(tmp_path: Path):
     matched = next(row for row in data["matched_records"] if row.get("MATCH KEY") == "INV-1")
     assert "AMOUNT: Rounding difference" in matched["RESOLVED DIFFERENCES"]
     assert data["metadata"]["resolution_rules_used"] == {"Bank charges (v1)": 1, "Rounding (v1)": 1}
+
+
+def test_a_percentage_difference_is_measured_against_the_larger_value():
+    rule = {"name": "Small gap", "category": "field_difference",
+            "conditions": [{"operator": "difference_pct_lte", "value": 5}], "action": {"resolution": "Small gap"}}
+    evaluator = Evaluator.from_config([rule])
+    # 5 is 5% of 100 whichever file holds it (5.26% of 95); 6 is 6% of 100.
+    assert evaluator.difference("AMOUNT", 100, 95, 5, {}) is not None
+    assert evaluator.difference("AMOUNT", 95, 100, -5, {}) is not None
+    assert evaluator.difference("AMOUNT", 100, 94, 6, {}) is None
 
 
 def test_first_rule_in_priority_order_wins_and_disabled_rules_do_nothing(tmp_path: Path):

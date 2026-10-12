@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.reconciliation_engine.cache import is_blank, normalize_header, to_number
+from app.reconciliation_engine.tolerance import percent_base
 
 CATEGORIES = {
     "only_in_source": "Only in the source file",
@@ -304,7 +305,7 @@ class Evaluator:
     def difference(self, field_label: str, value_1: object, value_2: object, difference: object, source_row: dict) -> Rule | None:
         record = _Row(source_row)
         diff = to_number(difference)
-        base = to_number(value_2)
+        base = percent_base(value_1, value_2)  # The larger value, as for a "± %" tolerance.
 
         def check(condition: Condition) -> bool:
             if condition.operator == "field_is":
@@ -312,7 +313,7 @@ class Evaluator:
             if condition.operator == "difference_abs_lte":
                 return diff is not None and abs(diff) <= float(condition.value) + 1e-9
             if condition.operator == "difference_pct_lte":
-                return diff is not None and bool(base) and abs(diff) / abs(base) * 100 <= float(condition.value) + 1e-9
+                return diff is not None and bool(base) and abs(diff) / base * 100 <= float(condition.value) + 1e-9
             return bool(_record_condition(condition, record))
 
         return self._first("field_difference", check)
