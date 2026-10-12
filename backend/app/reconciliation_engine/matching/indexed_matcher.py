@@ -280,12 +280,21 @@ def composite_identity_key(values: Sequence[object], matcher_types: Sequence[str
     return tuple(component for component in components if component is not None)
 
 
-def _compare_numeric(value1: object, value2: object, decimal_precision: int | None = None) -> MatchResult | None:
-    num1 = to_decimal(value1)
-    num2 = to_decimal(value2)
+def _compare_numeric(
+    value1: object,
+    value2: object,
+    decimal_precision: int | None = None,
+    number_format1: str | None = None,
+    number_format2: str | None = None,
+) -> MatchResult | None:
+    num1 = to_decimal(value1, number_format1)
+    num2 = to_decimal(value2, number_format2)
     if num1 is None or num2 is None:
         return None
-    precision = decimal_precision if decimal_precision is not None else infer_decimal_precision([value1, value2])
+    precision = decimal_precision if decimal_precision is not None else infer_decimal_precision([
+        to_decimal(value1, number_format1),
+        to_decimal(value2, number_format2),
+    ])
     quantum = Decimal(1).scaleb(-precision)
     comparable_1 = num1.quantize(quantum, rounding=ROUND_HALF_UP)
     comparable_2 = num2.quantize(quantum, rounding=ROUND_HALF_UP)
@@ -392,11 +401,15 @@ def compare_values(
     column2: str = "",
     matcher_type: str | None = None,
     decimal_precision: int | None = None,
+    number_format1: str | None = None,
+    number_format2: str | None = None,
 ) -> MatchResult:
     matcher_type = matcher_type or detect_matcher_type([value1, value2], column1, column2)
 
     if matcher_type == "numeric":
-        result = _compare_numeric(value1, value2, decimal_precision)
+        result = _compare_numeric(
+            value1, value2, decimal_precision, number_format1, number_format2
+        )
         if result is not None:
             return result
 

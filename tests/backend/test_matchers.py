@@ -127,6 +127,18 @@ def test_decimal_precision_inference_uses_maximum_scale_and_rejects_non_finite_v
     assert to_decimal("Infinity") is None
 
 
+def test_regional_number_formats_parse_decimal_comma_without_losing_precision():
+    from decimal import Decimal
+
+    from app.reconciliation_engine.cache import detect_number_format, to_decimal, to_number
+
+    assert detect_number_format(["1.234,56", "12,50"]) == ("decimal_comma", "detected")
+    assert to_decimal("1.234,56", "decimal_comma") == Decimal("1234.56")
+    assert to_decimal("12,50", "decimal_comma") == Decimal("12.50")
+    assert to_number("1.234,56", "decimal_comma") == 1234.56
+    assert detect_number_format(["1.234"]) == ("decimal_point", "default")
+
+
 def test_canonical_date_parser_uses_one_day_first_convention():
     assert parse_date_value("07/09/2026") == date(2026, 9, 7)
     assert parse_date_value("2026-09-07") == date(2026, 9, 7)

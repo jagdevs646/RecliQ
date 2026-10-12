@@ -122,12 +122,16 @@ _CURRENCY_MARKERS = re.compile(r"(?i)(?:inr|usd|eur|gbp|rs)\.?|[₹$€£¥]")
 
 
 @lru_cache(maxsize=32768)
-def cached_to_number_from_str(text: str) -> float | None:
+def cached_to_number_from_str(text: str, number_format: str = "decimal_point") -> float | None:
     text = cached_unicode_clean(text)
     text = _CURRENCY_MARKERS.sub("", text)
-    text = text.replace(",", "").replace(" ", "")
+    text = re.sub(r"\s+", "", text)
     if text.startswith("(") and text.endswith(")"):
         text = f"-{text[1:-1]}"
+    if number_format == "decimal_comma":
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", "")
     try:
         number = float(text)  # Plain and scientific notation.
         return number if math.isfinite(number) else None  # Not "inf"/"nan" text.
@@ -145,17 +149,17 @@ def cached_to_number_from_str(text: str) -> float | None:
         return None
 
 
-def to_number(value: object) -> float | None:
+def to_number(value: object, number_format: str | None = None) -> float | None:
     if is_blank(value):
         return None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if isinstance(value, float) and math.isnan(value):
             return None
         return float(value)
-    return cached_to_number_from_str(str(value))
+    return cached_to_number_from_str(str(value), number_format or "decimal_point")
 
 
-def to_decimal(value: object) -> Decimal | None:
+def to_decimal(value: object, number_format: str | None = None) -> Decimal | None:
     """Parse a numeric cell without losing precision through a float roundtrip."""
     if is_blank(value):
         return None
@@ -167,11 +171,23 @@ def to_decimal(value: object) -> Decimal | None:
         if not math.isfinite(value):
             return None
         return Decimal(str(value))
+    if number_format == "decimal_comma":
+        text = cached_unicode_clean(str(value))
+        text = _CURRENCY_MARKERS.sub("", text)
+        text = re.sub(r"\s+", "", text)
+        if text.startswith("(") and text.endswith(")"):
+            text = f"-{text[1:-1]}"
+        text = text.replace(".", "").replace(",", ".")
+        try:
+            number = Decimal(text)
+            return number if number.is_finite() else None
+        except InvalidOperation:
+            pass
     try:
         number = Decimal(cached_unicode_clean(str(value)).strip())
         return number if number.is_finite() else None
     except InvalidOperation:
-        number = to_number(value)
+        number = to_number(value, number_format)
         return Decimal(str(number)) if number is not None else None
 
 
@@ -183,6 +199,43 @@ def infer_decimal_precision(values, maximum: int = 12) -> int:
         if number is not None:
             scales.append(max(0, -number.as_tuple().exponent))
     return min(max(scales, default=0), maximum)
+
+
+def detect_number_format(values) -> tuple[str, str]:
+    """Detect a column's decimal convention; ambiguous values retain legacy parsing."""
+    comma_score = 0
+    point_score = 0
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        text = _CURRENCY_MARKERS.sub("", cached_unicode_clean(value)).strip()
+        text = re.sub(r"\s+", "", text)
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1]
+        text = text.lstrip("+-")
+        if not text or re.search(r"[^0-9.,]", text):
+            continue
+        comma = text.rfind(",")
+        point = text.rfind(".")
+        if comma >= 0 and point >= 0:
+            if comma > point:
+                comma_score += 2
+            else:
+                point_score += 2
+        elif comma >= 0:
+            decimals = len(text) - comma - 1
+            if decimals in (1, 2):
+                comma_score += 2
+        elif point >= 0:
+            decimals = len(text) - point - 1
+            if decimals in (1, 2):
+                point_score += 2
+
+    if comma_score > point_score:
+        return "decimal_comma", "detected"
+    if point_score > comma_score:
+        return "decimal_point", "detected"
+    return "decimal_point", "default"
 
 
 @lru_cache(maxsize=32768)

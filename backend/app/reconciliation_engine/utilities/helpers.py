@@ -8,9 +8,11 @@ import pandas as pd
 from app.reconciliation_engine.cache import is_blank, to_decimal, to_number
 
 
-def collect_rule_value(row: dict, fields: list[str]) -> tuple[object, str | None]:
+def collect_rule_value(
+    row: dict, fields: list[str], number_format: str | None = None
+) -> tuple[object, str | None]:
     values = [row[field] for field in fields if field in row]
-    numbers = [to_decimal(value) for value in values]
+    numbers = [to_decimal(value, number_format) for value in values]
 
     if values and all(number is not None or is_blank(value) for value, number in zip(values, numbers)):
         if len(values) > 1:

@@ -151,6 +151,8 @@ export interface RuleMapping {
   file_2_fields: string[];
   comparison_type?: "numeric" | "date" | "invoice" | "gstin" | "pan" | "identifier" | "company_name" | "person_name" | "text";
   decimal_precision?: number;
+  number_format_file_1?: "decimal_point" | "decimal_comma";
+  number_format_file_2?: "decimal_point" | "decimal_comma";
 }
 
 export type SecondaryComparisonMethod = "exact_text" | "normalized_date" | "numeric_tolerance" | "matcher_based";

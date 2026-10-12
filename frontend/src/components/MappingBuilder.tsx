@@ -40,6 +40,10 @@ const COMPARISON_TYPES: Array<{ value: NonNullable<RuleMapping["comparison_type"
   { value: "person_name", label: "Person name" },
   { value: "text", label: "General text" },
 ];
+const NUMBER_FORMATS: Array<{ value: NonNullable<RuleMapping["number_format_file_1"]>; label: string }> = [
+  { value: "decimal_point", label: "Decimal point (1,234.56)" },
+  { value: "decimal_comma", label: "Decimal comma (1.234,56)" },
+];
 
 export interface MappingBuilderUIState {
   pickedKinds: Record<string, ToleranceKind>;
@@ -226,12 +230,26 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
       <div className="mapping-rule-source"><span>{rule.file_1_fields.join(" + ")}</span><label className="mapping-comparison-type"><span>Compare as</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${comparedFieldLabel(rule)}`} onChange={(event) => commit(rules.map((item, itemIndex) => {
         if (itemIndex !== index) return item;
         const comparisonType = (event.target.value || undefined) as RuleMapping["comparison_type"];
-        return { ...item, comparison_type: comparisonType, ...(comparisonType === "numeric" ? {} : { decimal_precision: undefined }) };
+        return {
+          ...item,
+          comparison_type: comparisonType,
+          ...(comparisonType === "numeric" ? {} : {
+            decimal_precision: undefined,
+            number_format_file_1: undefined,
+            number_format_file_2: undefined,
+          }),
+        };
       }))}><option value="">Automatic</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
         {rule.comparison_type === "numeric" && <label className="mapping-comparison-type"><span>Decimal places</span><select value={rule.decimal_precision ?? ""} aria-label={`Decimal places for ${comparedFieldLabel(rule)}`} onChange={(event) => {
           const value = event.target.value;
           commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, decimal_precision: value === "" ? undefined : Number(value) } : item));
         }}><option value="">Automatic</option>{Array.from({ length: 13 }, (_, places) => <option key={places} value={places}>{places}</option>)}</select></label>}
+        {rule.comparison_type === "numeric" && <>
+          {(["number_format_file_1", "number_format_file_2"] as const).map((field, sideIndex) => <label className="mapping-comparison-type" key={field}><span>File {sideIndex + 1} format</span><select value={rule[field] ?? ""} aria-label={`Number format for File ${sideIndex + 1} ${comparedFieldLabel(rule)}`} onChange={(event) => {
+            const value = event.target.value as RuleMapping[typeof field] | "";
+            commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value || undefined } : item));
+          }}><option value="">Auto-detect</option>{NUMBER_FORMATS.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>)}
+        </>}
       </div>
       <ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>
       {editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}

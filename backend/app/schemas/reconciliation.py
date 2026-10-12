@@ -13,6 +13,8 @@ class RuleMapping(BaseModel):
         "company_name", "person_name", "text",
     ] | None = None
     decimal_precision: int | None = Field(default=None, ge=0, le=12)
+    number_format_file_1: Literal["decimal_point", "decimal_comma"] | None = None
+    number_format_file_2: Literal["decimal_point", "decimal_comma"] | None = None
 
 
 class FileSource(BaseModel):

@@ -449,6 +449,51 @@ def test_numeric_rule_can_configure_comparison_precision(tmp_path: Path):
     assert result["universal_data"]["metadata"]["numeric_precision"][0]["source"] == "configured"
 
 
+def test_numeric_rule_detects_independent_regional_formats_for_each_file(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.234,56"]}),
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1234.56"]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"], "comparison_type": "numeric"}],
+        write_report=False,
+    )
+
+    assert result["summary"]["field_discrepancies"] == 0
+    formats = result["universal_data"]["metadata"]["number_formats"][0]
+    assert formats["file_1_format"] == "decimal_comma"
+    assert formats["file_1_source"] == "detected"
+    assert formats["file_2_format"] == "decimal_point"
+    assert formats["file_2_source"] == "detected"
+    assert result["universal_data"]["metadata"]["numeric_precision"][0]["decimal_places"] == 2
+
+
+def test_numeric_rule_allows_confirmed_number_formats(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1.234"]}),
+        pd.DataFrame({"ID": ["R1"], "AMOUNT": ["1234"]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{
+            "file_1_fields": ["AMOUNT"],
+            "file_2_fields": ["AMOUNT"],
+            "comparison_type": "numeric",
+            "number_format_file_1": "decimal_comma",
+            "number_format_file_2": "decimal_point",
+        }],
+        write_report=False,
+    )
+
+    assert result["summary"]["field_discrepancies"] == 0
+    assert result["universal_data"]["metadata"]["number_formats"][0]["file_1_source"] == "configured"
+
+
 def test_secondary_key_alone_never_pairs_records_with_unrelated_keys(tmp_path: Path):
     """A missing invoice is 'not found', not 'ambiguous', when vendors repeat."""
     file1 = tmp_path / "online.xlsx"

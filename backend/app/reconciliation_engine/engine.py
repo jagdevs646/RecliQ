@@ -13,6 +13,7 @@ from app.reconciliation_engine.cache import (
     normalize_text,
     parse_date_value,
     infer_decimal_precision,
+    detect_number_format,
     to_decimal,
     to_number,
     use_date_convention,
@@ -91,6 +92,8 @@ def _blank_as_zero(
     file_2_value: object,
     file_1_fields: list[str],
     file_2_fields: list[str],
+    number_format_file_1: str | None = None,
+    number_format_file_2: str | None = None,
 ) -> tuple[object, object]:
     """For a numeric field, a blank on one side counts as 0 when the other side
     is a number, so 0 vs blank is equal and 5 vs blank shows a difference of 5.
@@ -102,7 +105,8 @@ def _blank_as_zero(
     if blank_1 == blank_2:
         return file_1_value, file_2_value
     populated = file_2_value if blank_1 else file_1_value
-    if to_number(populated) is None:
+    populated_format = number_format_file_2 if blank_1 else number_format_file_1
+    if to_number(populated, populated_format) is None:
         return file_1_value, file_2_value
     name_type = detect_matcher_type(None, fields_label(file_1_fields), fields_label(file_2_fields))
     if name_type in _NON_AMOUNT_NAME_TYPES:
@@ -118,9 +122,11 @@ def compare_rule_values(
     rules_sink: list[str] | None = None,
     matcher_type_override: str | None = None,
     decimal_precision: int | None = None,
+    number_format_file_1: str | None = None,
+    number_format_file_2: str | None = None,
 ) -> dict:
-    file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields)
-    file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields)
+    file_1_value, type_hint_1 = collect_rule_value(file_1_row, file_1_fields, number_format_file_1)
+    file_2_value, type_hint_2 = collect_rule_value(file_2_row, file_2_fields, number_format_file_2)
     label = fields_label(file_1_fields)
     # A blank side has no type of its own; the populated side decides.
     matcher_type = matcher_type_override or type_hint_1 or type_hint_2
@@ -129,7 +135,9 @@ def compare_rule_values(
         identical_as_read = type(file_1_value) is type(file_2_value) and bool(file_1_value == file_2_value)
     except Exception:
         identical_as_read = False
-    if identical_as_read:
+    if identical_as_read and (
+        matcher_type != "numeric" or number_format_file_1 == number_format_file_2
+    ):
         return {}
 
     if matcher_type is None:
@@ -141,7 +149,14 @@ def compare_rule_values(
 
     compared_1, compared_2 = file_1_value, file_2_value
     if matcher_type == "numeric":
-        compared_1, compared_2 = _blank_as_zero(file_1_value, file_2_value, file_1_fields, file_2_fields)
+        compared_1, compared_2 = _blank_as_zero(
+            file_1_value,
+            file_2_value,
+            file_1_fields,
+            file_2_fields,
+            number_format_file_1,
+            number_format_file_2,
+        )
 
     result = compare_values(
         compared_1,
@@ -150,6 +165,8 @@ def compare_rule_values(
         fields_label(file_2_fields),
         matcher_type,
         decimal_precision=decimal_precision,
+        number_format1=number_format_file_1,
+        number_format2=number_format_file_2,
     )
 
     if rules_sink is not None and result.rules:
@@ -158,8 +175,8 @@ def compare_rule_values(
         return {}
 
     if result.matcher_type == "numeric":
-        value_1 = to_decimal(file_1_value) or Decimal(0)
-        value_2 = to_decimal(file_2_value) or Decimal(0)
+        value_1 = to_decimal(file_1_value, number_format_file_1) or Decimal(0)
+        value_2 = to_decimal(file_2_value, number_format_file_2) or Decimal(0)
         return {
             f"{label} (FILE 1)": file_1_value,
             f"{label} (FILE 2)": file_2_value,
@@ -496,6 +513,8 @@ def _run_generic_reconciliation(
     normalized_rules: list[tuple[list[str], list[str]]] = []
     comparison_type_overrides: list[str | None] = []
     decimal_precision_overrides: list[int | None] = []
+    number_format_overrides_1: list[str | None] = []
+    number_format_overrides_2: list[str | None] = []
     for rule in rules:
         left = normalize_fields(rule.get("file_1_fields", []))
         right = normalize_fields(rule.get("file_2_fields", []))
@@ -503,6 +522,8 @@ def _run_generic_reconciliation(
             normalized_rules.append((left, right))
             comparison_type_overrides.append(rule.get("comparison_type"))
             decimal_precision_overrides.append(rule.get("decimal_precision"))
+            number_format_overrides_1.append(rule.get("number_format_file_1"))
+            number_format_overrides_2.append(rule.get("number_format_file_2"))
     file_1_extra = normalize_fields(include_columns_file_1 or [])
     file_2_extra = normalize_fields(include_columns_file_2 or [])
     normalized_secondary_conditions = _normalize_secondary_conditions(secondary_conditions)
@@ -540,20 +561,50 @@ def _run_generic_reconciliation(
 
     comparison_precisions: list[int | None] = []
     precision_metadata: list[dict] = []
-    for (left, right), comparison_type, override in zip(
-        normalized_rules, comparison_types, decimal_precision_overrides
+    number_formats_1: list[str | None] = []
+    number_formats_2: list[str | None] = []
+    number_format_metadata: list[dict] = []
+    for (left, right), comparison_type, precision_override, format_override_1, format_override_2 in zip(
+        normalized_rules,
+        comparison_types,
+        decimal_precision_overrides,
+        number_format_overrides_1,
+        number_format_overrides_2,
     ):
         if comparison_type != "numeric":
             comparison_precisions.append(None)
+            number_formats_1.append(None)
+            number_formats_2.append(None)
             continue
-        if override is not None and not 0 <= int(override) <= 12:
+        detected_format_1, format_source_1 = detect_number_format(
+            value for column in left for value in file_1_df[column]
+        )
+        detected_format_2, format_source_2 = detect_number_format(
+            value for column in right for value in file_2_df[column]
+        )
+        number_format_1 = format_override_1 or detected_format_1
+        number_format_2 = format_override_2 or detected_format_2
+        number_formats_1.append(number_format_1)
+        number_formats_2.append(number_format_2)
+        number_format_metadata.append({
+            "file_1_fields": left,
+            "file_2_fields": right,
+            "file_1_format": number_format_1,
+            "file_1_source": "configured" if format_override_1 else format_source_1,
+            "file_2_format": number_format_2,
+            "file_2_source": "configured" if format_override_2 else format_source_2,
+        })
+        if precision_override is not None and not 0 <= int(precision_override) <= 12:
             raise ValueError("Decimal precision must be between 0 and 12 places.")
         precision = (
-            int(override)
-            if override is not None
+            int(precision_override)
+            if precision_override is not None
             else infer_decimal_precision(
-                value
-                for frame, columns in ((file_1_df, left), (file_2_df, right))
+                to_decimal(value, number_format)
+                for frame, columns, number_format in (
+                    (file_1_df, left, number_format_1),
+                    (file_2_df, right, number_format_2),
+                )
                 for column in columns
                 for value in frame[column]
             )
@@ -563,7 +614,7 @@ def _run_generic_reconciliation(
             "file_1_fields": left,
             "file_2_fields": right,
             "decimal_places": precision,
-            "source": "configured" if override is not None else "detected",
+            "source": "configured" if precision_override is not None else "detected",
         })
 
     # Key types come from the raw values. Name/text keys keep their raw values
@@ -1102,8 +1153,18 @@ def _run_generic_reconciliation(
         has_field_difference = False
         field_rules: list[str] = []
         resolved_differences: list[str] = []
-        for (file_1_fields, file_2_fields), comparison_type, decimal_precision in zip(
-            normalized_rules, comparison_types, comparison_precisions
+        for (
+            (file_1_fields, file_2_fields),
+            comparison_type,
+            decimal_precision,
+            number_format_file_1,
+            number_format_file_2,
+        ) in zip(
+            normalized_rules,
+            comparison_types,
+            comparison_precisions,
+            number_formats_1,
+            number_formats_2,
         ):
             differences = compare_rule_values(
                 file_1_row,
@@ -1113,6 +1174,8 @@ def _run_generic_reconciliation(
                 field_rules,
                 matcher_type_override=comparison_type,
                 decimal_precision=decimal_precision,
+                number_format_file_1=number_format_file_1,
+                number_format_file_2=number_format_file_2,
             )
             if differences and evaluator is not None:
                 label = fields_label(file_1_fields)
@@ -1218,6 +1281,7 @@ def _run_generic_reconciliation(
             "normalization_rules_used": normalization_counts,
             "date_convention": "Day first (DD/MM/YYYY)" if date_dayfirst else "Month first (MM/DD/YYYY)",
             "numeric_precision": precision_metadata,
+            "number_formats": number_format_metadata,
             "resolution_rules": [f"{rule.label()}: {describe_rule(rule)}" for rule in (evaluator.rules if evaluator else [])],
             "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
             "tolerance_bands": [band.describe() for band in tolerance_bands],
