@@ -1,6 +1,6 @@
 # Scaling RecliQ to 1,000,000 rows per file
 
-**Status: Phase 1 and Phase 1b are complete.** The owner-controlled 100,000-row Phase 1b run measured 40.27 seconds end to end and 18.80 seconds for reading and matching, below the Phase 1 result of 57.80 seconds and 25.82 seconds. Phase 1b's defect tests, backend suites and repeatability checks pass. Phase 0 live-container sizing still needs owner access. Phase 1c is next; stop before Phases 2-4 and the deferred formula-injection fix (Phase 2.5) pending the decisions and infrastructure listed below. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
+**Status: Phases 1, 1b and 1c are complete.** The owner-controlled 100,000-row Phase 1b run measured 40.27 seconds end to end and 18.80 seconds for reading and matching, below the Phase 1 result of 57.80 seconds and 25.82 seconds. Phase 1c split generic reconciliation into typed preparation, key matching, keyless matching and result-building stages; all four output comparisons are identical. Phase 0 live-container sizing still needs owner access. Stop before Phases 2-4 and the deferred formula-injection fix (Phase 2.5) pending the decisions and infrastructure listed below. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
 
 - Code measured: `main` at commit `2a3a10c` (1 October 2026); measurements taken 1 to 3 October 2026. `main` has since moved to `4197f58` (3 October), which changed the tolerance editor, number display and workbook pairing but not the engine's matching code. The last round of checks (reader comparison, results-page cost, text-score batch, one prototype per process, and the test suite with the three engine changes) ran on `4197f58`. Line references are to `4197f58`. Re-run the baseline table on the current code before closing Phase 0.
 - Machine: laptop, AMD Ryzen 5 3550H (4 cores, 8 threads), 21.9 GB RAM, Windows 11, Python 3.12.10, pandas 2.2.2, on mains power with nothing else running.
@@ -210,6 +210,23 @@ After the initial trial, the owner reran `bench.py 100000 read keyed` under the 
 - The run is faster than the verified Phase 1 baseline by 17.53 s end to end and 7.02 s for reading plus matching; both targets pass.
 - Counts are unchanged from the corrected Phase 1b baseline: 96,244 paired records, 22,822 report rows with field differences, 358 within-tolerance records, 3,756 only in File 1, 3,000 only in File 2, and 0 ambiguous or awaiting-confirmation matches.
 - The measured stage times sum to the reported 40.27 s. Update `PERF_BASELINE_VERSION` in the GitHub repository variables to a new value before the next nightly speed test.
+
+### 3.9 Phase 1c measurements and output proof (12 October 2026)
+
+After the stage split in code commit `6b866ed`, the benchmark was run at 10,000, 50,000 and 100,000 rows for both keyed and keyless scenarios. The machine was a local Windows development laptop, but idle state, mains power and sleep prevention were not independently verified. These measurements are indicative and **not comparable** with the controlled Phase 1b result in section 3.8.
+
+| Rows per file | Scenario | Read two `.xlsx` | Engine | Excel report | Result JSON | Total from `.xlsx` | Report size | Result JSON size |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 | Keyed | 0.70 s | 1.64 s | 3.09 s | 1.13 s | 6.56 s | - | - |
+| 10,000 | Keyless | 0.70 s | 1.20 s | 3.83 s | 1.08 s | 6.81 s | - | - |
+| 50,000 | Keyed | 3.37 s | 7.35 s | 6.76 s | 5.09 s | 22.57 s | - | - |
+| 50,000 | Keyless | 3.37 s | 5.53 s | 6.74 s | 5.37 s | 21.01 s | - | - |
+| 100,000 | Keyed | 6.51 s | 13.65 s | 13.88 s | 10.22 s | 44.26 s | 3.1 MB | 61.8 MB |
+| 100,000 | Keyless | 6.51 s | 10.97 s | 12.46 s | 10.55 s | 40.49 s | - | - |
+
+Peak memory reported by the benchmark runs was 158.0 MB at 10,000 rows, 413.6 MB at 50,000 rows and 711.9 MB at 100,000 rows. Do not interpret these timings as a measured performance improvement or regression: Phase 1c was a structural refactor, and the run conditions were not controlled.
+
+`quickwins.py compare` reported identical result data for all four scenarios against the saved pre-split outputs: keyed (20,000 rows), keyless (20,000 rows), exact secondary condition (20,000 rows) and similar secondary condition (4,000 rows). After the final cleanup, repeatability was byte-identical for keyed, keyless and exact-secondary runs at 2,000 rows.
 
 ## 4. Why it is slow: the causes, in order of cost
 
@@ -501,7 +518,18 @@ Verification: repository-root backend suite, 272 passed; backend-local suite, 58
 
 ### Phase 1c. Split the engine function (3 to 5 days)
 
-Cut `_run_generic_reconciliation` (`engine.py:433-1149`) into four functions with typed inputs: prepare (transformations, normal forms, key types, combining rows), key pass, keyless passes, build results. No change to results. Done when `quickwins.py compare` reports identical output on all four scenarios and the tests pass.
+**Status (12 October 2026): Done.** Code commit `6b866ed` extracts `_run_generic_reconciliation` into typed request/preparation data and four stages. The former preparation work is in `_prepare_generic_reconciliation`; the key pass is `_run_key_pass`; remaining-row matching is `_run_keyless_passes`; and report/result assembly is `_build_generic_results`. Matching order, cancellation checks, row reservations and result construction were retained. The `quickwins.py` loader now registers dynamically imported engine modules in `sys.modules`, which is required for dataclass initialization.
+
+| Acceptance check | Result |
+|---|---|
+| Four staged helpers with typed inputs | Done |
+| `quickwins.py compare` on keyed, keyless, exact-secondary and similar-secondary scenarios | Identical to saved pre-split outputs |
+| Repeatability at 2,000 rows | Keyed, keyless and exact-secondary results byte-identical after final cleanup |
+| Repository-root backend suite | Previous post-refactor run: 272 passed. Final run: 271 passed; one unrelated Excel-reader test could not import optional `python-calamine` from the root virtual environment |
+| Backend-local suite after final cleanup | 58 passed, 1 warning |
+| Syntax and whitespace checks | `py_compile` and `git diff --check` passed |
+
+Phase 1c is complete; do not start Phase 2 automatically. Phase 0 live-container sizing and the decisions/infrastructure listed for later phases remain open.
 
 ### Phase 2. Files and results as tables on disk (2 to 3 weeks)
 
