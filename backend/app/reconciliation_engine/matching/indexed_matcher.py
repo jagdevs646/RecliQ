@@ -589,6 +589,53 @@ class IndexedCandidateMatcher:
 
         return set(), f"Unsupported comparison method: {method}"
 
+    def _condition_matches_values(self, source_value: object, destination_value: object, condition: dict) -> bool:
+        """Apply the same predicate used by the secondary-condition indexes to one pair."""
+        destination_column = str(condition.get("destination_column", ""))
+        method = str(condition.get("comparison_method", ""))
+
+        if method == "exact_text":
+            source_identity = active_normalizer().identity(source_value)
+            return bool(source_identity) and source_identity == active_normalizer().identity(destination_value)
+
+        if method == "normalized_date":
+            source_date = parse_date_value(source_value)
+            destination_date = parse_date_value(destination_value)
+            return bool(source_date and destination_date and source_date == destination_date)
+
+        if method == "numeric_tolerance":
+            source_number = to_number(source_value)
+            destination_number = to_number(destination_value)
+            tolerance = float(condition.get("numeric_tolerance") or 0)
+            return bool(
+                source_number is not None
+                and destination_number is not None
+                and source_number - tolerance <= destination_number <= source_number + tolerance
+            )
+
+        if method == "matcher_based":
+            source_tokens = set(tokens(source_value, use_synonyms=True))
+            destination_tokens = set(tokens(destination_value, use_synonyms=True))
+            return bool(
+                source_tokens.intersection(destination_tokens)
+                and compare_values(source_value, destination_value, "", destination_column).matched
+            )
+
+        return False
+
+    def matches_conditions(self, source_row: dict, destination_row: dict, conditions: Sequence[dict]) -> bool:
+        """Check a single pair without building full candidate sets for each condition."""
+        for condition in conditions:
+            source_column = str(condition.get("source_column", ""))
+            destination_column = str(condition.get("destination_column", ""))
+            if not source_column or not destination_column:
+                return False
+            if not self._condition_matches_values(
+                source_row.get(source_column), destination_row.get(destination_column), condition
+            ):
+                return False
+        return True
+
     def find_secondary_candidates(
         self,
         source_row: dict,

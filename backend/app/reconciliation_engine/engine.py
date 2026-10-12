@@ -694,14 +694,11 @@ def _run_generic_reconciliation(
         # Secondary keys are mandatory: a primary-key hit only counts when every
         # configured secondary key matches too (e.g. ID *and* vendor name).
         if exact_candidates and normalized_secondary_conditions:
-            passing, _ = indexed_matcher.find_secondary_candidates(
-                file_1_row,
-                normalized_secondary_conditions,
-                matched_file_2_indices,
-            )
-            passing_indices = {index for index, _ in passing}
             rejected = exact_candidates
-            exact_candidates = [candidate for candidate in exact_candidates if candidate[0] in passing_indices]
+            exact_candidates = [
+                candidate for candidate in exact_candidates
+                if indexed_matcher.matches_conditions(file_1_row, candidate[1], normalized_secondary_conditions)
+            ]
             if not exact_candidates:
                 candidate_row = rejected[0][1]
                 secondary_mismatch = _secondary_mismatches(file_1_row, candidate_row, normalized_secondary_conditions)

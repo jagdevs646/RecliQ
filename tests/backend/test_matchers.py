@@ -7,8 +7,10 @@ ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
 import pandas as pd
+import pytest
 
 from app.reconciliation.matchers import IndexedCandidateMatcher, compare_values, parse_date_value, prepare_dataframe
+from app.reconciliation_engine.matching.indexed_matcher import IndexedCandidateMatcher as EngineCandidateMatcher
 from app.reconciliation_engine.normalization import normalize_date_series
 
 
@@ -113,3 +115,36 @@ def test_identical_normalized_text_is_not_enough_for_the_shortcut():
     )
 
     assert differences["AMOUNT DIFF"] == -1000.0
+
+
+@pytest.mark.parametrize(
+    ("method", "source_value", "destination_values"),
+    [
+        ("exact_text", "ABC PVT LTD", ["ABC PRIVATE LIMITED", "Other Ltd"]),
+        ("normalized_date", "07/09/2026", ["2026-09-07", "2026-09-08"]),
+        ("numeric_tolerance", 100, [100.5, 103]),
+        ("matcher_based", "Alpha Consulting", ["Alpha Consulting Limited", "Beta Ltd"]),
+    ],
+)
+def test_direct_secondary_pair_check_matches_indexed_candidates(method, source_value, destination_values):
+    matcher = EngineCandidateMatcher(
+        pd.DataFrame([{"KEY": f"INV-{index}", "DESTINATION": value} for index, value in enumerate(destination_values)]),
+        "KEY",
+        "invoice",
+    )
+    condition = {
+        "source_column": "SOURCE",
+        "destination_column": "DESTINATION",
+        "comparison_method": method,
+        "numeric_tolerance": 1,
+    }
+    source_row = {"SOURCE": source_value}
+    indexed, _ = matcher.find_secondary_candidates(source_row, [condition])
+    indexed_positions = {position for position, _ in indexed}
+
+    assert indexed_positions == {0}
+    assert {
+        position
+        for position, row in enumerate(matcher.rows)
+        if matcher.matches_conditions(source_row, row, [condition])
+    } == indexed_positions
