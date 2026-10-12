@@ -34,6 +34,47 @@ def test_generic_reconciliation_throttles_row_cancellation_checks(monkeypatch, t
     assert len(checks) <= 5
 
 
+@pytest.mark.parametrize("keyless", [False, True])
+def test_file_2_records_are_materialized_once(monkeypatch, tmp_path: Path, keyless: bool):
+    from app.reconciliation_engine import engine
+
+    original_to_dict = pd.DataFrame.to_dict
+    destination_conversions = []
+
+    def count_destination_conversions(frame, *args, **kwargs):
+        if "DESTINATION MARKER" in frame.columns:
+            destination_conversions.append(frame)
+        return original_to_dict(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", count_destination_conversions)
+    source = pd.DataFrame({"AMOUNT": [100, 200], "DATE": ["2026-09-01", "2026-09-02"]})
+    destination = pd.DataFrame({
+        "AMOUNT": [100, 200],
+        "DATE": ["2026-09-01", "2026-09-02"],
+        "DESTINATION MARKER": ["first", "second"],
+    })
+    result = engine.run_generic_reconciliation(
+        source,
+        destination,
+        tmp_path / "unused.xlsx",
+        key_file_1=[] if keyless else ["AMOUNT"],
+        key_file_2=[] if keyless else ["AMOUNT"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+        matching_passes=[{
+            "type": "amount_date",
+            "amount_source": "AMOUNT",
+            "amount_destination": "AMOUNT",
+            "date_source": "DATE",
+            "date_destination": "DATE",
+            "date_window_days": 0,
+        }] if keyless else [],
+        write_report=False,
+    )
+
+    assert result["matched_records"] == 2
+    assert len(destination_conversions) == 1
+
+
 def test_generic_reconciliation_creates_report(tmp_path: Path):
     file1 = tmp_path / "file1.xlsx"
     file2 = tmp_path / "file2.xlsx"

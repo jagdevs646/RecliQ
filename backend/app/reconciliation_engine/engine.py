@@ -601,6 +601,7 @@ def _run_generic_reconciliation(
             "Select at least one additional identifying column or explicitly enable the date-only override."
         )
     indexed_matcher = IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types) if has_keys else None
+    file_2_records = indexed_matcher.rows if indexed_matcher is not None else file_2_df.to_dict('records')
     is_composite_key = len(file_1_match_keys) > 1
     primary_key_1 = file_1_match_keys[0] if has_keys else None
     primary_key_2 = file_2_match_keys[0] if has_keys else None
@@ -779,7 +780,7 @@ def _run_generic_reconciliation(
     # ── Later passes: keyless matching on records still unmatched ─────────
     if passes:
         file_2_positions = {index: position for position, index in enumerate(file_2_df.index)}
-        file_2_rows_all = file_2_df.to_dict('records')
+        file_2_rows_all = file_2_records
 
         for number, config in enumerate(passes, start=2 if has_keys else 1):
             label = pass_label(config, number)
@@ -1055,7 +1056,6 @@ def _run_generic_reconciliation(
 
     file_2_indices_set = set(file_2_df.index)
     unmatched_indices = file_2_indices_set - matched_file_2_indices
-    file_2_records = file_2_df.to_dict('records')
     file_2_not_found = []
     for i, idx in enumerate(file_2_df.index):
         if idx in unmatched_indices:
