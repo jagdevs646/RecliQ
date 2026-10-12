@@ -1,6 +1,7 @@
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
@@ -90,3 +91,25 @@ def test_identifiers_and_dates_are_never_parsed_as_numbers():
     # A formatting-only identifier difference is text, never a numeric DIFF.
     differences = compare_rule_values({"INVOICE": "S-3"}, {"INVOICE": "S3"}, ["INVOICE"], ["INVOICE"])
     assert "INVOICE DIFF" not in differences
+
+
+def test_identical_values_as_read_skip_type_detection():
+    from app.reconciliation_engine.engine import compare_rule_values
+
+    with patch("app.reconciliation_engine.engine.detect_matcher_type", side_effect=AssertionError):
+        assert compare_rule_values(
+            {"NARRATION": "Rent for March 2026"},
+            {"NARRATION": "Rent for March 2026"},
+            ["NARRATION"],
+            ["NARRATION"],
+        ) == {}
+
+
+def test_identical_normalized_text_is_not_enough_for_the_shortcut():
+    from app.reconciliation_engine.engine import compare_rule_values
+
+    differences = compare_rule_values(
+        {"AMOUNT": "-500"}, {"AMOUNT": "500"}, ["AMOUNT"], ["AMOUNT"]
+    )
+
+    assert differences["AMOUNT DIFF"] == -1000.0

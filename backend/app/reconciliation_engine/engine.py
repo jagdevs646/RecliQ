@@ -118,6 +118,13 @@ def compare_rule_values(
     # A blank side has no type of its own; the populated side decides.
     matcher_type = type_hint_1 or type_hint_2
 
+    try:
+        identical_as_read = type(file_1_value) is type(file_2_value) and bool(file_1_value == file_2_value)
+    except Exception:
+        identical_as_read = False
+    if identical_as_read:
+        return {}
+
     if matcher_type is None:
         matcher_type = detect_matcher_type(
             [file_1_value, file_2_value],
