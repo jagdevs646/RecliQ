@@ -1651,6 +1651,8 @@ def run_gst_reconciliation(
     only_in_file1: list[dict] = []
     confidence_review: list[dict] = []
     matched_records: list[dict] = []
+    # Pairs to confirm, in the form the Match Review list and tab read.
+    identity_resolution: list[dict] = []
     matched_file2_indices: set = set()
 
     tracker.matching_records()
@@ -1682,9 +1684,13 @@ def run_gst_reconciliation(
             continue
 
         matched_file2_indices.add(best_idx)
+        invoice_1, invoice_2 = row1.get("INVOICE NO."), row2.get("INVOICE NO.")
         base = {
             "ROW (File 1)": row1.get("_ROW_NO", row_idx + 2),
             "ROW (File 2)": row2.get("_ROW_NO", best_idx + 2),
+            # Identify the invoice on every difference line of the report.
+            "MATCH KEY": f"{gstr} | {invoice_1}",
+            "MATCHED KEY": f"{gstr} | {invoice_2}",
             "GSTR": gstr,
             "INVOICE NO. (File1)": row1.get("INVOICE NO."),
             "INVOICE NO. (File2)": row2.get("INVOICE NO."),
@@ -1694,38 +1700,40 @@ def run_gst_reconciliation(
             "NAME (File2)": row2.get("NAME OF TRADER/FIRM/COMPANY", ""),
         }
 
+        # Differences use the shared report's names ("FIELD (FILE 1)", "FIELD
+        # (FILE 2)", "FIELD STATUS", "FIELD DIFF"), so each one is listed on the
+        # Differences tab and in the stored results, not only counted.
         field_diffs: dict[str, object] = {}
         review_notes: dict[str, object] = {}
+        name_1 = row1.get("NAME OF TRADER/FIRM/COMPANY", "")
+        name_2 = row2.get("NAME OF TRADER/FIRM/COMPANY", "")
 
-        name_result = compare_values(
-            row1.get("NAME OF TRADER/FIRM/COMPANY", ""),
-            row2.get("NAME OF TRADER/FIRM/COMPANY", ""),
-            "NAME OF TRADER/FIRM/COMPANY",
-            "NAME OF TRADER/FIRM/COMPANY",
-            "company_name",
-        )
+        name_result = compare_values(name_1, name_2, "NAME OF TRADER/FIRM/COMPANY", "NAME OF TRADER/FIRM/COMPANY", "company_name")
         if not name_result.matched or name_result.confidence < text_threshold:
-            field_diffs["NAME STATUS"] = name_result.status
-            field_diffs["NAME CONFIDENCE"] = f"{name_result.confidence}%"
+            field_diffs["NAME OF TRADER/FIRM/COMPANY (FILE 1)"] = name_1
+            field_diffs["NAME OF TRADER/FIRM/COMPANY (FILE 2)"] = name_2
+            field_diffs["NAME OF TRADER/FIRM/COMPANY STATUS"] = name_result.status
+            field_diffs["NAME OF TRADER/FIRM/COMPANY CONFIDENCE"] = f"{name_result.confidence}%"
         elif name_result.confidence < 100:
             review_notes["NAME STATUS"] = name_result.status
             review_notes["NAME CONFIDENCE"] = f"{name_result.confidence}%"
 
         date_result = compare_values(row1.get("INVOICE DATE"), row2.get("INVOICE DATE"), "INVOICE DATE", "INVOICE DATE", "date")
         if not date_result.matched:
-            field_diffs["DATE (File1)"] = row1.get("INVOICE DATE")
-            field_diffs["DATE (File2)"] = row2.get("INVOICE DATE")
-            field_diffs["DATE STATUS"] = date_result.status
-            field_diffs["DATE DETAIL"] = date_result.detail
+            field_diffs["INVOICE DATE (FILE 1)"] = row1.get("INVOICE DATE")
+            field_diffs["INVOICE DATE (FILE 2)"] = row2.get("INVOICE DATE")
+            field_diffs["INVOICE DATE STATUS"] = date_result.status
+            field_diffs["INVOICE DATE DETAIL"] = date_result.detail
 
         for col in GST_AMOUNT_COLUMNS:
             amount_result = compare_values(row1.get(col, 0), row2.get(col, 0), col, col, "numeric")
             if not amount_result.matched:
                 value1 = float(row1.get(col, 0) or 0)
                 value2 = float(row2.get(col, 0) or 0)
-                field_diffs[f"{col} (File1)"] = value1
-                field_diffs[f"{col} (File2)"] = value2
+                field_diffs[f"{col} (FILE 1)"] = value1
+                field_diffs[f"{col} (FILE 2)"] = value2
                 field_diffs[f"{col} DIFF"] = round(value1 - value2, 2)
+                field_diffs[f"{col} STATUS"] = amount_result.status
 
         if field_diffs:
             record = dict(base)
@@ -1735,6 +1743,20 @@ def run_gst_reconciliation(
             record = dict(base)
             record.update(review_notes)
             confidence_review.append(record)
+            reasons = []
+            if invoice_result.confidence < 100:
+                reasons.append(f"Invoice number {invoice_1} was paired with {invoice_2} ({invoice_result.confidence}% similar).")
+            if review_notes:
+                reasons.append(f"Supplier name '{name_1}' is {name_result.confidence}% similar to '{name_2}'.")
+            identity_resolution.append({
+                "ROW (FILE 1)": base["ROW (File 1)"],
+                "IDENTITY CLASSIFICATION": MatchClassification.EXCEPTION_MATCH.value,
+                "MATCH EXPLANATION": " ".join(reasons) + " Confirm that this is the same invoice.",
+                "MATCH TYPE": "invoice",
+                "MATCH CONFIDENCE": f"{min(invoice_result.confidence, name_result.confidence)}%",
+                "MATCH KEY": base["MATCH KEY"],
+                "CANDIDATE KEY": base["MATCHED KEY"],
+            })
         else:
             record = dict(base)
             matched_records.append(record)
@@ -1770,6 +1792,7 @@ def run_gst_reconciliation(
         matched_records=matched_records,
         total_file_1=len(df1),
         total_file_2=len(df2),
+        identity_resolution=identity_resolution,
     )
 
     if write_report:

@@ -506,10 +506,20 @@ def _process_claimed_job(job_id: str) -> None:
             if not sources_2 and job.input_file_2_id:
                 sources_2 = [FileSource(file_id=job.input_file_2_id)]
                 
-            # Construct a dummy pair for backwards compatibility
+            def _source_entry(source) -> dict:
+                if hasattr(source, "model_dump"):
+                    return source.model_dump()
+                return source if isinstance(source, dict) else {"file_id": source.file_id, "sheet_id": source.sheet_id}
+
+            # Construct a dummy pair for backwards compatibility. Every selected
+            # sheet on each side is read and stacked into one table, as the
+            # general path does; reading only the first dropped the others
+            # without a word.
             execution_items = [{
-                "source_file_1": sources_1[0].model_dump() if hasattr(sources_1[0], "model_dump") else (sources_1[0] if isinstance(sources_1[0], dict) else {"file_id": sources_1[0].file_id, "sheet_id": sources_1[0].sheet_id}),
-                "source_file_2": sources_2[0].model_dump() if hasattr(sources_2[0], "model_dump") else (sources_2[0] if isinstance(sources_2[0], dict) else {"file_id": sources_2[0].file_id, "sheet_id": sources_2[0].sheet_id}),
+                "source_file_1": _source_entry(sources_1[0]),
+                "source_file_2": _source_entry(sources_2[0]),
+                "source_files_1": [_source_entry(source) for source in sources_1],
+                "source_files_2": [_source_entry(source) for source in sources_2],
                 "key_file_1": payload.get("key_file_1"),
                 "key_file_2": payload.get("key_file_2"),
                 "rules": payload.get("rules", []),
@@ -598,6 +608,10 @@ def _process_claimed_job(job_id: str) -> None:
                     orientation=orientation,
                 )
                 sheet_name_1, sheet_name_2 = s1.sheet_id or "default", s2.sheet_id or "default"
+                if job.job_type == "gst":
+                    # A GST run stacks every selected sheet; name them all.
+                    sheet_name_1 = ", ".join(manifest_entry["source_sheets"])
+                    sheet_name_2 = ", ".join(manifest_entry["destination_sheets"])
                 report_label = pair.get("report_label") or f"{sheet_name_1} <-> {sheet_name_2}"
                 manifest_entry["report_label"] = report_label
                 pair_label = f"[{report_label}]"

@@ -606,6 +606,12 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
       setMessage("GST reconciliation uses the first source and destination workbook.");
       return;
     }
+    // A GST run reads one workbook on each side (every selected sheet of it);
+    // say so instead of leaving the additional workbooks out without a word.
+    if (jobType === "gst" && (additionalSourceFiles.length > 0 || additionalDestinationFiles.length > 0)) {
+      setMessage("GST reconciliation reads one workbook on each side. Remove the additional workbooks, or copy their sheets into the first workbook.");
+      return;
+    }
     if (jobType === "gst" && !gstReady) {
       setMessage("Both files must contain all mandatory GST fields before reconciliation can start.");
       return;

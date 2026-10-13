@@ -5,8 +5,12 @@ ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
 import pandas as pd
+from fastapi.testclient import TestClient
 
+from _helpers import upload, wait_for_job
+from app.main import app
 from app.reconciliation.gst import REQUIRED_COLUMNS, run_gst_reconciliation
+from app.reconciliation_engine.engine import run_gst_reconciliation as run_gst_engine
 
 
 def gst_row(invoice_number: str) -> dict[str, object]:
@@ -77,4 +81,52 @@ def test_gst_reconciliation_handles_timestamps_and_dates(tmp_path: Path):
     with open(raw_path, "r", encoding="utf-8") as f:
         loaded = json.load(f)
     assert "exceptions" in loaded
+
+
+def test_gst_differences_are_listed_not_only_counted():
+    books, portal = gst_row("INV001"), gst_row("INV001")
+    portal.update({"IGST": 185, "INVOICE VALUE": 1185, "INVOICE DATE": "2026-07-05",
+                   "NAME OF TRADER/FIRM/COMPANY": "XYZ ENTERPRISES"})
+    result = run_gst_engine(pd.DataFrame([books]), pd.DataFrame([portal]), Path("unused.xlsx"), write_report=False)
+
+    assert result["summary"]["report_rows"] == 1
+    listed = {line["Field"]: line for line in result["universal_data"]["exceptions"]}
+    assert set(listed) == {"IGST", "INVOICE VALUE", "INVOICE DATE", "NAME OF TRADER/FIRM/COMPANY"}
+    assert listed["IGST"]["Primary Key"] == "27ABCDE1234F1Z5 | INV001"
+    assert (listed["IGST"]["File 1 Value"], listed["IGST"]["File 2 Value"], listed["IGST"]["Difference"]) == (180.0, 185.0, -5.0)
+    assert listed["NAME OF TRADER/FIRM/COMPANY"]["File 2 Value"] == "XYZ ENTERPRISES"
+
+
+def test_gst_pairs_to_confirm_are_listed_for_review():
+    books, portal = gst_row("INV001"), gst_row("INV001")
+    books["NAME OF TRADER/FIRM/COMPANY"] = "Sharma Steel Traders"
+    portal["NAME OF TRADER/FIRM/COMPANY"] = "Sharma Steels Traders"  # 97% similar: review, not a difference.
+    result = run_gst_engine(pd.DataFrame([books]), pd.DataFrame([portal]), Path("unused.xlsx"), write_report=False)
+
+    assert result["summary"]["confidence_review"] == 1 and result["summary"]["report_rows"] == 0
+    assert result["universal_data"]["exceptions"] == []
+    [review] = result["universal_data"]["identity_resolution"]
+    assert review["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"
+    assert review["MATCH KEY"] == review["CANDIDATE KEY"] == "27ABCDE1234F1Z5 | INV001"
+    assert "97% similar" in review["MATCH EXPLANATION"]
+
+
+def test_a_gst_run_reads_every_selected_sheet():
+    july = [gst_row("INV001"), gst_row("INV002")]
+    august = [gst_row("INV003")]
+    portal = [gst_row("INV001"), gst_row("INV002"), gst_row("INV003")]
+    with TestClient(app) as client:
+        books_id = upload(client, "books.xlsx", {"July": july, "August": august})
+        portal_id = upload(client, "portal.xlsx", {"GSTR-2B": portal})
+        response = client.post("/api/reconciliation/gst", json={
+            "source_files_1": [{"file_id": books_id, "sheet_id": "July"}, {"file_id": books_id, "sheet_id": "August"}],
+            "source_files_2": [{"file_id": portal_id, "sheet_id": "GSTR-2B"}],
+        })
+        assert response.status_code in (200, 201), response.text
+        job = wait_for_job(client, response.json()["id"])
+        summary = client.get(f"/api/reports/job/{job['id']}/summary").json()
+
+    assert job["status"] == "completed", job
+    assert summary["source_records"] == 3  # Both sheets, not only July.
+    assert summary["fully_matched_records"] == 3 and summary["only_in_file_2"] == 0
 
