@@ -1,6 +1,6 @@
 import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { decimalColumns, formatRecordValue, formatServerTime } from "../lib/formats";
+import { decimalColumns, formatMatchRate, formatRecordValue, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { Job, PreviewCategory, ReconciliationSummary, ReportPreview, ReportCustomConfig, ReportScope } from "../types";
 import { ReportCustomizer } from "../components/ReportCustomizer";
@@ -87,7 +87,6 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
 
   const matched = summary.fully_matched_records ?? Math.max(0, (summary.matched_records ?? 0) - summary.report_rows - summary.confidence_review);
   const total = summary.source_records ?? Math.max(0, matched + summary.report_rows + summary.only_in_file_1 + summary.only_in_file_2 + summary.confidence_review);
-  const matchRate = total ? (matched / total) * 100 : 0;
   const chartTotal = Math.max(1, matched + summary.report_rows + summary.only_in_file_1 + summary.only_in_file_2);
   // Identity outcomes are reported separately; jobs from before the split fall back to one review card.
   const hasIdentityBreakdown = summary.exact_matches !== undefined;
@@ -239,7 +238,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
     </div>}
     {activeRule?.status === "failed" && <p className="error-text"><XCircle size={16} />This sheet rule failed and produced no results: {activeRule.error}</p>}
     {/* Headline numbers once; the chart shows the split and the cards below open each group. */}
-    <div className="summary-grid"><Metric label="Records compared" value={total} icon={<ShieldCheck size={20} />} tone="blue" /><Metric label="Fully matched" value={matched} note={summary.within_tolerance_records ? `incl. ${summary.within_tolerance_records.toLocaleString()} within your tolerance` : undefined} icon={<CheckCircle2 size={20} />} tone="green" /><Metric label="Match rate" value={total ? `${matchRate.toFixed(1)}%` : "—"} hint="Share of records that matched with no differences" icon={<Percent size={20} />} tone="violet" /></div>
+    <div className="summary-grid"><Metric label="Records compared" value={total} icon={<ShieldCheck size={20} />} tone="blue" /><Metric label="Fully matched" value={matched} note={summary.within_tolerance_records ? `incl. ${summary.within_tolerance_records.toLocaleString()} within your tolerance` : undefined} icon={<CheckCircle2 size={20} />} tone="green" /><Metric label="Fully matched rate" value={formatMatchRate(matched, total)} hint="Share of records that matched with no differences" icon={<Percent size={20} />} tone="violet" /></div>
     <div className="chart-card"><div><h2>Result distribution</h2><p>Where every record ended up.</p></div><div className="donut-wrap"><div className="donut" style={chartStyle}><span>{total}</span><small>records</small></div><ul className="chart-legend"><li><i className="legend-green" />Matched <strong>{matched}</strong></li><li><i className="legend-coral" />Values differ <strong>{summary.report_rows}</strong></li><li><i className="legend-amber" />{file1Name} only <strong>{summary.only_in_file_1}</strong></li><li><i className="legend-slate" />{file2Name} only <strong>{summary.only_in_file_2}</strong></li></ul></div></div>
     <section><div className="section-heading"><div><h2>What needs attention</h2><p>Open a group to see its records, 25 at a time.</p></div></div><div className={`result-card-grid${cards.length > 4 ? " is-three-column" : ""}`}>{cards.map(({ category: cardCategory, title, label, count, icon: Icon, tone }) => count > 0
       ? <article className={`result-card tone-${tone}`} key={cardCategory}><Icon size={20} aria-hidden="true" /><span>{title}</span><strong>{count.toLocaleString()}</strong><p>{label}</p><button type="button" className="text-command" onClick={() => openPreview(cardCategory)}><Eye size={16} />View records</button></article>

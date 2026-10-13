@@ -13,6 +13,7 @@ def collect_rule_value(
     fields: list[str],
     number_format: str | None = None,
     known_matcher_type: str | None = None,
+    combination_type: str | None = None,
 ) -> tuple[object, str | None]:
     values = [row[field] for field in fields if field in row]
 
@@ -27,6 +28,14 @@ def collect_rule_value(
         if isinstance(value, str):
             return value.strip(), known_matcher_type
         return str(value).strip(), known_matcher_type
+
+    if len(values) > 1 and combination_type == "numeric":
+        numbers = [to_decimal(value, number_format) for value in values]
+        return sum((number or Decimal(0) for number in numbers), Decimal(0)), "numeric"
+
+    if len(values) > 1 and combination_type == "text":
+        text_values = [str(value).strip() for value in values if not is_blank(value)]
+        return " ".join(text_values), "text"
 
     numbers = [to_decimal(value, number_format) for value in values]
 
@@ -47,8 +56,66 @@ def validate_columns(df: pd.DataFrame, columns: Iterable[str], label: str) -> No
 
 
 def is_numeric_column(series: pd.Series) -> bool:
-    values = [value for value in series if not is_blank(value)]
-    return bool(values) and all(to_number(value) is not None for value in values)
+    found_value = False
+    for value in series:
+        if is_blank(value):
+            continue
+        found_value = True
+        if to_number(value) is None:
+            return False
+    return found_value
+
+
+def _column_data_type(series: pd.Series) -> str | None:
+    found_value = False
+    for value in series:
+        if is_blank(value):
+            continue
+        found_value = True
+        if to_number(value) is None:
+            return "text"
+    return "numeric" if found_value else None
+
+
+def _combined_column_type(df: pd.DataFrame, fields: list[str], side: str) -> str | None:
+    if len(fields) < 2:
+        return None
+
+    field_types = {field: _column_data_type(df[field]) for field in fields}
+    numeric_fields = [field for field, kind in field_types.items() if kind == "numeric"]
+    text_fields = [field for field, kind in field_types.items() if kind == "text"]
+    if numeric_fields and text_fields:
+        raise ValueError(
+            "Combined columns on each file must be all numeric (added together) or all text "
+            "(joined with spaces). "
+            f"{side} has numeric columns: {', '.join(numeric_fields)}; "
+            f"text columns: {', '.join(text_fields)}."
+        )
+    if numeric_fields:
+        return "numeric"
+    if text_fields:
+        return "text"
+    return None
+
+
+def infer_combined_column_types(
+    file_1_df: pd.DataFrame,
+    file_2_df: pd.DataFrame,
+    rules: Iterable[tuple[list[str], list[str]]],
+) -> list[tuple[str | None, str | None]]:
+    """Infer how selected columns on each side are combined, independently."""
+    inferred = []
+    for file_1_fields, file_2_fields in rules:
+        type_1 = _combined_column_type(file_1_df, file_1_fields, "File 1")
+        type_2 = _combined_column_type(file_2_df, file_2_fields, "File 2")
+        if type_1 and type_2 and type_1 != type_2:
+            raise ValueError(
+                "Combined mapping types must agree between files: "
+                f"File 1 columns are {type_1}, while File 2 columns are {type_2}. "
+                "Map numeric fields to numeric fields or text fields to text fields."
+            )
+        inferred.append((type_1, type_2))
+    return inferred
 
 
 def validate_combined_numeric_rules(
@@ -56,18 +123,5 @@ def validate_combined_numeric_rules(
     file_2_df: pd.DataFrame,
     rules: Iterable[tuple[list[str], list[str]]],
 ) -> None:
-    for file_1_fields, file_2_fields in rules:
-        if len(file_1_fields) == 1 and len(file_2_fields) == 1:
-            continue
-
-        invalid_file_1 = [field for field in file_1_fields if not is_numeric_column(file_1_df[field])]
-        invalid_file_2 = [field for field in file_2_fields if not is_numeric_column(file_2_df[field])]
-        if invalid_file_1 or invalid_file_2:
-            details = []
-            if invalid_file_1:
-                details.append(f"File 1: {', '.join(invalid_file_1)}")
-            if invalid_file_2:
-                details.append(f"File 2: {', '.join(invalid_file_2)}")
-            raise ValueError(
-                "Combined column mappings require numeric columns. " + "; ".join(details)
-            )
+    # Kept as a backwards-compatible entry point for the reconciliation facade.
+    infer_combined_column_types(file_1_df, file_2_df, rules)

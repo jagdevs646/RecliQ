@@ -43,6 +43,15 @@ export function formatRecordValue(value: unknown, column: string, decimals?: Set
   return String(value);
 }
 
+/** Keep a near-perfect but incomplete reconciliation from rounding up to 100%. */
+export function formatMatchRate(matched: number, total: number): string {
+  if (!Number.isFinite(matched) || !Number.isFinite(total) || total <= 0 || matched < 0 || matched > total) return "—";
+  if (matched === total) return "100.0%";
+
+  const rate = (matched / total) * 100;
+  return rate >= 99.9 ? `${Math.min(rate, 99.99).toFixed(2)}%` : `${rate.toFixed(1)}%`;
+}
+
 /**
  * Reads a timestamp from the server. The API sends UTC with an offset, but a value
  * without one ("2026-09-30T19:19:50.472435") is still UTC: `new Date` alone would

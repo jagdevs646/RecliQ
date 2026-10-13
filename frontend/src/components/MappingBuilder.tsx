@@ -29,6 +29,7 @@ interface Props {
 
 type MappingMode = "drag" | "rows";
 type AutoMatch = { source: string; destination: string; confidence: number };
+const mappingRuleKey = (rule: RuleMapping) => JSON.stringify([rule.file_1_fields, rule.file_2_fields]);
 const COMPARISON_TYPES: Array<{ value: NonNullable<RuleMapping["comparison_type"]>; label: string }> = [
   { value: "numeric", label: "Numeric" },
   { value: "date", label: "Date" },
@@ -79,6 +80,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
   const [localUIState, setLocalUIState] = useState<MappingBuilderUIState>(() => ({
     pickedKinds: {}, mode: "drag", left: [], right: [], past: [], future: [], templateName: "", autoMatches: [],
   }));
+  const [manualTypeRows, setManualTypeRows] = useState<Set<string>>(() => new Set());
   const currentUIState = uiState ?? localUIState;
   const setUIState = (action: SetStateAction<MappingBuilderUIState>) => {
     onUIStateChange?.(action);
@@ -120,8 +122,29 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
   function commit(next: RuleMapping[]) {
     setPast((items) => [...items, rules]);
     setFuture([]);
+    const nextRuleKeys = new Set(next.map(mappingRuleKey));
+    setManualTypeRows((current) => new Set([...current].filter((key) => nextRuleKeys.has(key))));
     onRulesChange(next);
     localStorage.setItem(lastMappingKey, JSON.stringify(next));
+  }
+
+  function toggleManualType(rule: RuleMapping, index: number, enabled: boolean) {
+    const key = mappingRuleKey(rule);
+    setManualTypeRows((current) => {
+      const next = new Set(current);
+      if (enabled) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (!enabled && rule.comparison_type) {
+      commit(rules.map((item, itemIndex) => itemIndex === index ? {
+        ...item,
+        comparison_type: undefined,
+        decimal_precision: undefined,
+        number_format_file_1: undefined,
+        number_format_file_2: undefined,
+      } : item));
+    }
   }
 
   function addRule(source = left, destination = right) {
@@ -226,39 +249,57 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
     />}
     {toleranceNotice}
     {editTolerances && rules.length > 0 && <div className="mapping-list-heading"><span>Mapped fields</span><span>Tolerance (optional) <ToleranceHelp destinationLabel={file2Name ?? "the destination file"} /></span></div>}
-    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${rule.file_1_fields.join(",")}-${rule.file_2_fields.join(",")}-${index}`}>
-      <div className="mapping-rule-source"><span>{rule.file_1_fields.join(" + ")}</span><label className="mapping-comparison-type"><span>Compare as</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${comparedFieldLabel(rule)}`} onChange={(event) => commit(rules.map((item, itemIndex) => {
-        if (itemIndex !== index) return item;
-        const comparisonType = (event.target.value || undefined) as RuleMapping["comparison_type"];
-        return {
-          ...item,
-          comparison_type: comparisonType,
-          ...(comparisonType === "numeric" ? {} : {
-            decimal_precision: undefined,
-            number_format_file_1: undefined,
-            number_format_file_2: undefined,
-          }),
-        };
-      }))}><option value="">Automatic</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
-        {rule.comparison_type === "numeric" && <label className="mapping-comparison-type"><span>Decimal places</span><select value={rule.decimal_precision ?? ""} aria-label={`Decimal places for ${comparedFieldLabel(rule)}`} onChange={(event) => {
-          const value = event.target.value;
-          commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, decimal_precision: value === "" ? undefined : Number(value) } : item));
-        }}><option value="">Automatic</option>{Array.from({ length: 13 }, (_, places) => <option key={places} value={places}>{places}</option>)}</select></label>}
-        {rule.comparison_type === "numeric" && <>
-          {(["number_format_file_1", "number_format_file_2"] as const).map((field, sideIndex) => <label className="mapping-comparison-type" key={field}><span>File {sideIndex + 1} format</span><select value={rule[field] ?? ""} aria-label={`Number format for File ${sideIndex + 1} ${comparedFieldLabel(rule)}`} onChange={(event) => {
-            const value = event.target.value as RuleMapping[typeof field] | "";
-            commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, [field]: value || undefined } : item));
-          }}><option value="">Auto-detect</option>{NUMBER_FORMATS.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>)}
-        </>}
-      </div>
-      <ArrowRight size={16} /><span>{rule.file_2_fields.join(" + ")}</span>
-      {editTolerances && <RuleTolerance field={comparedFieldLabel(rule)} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[comparedFieldLabel(rule)] ?? toleranceKind(toleranceFor(tolerances, comparedFieldLabel(rule))) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [comparedFieldLabel(rule)]: kind }))} onChange={editTolerances} />}
-      <button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button>
-    </div>)}</div>
+    <div className="mapping-list">{rules.length === 0 ? <div className="mapping-empty"><CircleHelp size={20} /><p>No mapped fields yet. Drag a source field to its destination, select field groups, or use Auto map columns.</p></div> : rules.map((rule, index) => {
+      const ruleKey = mappingRuleKey(rule);
+      const fieldLabel = comparedFieldLabel(rule);
+      const manualType = Boolean(rule.comparison_type) || manualTypeRows.has(ruleKey);
+      const sourceFileLabel = file1Name ? `File 1 · ${file1Name}` : "File 1";
+      const destinationFileLabel = file2Name ? `File 2 · ${file2Name}` : "File 2";
+      return <div className={`mapping-row${editTolerances ? " has-tolerance" : ""}`} key={`${ruleKey}-${index}`}>
+        <div className="mapping-rule-side mapping-rule-source">
+          <span className="mapping-side-label">{sourceFileLabel}</span>
+          <strong className="mapping-side-value">{rule.file_1_fields.join(" + ")}</strong>
+          {rule.comparison_type === "numeric" && <NumberFormatControl sideLabel={sourceFileLabel} value={rule.number_format_file_1} onChange={(value) => commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, number_format_file_1: value } : item))} />}
+        </div>
+        <span className="mapping-rule-arrow"><ArrowRight size={16} /></span>
+        <div className="mapping-rule-side mapping-rule-destination">
+          <span className="mapping-side-label">{destinationFileLabel}</span>
+          <strong className="mapping-side-value">{rule.file_2_fields.join(" + ")}</strong>
+          {rule.comparison_type === "numeric" && <NumberFormatControl sideLabel={destinationFileLabel} value={rule.number_format_file_2} onChange={(value) => commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, number_format_file_2: value } : item))} />}
+        </div>
+        {editTolerances && <RuleTolerance field={fieldLabel} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[fieldLabel] ?? toleranceKind(toleranceFor(tolerances, fieldLabel)) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [fieldLabel]: kind }))} onChange={editTolerances} />}
+        <button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button>
+        <div className="mapping-rule-settings">
+          <label className="checkbox-line mapping-manual-toggle"><input type="checkbox" checked={manualType} onChange={(event) => toggleManualType(rule, index, event.target.checked)} /><span>Choose comparison type manually</span></label>
+          {manualType ? <div className="mapping-manual-controls">
+            <label className="mapping-comparison-type"><span>Comparison type</span><select value={rule.comparison_type ?? ""} aria-label={`Comparison type for ${fieldLabel}`} onChange={(event) => {
+              const comparisonType = event.target.value as NonNullable<RuleMapping["comparison_type"]>;
+              commit(rules.map((item, itemIndex) => itemIndex === index ? {
+                ...item,
+                comparison_type: comparisonType,
+                ...(comparisonType === "numeric" ? {} : {
+                  decimal_precision: undefined,
+                  number_format_file_1: undefined,
+                  number_format_file_2: undefined,
+                }),
+              } : item));
+            }}><option value="" disabled>Choose a type</option>{COMPARISON_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}</select></label>
+            {rule.comparison_type === "numeric" && <label className="mapping-comparison-type"><span>Decimal places</span><select value={rule.decimal_precision ?? ""} aria-label={`Decimal places for ${fieldLabel}`} onChange={(event) => {
+              const value = event.target.value;
+              commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, decimal_precision: value === "" ? undefined : Number(value) } : item));
+            }}><option value="">Automatic</option>{Array.from({ length: 13 }, (_, places) => <option key={places} value={places}>{places}</option>)}</select></label>}
+          </div> : <span className="mapping-auto-status">Automatic detection from the file data</span>}
+        </div>
+      </div>;
+    })}</div>
     {editTolerances && tolerances.some((band) => !toleranceIsComplete(band, { rules })) && <p className="field-hint is-warning">A tolerance of 0 accepts nothing: enter a value above 0, or clear the box for no tolerance.</p>}
     {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
     <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button></div>
   </section>;
+}
+
+function NumberFormatControl({ sideLabel, value, onChange }: { sideLabel: string; value: RuleMapping["number_format_file_1"]; onChange: (value: RuleMapping["number_format_file_1"]) => void }) {
+  return <label className="mapping-side-format"><span>Number format</span><select value={value ?? ""} aria-label={`Number format for ${sideLabel}`} onChange={(event) => onChange((event.target.value || undefined) as RuleMapping["number_format_file_1"])}><option value="">Auto-detect</option>{NUMBER_FORMATS.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>;
 }
 
 /** One mapped field's tolerance: the type of data, then the limit boxes that type takes. Empty boxes mean no tolerance. */

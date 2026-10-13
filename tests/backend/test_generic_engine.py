@@ -141,25 +141,81 @@ def test_generic_reconciliation_combines_any_number_of_numeric_fields(tmp_path: 
     assert summary["matched_records"] == 2
 
 
-def test_combined_mapping_rejects_non_numeric_columns(tmp_path: Path):
+def test_generic_reconciliation_concatenates_multiple_text_columns(tmp_path: Path):
     file1 = tmp_path / "source.xlsx"
     file2 = tmp_path / "destination.xlsx"
-    output = tmp_path / "report.xlsx"
+    pd.DataFrame([{
+        "Employee ID": "E-001",
+        "EMPLOYEE - FIRST": "Jagdev",
+        "EMPLOYEE - LAST": "Singh",
+    }]).to_excel(file1, index=False)
+    pd.DataFrame([{
+        "ID": "E-001",
+        "FIRST NAME": "Jagdev",
+        "LAST NAME": "Singh",
+    }]).to_excel(file2, index=False)
 
-    pd.DataFrame([{"Employee ID": "E-001", "ST Hours": 10}]).to_excel(file1, index=False)
-    pd.DataFrame([{"ID": "E-001", "Standard Hours": 10, "Comment": "not numeric"}]).to_excel(file2, index=False)
+    result = run_generic_reconciliation(
+        file1,
+        file2,
+        tmp_path / "report.xlsx",
+        key_file_1="Employee ID",
+        key_file_2="ID",
+        rules=[{
+            "file_1_fields": ["EMPLOYEE - FIRST", "EMPLOYEE - LAST"],
+            "file_2_fields": ["FIRST NAME", "LAST NAME"],
+        }],
+    )
 
-    with pytest.raises(ValueError, match="Combined column mappings require numeric columns.*File 2: COMMENT"):
-        run_generic_reconciliation(
-            file1,
-            file2,
-            output,
-            key_file_1="Employee ID",
-            key_file_2="ID",
+    assert result["summary"]["field_discrepancies"] == 0
+    assert result["matched_records"] == 1
+
+
+def test_text_combination_trims_parts_and_skips_blanks():
+    from app.reconciliation_engine.utilities import collect_rule_value
+
+    combined, kind = collect_rule_value(
+        {"FIRST": " Jagdev ", "MIDDLE": None, "LAST": " Singh "},
+        ["FIRST", "MIDDLE", "LAST"],
+        combination_type="text",
+    )
+
+    assert combined == "Jagdev Singh"
+    assert kind == "text"
+
+
+def test_text_columns_can_be_combined_against_a_single_full_name(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["E-001"], "FIRST": ["Jagdev"], "LAST": ["Singh"]}),
+        pd.DataFrame({"ID": ["E-001"], "EMPLOYEE NAME": ["Jagdev Singh"]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["FIRST", "LAST"], "file_2_fields": ["EMPLOYEE NAME"]}],
+        write_report=False,
+    )
+
+    assert result["matched_records"] == 1
+    assert result["summary"]["field_discrepancies"] == 0
+
+
+def test_combined_mapping_rejects_mixed_numeric_and_text_columns(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    with pytest.raises(ValueError, match="Combined columns on each file must be all numeric.*File 2"):
+        run_engine(
+            pd.DataFrame({"ID": ["E-001"], "HOURS": [10]}),
+            pd.DataFrame({"ID": ["E-001"], "STANDARD HOURS": [10], "COMMENT": ["not numeric"]}),
+            tmp_path / "unused.xlsx",
+            key_file_1=["ID"],
+            key_file_2=["ID"],
             rules=[{
-                "file_1_fields": ["ST Hours"],
-                "file_2_fields": ["Standard Hours", "Comment"],
+                "file_1_fields": ["HOURS"],
+                "file_2_fields": ["STANDARD HOURS", "COMMENT"],
             }],
+            write_report=False,
         )
 
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decimalColumns, formatRecordValue, formatServerTime, parseServerTime } from "./formats";
+import { decimalColumns, formatMatchRate, formatRecordValue, formatServerTime, parseServerTime } from "./formats";
 
 describe("record values on screen", () => {
   const two = (value: number) => value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -27,6 +27,18 @@ describe("record values on screen", () => {
     expect([...decimals]).toEqual(["AMOUNT"]);
     expect(formatRecordValue(100, "AMOUNT", decimals)).toBe(two(100));
     expect(formatRecordValue(1, "KEY", decimals)).toBe("1");
+  });
+});
+
+describe("match rate", () => {
+  it("does not round an incomplete reconciliation up to 100%", () => {
+    expect(formatMatchRate(36018, 36036)).toBe("99.95%");
+    expect(formatMatchRate(9999, 10000)).toBe("99.99%");
+  });
+
+  it("shows 100% only when every compared record fully matched", () => {
+    expect(formatMatchRate(36036, 36036)).toBe("100.0%");
+    expect(formatMatchRate(0, 0)).toBe("—");
   });
 });
 

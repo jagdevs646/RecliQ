@@ -55,8 +55,8 @@ from app.reconciliation_engine.report_generator import (
 )
 from app.reconciliation_engine.utilities import (
     collect_rule_value,
+    infer_combined_column_types,
     validate_columns,
-    validate_combined_numeric_rules,
 )
 from app.reconciliation_engine.universal_mapper import build_universal_data_model
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
@@ -119,6 +119,7 @@ class _PreparedGenericReconciliation:
     passes: list[dict]
     has_keys: bool
     normalized_rules: list[tuple[list[str], list[str]]]
+    combination_types: list[tuple[str | None, str | None]]
     file_1_extra: list[str]
     file_2_extra: list[str]
     normalized_secondary_conditions: list[dict]
@@ -241,12 +242,14 @@ def compare_rule_values(
     decimal_precision: int | None = None,
     number_format_file_1: str | None = None,
     number_format_file_2: str | None = None,
+    combination_type_file_1: str | None = None,
+    combination_type_file_2: str | None = None,
 ) -> dict:
     file_1_value, type_hint_1 = collect_rule_value(
-        file_1_row, file_1_fields, number_format_file_1, matcher_type_override
+        file_1_row, file_1_fields, number_format_file_1, matcher_type_override, combination_type_file_1
     )
     file_2_value, type_hint_2 = collect_rule_value(
-        file_2_row, file_2_fields, number_format_file_2, matcher_type_override
+        file_2_row, file_2_fields, number_format_file_2, matcher_type_override, combination_type_file_2
     )
     label = fields_label(file_1_fields)
     # A blank side has no type of its own; the populated side decides.
@@ -713,14 +716,33 @@ def _prepare_generic_reconciliation(
     for config in passes:
         validate_columns(file_1_df, [config[f] for f in ("amount_source", "date_source", "narrative_source") if config.get(f)], "File 1 matching pass")
         validate_columns(file_2_df, [config[f] for f in ("amount_destination", "date_destination", "narrative_destination") if config.get(f)], "File 2 matching pass")
-    validate_combined_numeric_rules(file_1_df, file_2_df, normalized_rules)
+    combination_types = infer_combined_column_types(file_1_df, file_2_df, normalized_rules)
 
     comparison_types: list[str] = []
-    for (left, right), override in zip(normalized_rules, comparison_type_overrides):
+    for (left, right), override, (combination_type_1, combination_type_2) in zip(
+        normalized_rules, comparison_type_overrides, combination_types
+    ):
         if override:
             comparison_types.append(override)
-        elif len(left) > 1 or len(right) > 1:
-            comparison_types.append("numeric")
+        elif combination_type_1 or combination_type_2:
+            sample = []
+            for frame, fields, combination_type in (
+                (file_1_df, left, combination_type_1),
+                (file_2_df, right, combination_type_2),
+            ):
+                sample.extend(
+                    collect_rule_value(row, fields, combination_type=combination_type)[0]
+                    for row in frame[fields].head(100).to_dict("records")
+                )
+            if "text" in (combination_type_1, combination_type_2):
+                header_type = detect_matcher_type([], fields_label(left), fields_label(right))
+                comparison_types.append(
+                    header_type
+                    if header_type in {"company_name", "person_name", "invoice", "gstin", "pan", "identifier"}
+                    else "text"
+                )
+            else:
+                comparison_types.append(detect_compared_field_type(sample, fields_label(left), fields_label(right)))
         else:
             sample = (
                 non_empty_values(file_1_df[left[0]].head(100))
@@ -907,6 +929,7 @@ def _prepare_generic_reconciliation(
         passes=passes,
         has_keys=has_keys,
         normalized_rules=normalized_rules,
+        combination_types=combination_types,
         file_1_extra=file_1_extra,
         file_2_extra=file_2_extra,
         normalized_secondary_conditions=normalized_secondary_conditions,
@@ -1418,12 +1441,14 @@ def _build_generic_results(
         for (
             (file_1_fields, file_2_fields),
             comparison_type,
+            (combination_type_file_1, combination_type_file_2),
             decimal_precision,
             number_format_file_1,
             number_format_file_2,
         ) in zip(
             normalized_rules,
             comparison_types,
+            prepared.combination_types,
             comparison_precisions,
             number_formats_1,
             number_formats_2,
@@ -1438,6 +1463,8 @@ def _build_generic_results(
                 decimal_precision=decimal_precision,
                 number_format_file_1=number_format_file_1,
                 number_format_file_2=number_format_file_2,
+                combination_type_file_1=combination_type_file_1,
+                combination_type_file_2=combination_type_file_2,
             )
             if differences and evaluator is not None:
                 label = fields_label(file_1_fields)
