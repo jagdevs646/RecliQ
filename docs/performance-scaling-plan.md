@@ -628,7 +628,7 @@ The comparison harness of Phase 3 makes the new engine agree with the old one. W
 
 | # | Decision | Today | Proposed | Needed for |
 |---|---|---|---|---|
-| D3 | The Excel report | Every row of every tab, Excel tables with filter buttons, a plain `.xlsx` for a single pair | A cap on the Matched tab with the full list as CSV; filters instead of Excel tables; a ZIP when anything is capped | Phase 2 |
+| D3 | The Excel report | Before Phase 2: every row of every tab, Excel tables with filter buttons, a plain `.xlsx` for a single pair | **Decided by the owner on 13 October 2026:** the Matched tab shows at most 50,000 rows, with the full list as a CSV, so a capped run downloads as a ZIP; filters instead of Excel tables. Built in `146e82a` and `4666cbe` | Phase 2 |
 | D4 | Limits | 50 MB, 500,000 rows per sheet | Settings per deployment or plan, raised only after Phase 3 runs on the sized worker; 250 MB and 2,000,000 rows is the ceiling of this design | Phase 4 |
 | D5 | One definition of "must also match" | Two slightly different tests exist: the index (a similar-text value needs a shared word; the source column's name is ignored) and the pair test used for explanations and keyless passes. They agree on the test data and can disagree in rare cases | Keep the index's meaning in Phase 1 (no change), then choose one and use it everywhere | Phase 3 |
 | D6 | How long both engines run side by side | | A number of weeks or of production jobs, set by the owner | Phase 3 (3.10) |
