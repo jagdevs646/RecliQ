@@ -167,6 +167,17 @@ export function ToleranceHelp({ destinationLabel }: { destinationLabel: string }
   </span>;
 }
 
+/** Explains how field comparison types are selected by default. */
+export function ComparisonTypeHelp() {
+  return <span className="info-tip">
+    <button type="button" className="info-tip-trigger" aria-label="How comparison types are selected"><Info size={15} /></button>
+    <span className="info-tip-body" role="tooltip">
+      <strong>Automatic by default</strong>
+      RecliQ samples values from both mapped columns and considers their headers to choose a comparison type. Turn on manual selection to override this for any field.
+    </span>
+  </span>;
+}
+
 /** Tolerances the mapped-field rows cannot show: step-3 pass limits on offer, and "every compared field" tolerances from older setups. */
 export function ToleranceNotices({ config, onChange }: Omit<EditorProps, "sourceLabel" | "destinationLabel">) {
   const fromPasses = limitsFromPasses(config);
