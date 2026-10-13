@@ -75,6 +75,14 @@ def _clean_file_label(name: str) -> str:
     return re.sub(r"\.(xlsx|xls|csv|tsv)\b", "", str(name).strip(), flags=re.IGNORECASE)
 
 
+def _transformation_text(item: dict) -> str:
+    """A preparation step as the report shows it, naming the file it changed
+    unless it applied to both: "Invert sign: Amount (destination)"."""
+    detail = describe_transformation(item)
+    side = item.get("side", "both")
+    return f"{detail} ({side})" if side != "both" else detail
+
+
 def _visible(column: str) -> bool:
     return column not in _HIDDEN_COLUMNS and not str(column).startswith(_HIDDEN_PREFIXES) and not str(column).upper().startswith("ROW")
 
@@ -671,11 +679,7 @@ class UniversalReporter:
             ]
             def rule_rows():
                 for index, rule in enumerate(rules, start=1):
-                    transformations = []
-                    for item in rule.get("transformations") or []:
-                        detail = describe_transformation(item)
-                        side = item.get("side", "both")
-                        transformations.append(f"{detail} ({side})" if side != "both" else detail)
+                    transformations = [_transformation_text(item) for item in rule.get("transformations") or []]
                     passes = rule.get("matching_passes") or []
                     pass_start = 2 if rule.get("primary_key_source") else 1
                     pass_details = "; ".join(pass_label(item, number) for number, item in enumerate(passes, start=pass_start))
@@ -932,7 +936,7 @@ class UniversalReporter:
                 ("Primary-key similarity", f"{similarity_policy.get('matcher_type_override') or 'automatic by data type'}; minimum confidence {f'{similarity_policy.get('threshold')}%' if similarity_policy.get('threshold') is not None else 'automatic'}"),
                 ("Date-only override", "ENABLED — date-only keys can match unrelated same-day transactions" if rule.get("date_only_override") else "No"),
                 ("Compared fields", rule.get("mapping_count", 0)),
-                ("Prepared before matching", "; ".join(describe_transformation(item) for item in rule.get("transformations") or []) or "None"),
+                ("Prepared before matching", "; ".join(_transformation_text(item) for item in rule.get("transformations") or []) or "None"),
                 ("Additional matching passes", "; ".join(pass_label(item, index) for index, item in enumerate(rule.get("matching_passes") or [], start=2)) or "None"),
                 ("Tolerance (after matching)", "; ".join(tolerance_description(item) for item in rule.get("tolerances") or []) or "None"),
                 ("Date format", "Month first (MM/DD/YYYY)" if rule.get("date_format") == "month_first" else "Day first (DD/MM/YYYY)"),

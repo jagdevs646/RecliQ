@@ -49,9 +49,11 @@ def test_report_is_plain_and_self_explanatory(tmp_path: Path):
         assert ws.views.sheetView[0].showGridLines is False
 
     summary = wb["01 Summary"]
-    assert summary["A1"].value == "Reconciliation Report"
-    assert "Books.xlsx" in summary["A2"].value and "Portal.xlsx" in summary["A2"].value
-    results = {row[0].value: row[1].value for row in summary.iter_rows(min_row=7, max_row=10)}
+    # The summary starts in column B (column A is a margin), with the results
+    # table below the headline figures.
+    assert summary["B1"].value == "Reconciliation Report"
+    assert "Books.xlsx" in summary["B2"].value and "Portal.xlsx" in summary["B2"].value
+    results = {row[1].value: row[2].value for row in summary.iter_rows(min_row=11, max_row=14)}
     assert results == {"Matched – all fields agree": 1, "Matched – values differ": 1,
                        "Only in Books.xlsx": 1, "Only in Portal.xlsx": 1}
     # Workbook cells remain literal values; formula-like data is never evaluated.

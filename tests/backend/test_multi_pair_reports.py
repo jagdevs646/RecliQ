@@ -311,8 +311,9 @@ def test_two_sheet_rules_keep_independent_keys_conditions_and_counts():
         assert report.headers["content-type"].startswith(_XLSX)
         workbook = openpyxl.load_workbook(io.BytesIO(report.content))
         rule_sheet = workbook["08 Sheet Rules"]
-        rule_rows = list(rule_sheet.iter_rows(min_row=5, max_row=6, values_only=True))
-        assert [row[1] for row in rule_rows] == ["Sales -> Sales Ledger", "Payments -> Bank"]
+        # One block per rule; each block has a "Report label" row.
+        labels = [row[1] for row in rule_sheet.iter_rows(values_only=True) if row[0] == "Report label"]
+        assert labels == ["Sales -> Sales Ledger", "Payments -> Bank"]
 
         with SessionLocal() as db:
             messages = [item.message for item in db.query(ReconciliationHistory).filter(ReconciliationHistory.job_id == job["id"])]
