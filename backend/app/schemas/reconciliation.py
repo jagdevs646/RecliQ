@@ -495,6 +495,9 @@ class AnalysisResponse(BaseModel):
     date_columns_1: list[str] = Field(default_factory=list)
     date_columns_2: list[str] = Field(default_factory=list)
     recommended_mappings: list[dict]
+    # Ready-made setups for this sheet pair (app.reconciliation_engine.presets):
+    # each says whether to suggest it and the rule it would fill in.
+    presets: list[dict] = Field(default_factory=list)
 
 
 class ReconciliationSummary(BaseModel):

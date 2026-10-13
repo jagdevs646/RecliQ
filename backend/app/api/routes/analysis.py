@@ -14,6 +14,7 @@ from app.storage import get_storage
 from app.jobs.queue import enqueue_precheck
 from app.reconciliation_engine.ingestion import read_table_columns, read_table_data, read_table_sample
 from app.reconciliation_engine.matching.key_analyzer import SAMPLE_ROWS
+from app.reconciliation_engine.presets import gst_preset
 from app.reconciliation_engine.preprocessing import prepare_dataframe
 from app.reconciliation_engine.schema import consolidate_dataframes, semantic_map_columns
 from app.reconciliation_engine.matching.key_analyzer import analyze_keys
@@ -134,6 +135,7 @@ def _analyze_pair(df1, df2) -> dict:
         "date_columns_1": key_analysis.get("date_columns_1", []),
         "date_columns_2": key_analysis.get("date_columns_2", []),
         "recommended_mappings": mappings,
+        "presets": [gst_preset(df1, df2)],
     }
 
 
