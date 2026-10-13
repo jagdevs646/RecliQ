@@ -14,7 +14,7 @@ import os
 import subprocess
 import sys
 
-from bench import OUT, SCENARIOS, csv_files_for, load
+from bench import OUT, SCENARIOS, csv_files_for, load, scenario_frames
 
 
 def output_path(rows: int, scenario: str, seed: str):
@@ -26,6 +26,7 @@ def write_result(rows: int, scenario: str, seed: str) -> None:
     from app.utils.json_encoder import safe_json_dump
 
     books, bank, _ = load(csv_files_for(rows), "csv")
+    books, bank = scenario_frames(rows, scenario, books, bank)
     result = run_generic_reconciliation(books, bank, OUT / "unused.xlsx", write_report=False, **SCENARIOS[scenario])
     universal = result["universal_data"]
     universal.get("metadata", {})["generated_at"] = ""

@@ -100,6 +100,7 @@ def main() -> None:
     fixes = set(sys.argv[3:]) or {"0"}
     paths = bench.csv_files_for(rows)
     books, bank, _ = bench.load(paths, "csv")
+    books, bank = bench.scenario_frames(rows, scenario, books, bank)
     engine, tag = patched_engine(fixes)
     started = time.perf_counter()
     result = engine.run_generic_reconciliation(books.copy(), bank.copy(), OUT / "unused.xlsx", write_report=False, **bench.SCENARIOS[scenario])

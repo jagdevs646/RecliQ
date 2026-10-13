@@ -175,7 +175,66 @@ SCENARIOS = {
         matching_passes=[{"type": "amount_date", "amount_source": "DEBIT", "amount_destination": "AMOUNT",
                           "date_source": "BOOKS_DATE", "date_destination": "VALUE_DATE", "date_window_days": 3}],
     ),
+    # Unhinted text values contain letters and digits on both sides. This is a
+    # deliberate stress case for deciding a compared column's type once.
+    "keyed_numeric_narration": dict(
+        key_file_1=["KEY"], key_file_2=["KEY"],
+        rules=[{"file_1_fields": ["NARRATION"], "file_2_fields": ["DESCRIPTION"]}],
+        tolerances=[{"field": "NARRATION", "similarity": 75}],
+    ),
+    # Percentage amount bands plus a required narrative, with bounded
+    # candidate ranges because neighboring amounts are spaced apart.
+    "keyless_percent_narrative": dict(
+        key_file_1=[], key_file_2=[],
+        rules=[
+            {"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]},
+            {"file_1_fields": ["NARRATIVE"], "file_2_fields": ["DESCRIPTION"]},
+        ],
+        matching_passes=[{
+            "type": "amount_tolerance",
+            "amount_source": "AMOUNT",
+            "amount_destination": "AMOUNT",
+            "amount_tolerance_percent": 0.00005,
+            "narrative_source": "NARRATIVE",
+            "narrative_destination": "DESCRIPTION",
+            "narrative_threshold": 100,
+        }],
+    ),
 }
+
+
+def scenario_frames(
+    rows: int,
+    scenario: str,
+    books: pd.DataFrame,
+    bank: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return deterministic inputs for focused Phase 3 matching scenarios."""
+    if scenario == "keyed_numeric_narration":
+        keys = [f"K{i:08d}" for i in range(rows)]
+        source = pd.DataFrame({
+            "KEY": keys,
+            "NARRATION": [f"Service March 2026 invoice {i:08d}" for i in range(rows)],
+        })
+        destination = pd.DataFrame({
+            "KEY": keys,
+            "DESCRIPTION": [f"Service Mar 2026 invoice {i:08d}" for i in range(rows)],
+        })
+        return source, destination
+
+    if scenario == "keyless_percent_narrative":
+        amounts = [1000.0 + i * 1000.0 for i in range(rows)]
+        source = pd.DataFrame({
+            "AMOUNT": amounts,
+            "NARRATIVE": [f"Payment reference {i:08d} for March 2026" for i in range(rows)],
+        })
+        destination = pd.DataFrame({
+            "AMOUNT": [round(amount * (1 + 0.00000025), 6) for amount in amounts],
+            "DESCRIPTION": [f"Payment reference {i:08d} for March 2026" for i in range(rows)],
+        })
+        return source, destination
+
+    return books, bank
 
 
 def run_engine(rows: int, scenario: str, books: pd.DataFrame, bank: pd.DataFrame, profile: bool = False) -> None:
@@ -243,7 +302,8 @@ def main() -> None:
         record({"rows": rows, "scenario": "read", "books_rows": len(books), "bank_rows": len(bank), **csv_timings, **xlsx_timings})
     for scenario in scenarios:
         if scenario in SCENARIOS:
-            run_engine(rows, scenario, books, bank, profile)
+            scenario_books, scenario_bank = scenario_frames(rows, scenario, books, bank)
+            run_engine(rows, scenario, scenario_books, scenario_bank, profile)
 
 
 if __name__ == "__main__":
