@@ -49,6 +49,25 @@ def test_long_digit_references_remain_text_when_reading_excel(tmp_path: Path):
     assert result["Reference"].iloc[:2].tolist() == ["12345678901234567890", "12345678901234567891"]
 
 
+def test_text_cells_keep_leading_zeros_when_reading_excel(tmp_path: Path):
+    # Accounting exports store invoice numbers as text ("00105"); reading them
+    # as numbers (105.0) breaks every key match against the GST portal.
+    path = tmp_path / "books.xlsx"
+    workbook = __import__("xlsxwriter").Workbook(str(path))
+    sheet = workbook.add_worksheet("Data")
+    sheet.write_row(0, 0, ["Invoice No.", "Amount"])
+    for row, invoice in enumerate(["0101", "00105", "121"], start=1):
+        sheet.write_string(row, 0, invoice)
+        sheet.write_number(row, 1, row * 10)
+    workbook.close()
+
+    result = read_table_data(path, path.name, "Data")
+
+    assert result["Invoice No."].tolist() == ["0101", "00105", "121"]
+    assert [float(value) for value in result["Amount"]] == [10.0, 20.0, 30.0]
+    assert read_table_sample(path, path.name, "Data", 2)["Invoice No."].tolist() == ["0101", "00105"]
+
+
 def test_long_digit_references_remain_text_when_reading_csv(tmp_path: Path):
     path = tmp_path / "long-references.csv"
     path.write_text(

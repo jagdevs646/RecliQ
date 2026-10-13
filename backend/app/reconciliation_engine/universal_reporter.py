@@ -10,6 +10,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+import numpy as np
 import pandas as pd
 import xlsxwriter
 
@@ -88,11 +89,12 @@ def _visible(column: str) -> bool:
 
 
 def _cell_value(value: Any) -> Any:
-    if value is None:
+    # A missing date (NaT) passes as a datetime but cannot be written as one.
+    if value is None or value is pd.NaT or (isinstance(value, np.datetime64) and np.isnat(value)):
         return None
+    if isinstance(value, np.datetime64):
+        value = pd.Timestamp(value)
     if isinstance(value, pd.Timestamp):
-        if pd.isna(value):
-            return None
         value = value.to_pydatetime()
     if isinstance(value, datetime):
         return value.replace(tzinfo=None)

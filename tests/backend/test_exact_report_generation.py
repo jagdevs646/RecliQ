@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2] / "backend"
@@ -71,6 +72,27 @@ def test_report_is_plain_and_self_explanatory(tmp_path: Path):
     checks = wb["07 Checks"]
     assert checks["A9"].value.startswith("Records accounted for")
     assert (checks["B9"].value, checks["C9"].value, checks["D9"].value) == (3, 3, "Pass")
+
+
+def test_missing_dates_are_written_as_blank_cells(tmp_path: Path):
+    # A blank date in a real purchase register reached the Excel writer as
+    # NaT and stopped the report ("NaTType does not support isocalendar").
+    data = build_universal_data_model(
+        job_type="generic", file_1_name="Books.xlsx", file_2_name="Portal.xlsx", matching_keys=["INVOICE NO."],
+        reconciliation_results=[],
+        file_1_not_found=[
+            {"INVOICE NO.": "00105", "INVOICE DATE": pd.NaT, "ROW (FILE 1)": 2},
+            {"INVOICE NO.": "00120", "INVOICE DATE": pd.Timestamp("2020-07-25"), "ROW (FILE 1)": 3},
+        ],
+        file_2_not_found=[], matched_records=[], total_file_1=2, total_file_2=0, compared_fields=[],
+    )
+    output_path = tmp_path / "missing_dates.xlsx"
+    generate_enterprise_report(data, {}, output_path)
+
+    sheet = openpyxl.load_workbook(output_path)["03 Only in Books"]
+    headers = [cell.value for cell in sheet[4]]
+    date_column = headers.index("INVOICE DATE")
+    assert [row[date_column].value for row in sheet.iter_rows(min_row=5, max_row=6)] == [None, datetime(2020, 7, 25)]
 
 
 def test_match_review_lists_only_records_to_confirm(tmp_path: Path):

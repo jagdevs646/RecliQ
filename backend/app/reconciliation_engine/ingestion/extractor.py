@@ -60,6 +60,9 @@ def _excel_engines(extension: str) -> tuple[str, ...]:
 
 def _read_excel_table(file_path: Path, extension: str, **kwargs) -> pd.DataFrame:
     last_error = None
+    # dtype=object keeps each cell as Excel stores it: text such as invoice
+    # number "00105" stays text instead of being guessed into the number 105.
+    kwargs.setdefault("dtype", object)
     for engine in _excel_engines(extension):
         try:
             return pd.read_excel(file_path, engine=engine, **kwargs)
@@ -161,7 +164,7 @@ _CACHEABLE_EXTENSIONS = {".xlsx", ".xls", ".csv", ".txt", ".tsv", ".sta", ".mt94
 _cache_guard = threading.Lock()
 _parse_locks: dict[tuple, threading.Lock] = {}
 # Bump whenever parsing or the cache format changes.
-_READER_VERSION = 5
+_READER_VERSION = 6
 
 
 def _cache_path(file_path: Path, sheet_id: str) -> Path:
