@@ -1023,7 +1023,7 @@ function ReadyMadeSetups({ setups, config, onChange, sourceLabel, destinationLab
   ].filter(Boolean).join("; ");
   if (applied) {
     return <div className="info-callout ready-setup-applied"><CheckCircle2 size={18} /><div>
-      <strong>{applied.label} applied.</strong> It filled in the keys, the columns to compare and their tolerances below; you can change any of them.
+      <strong>{applied.label} applied.</strong> It filled in the keys, the columns to compare, their tolerances and two extra matching passes below; you can change any of them.
       {applied.notes.map((note) => <small key={note}>{note}</small>)}
     </div></div>;
   }

@@ -22,6 +22,7 @@ def _gstin(first_14: str) -> str:
 
 
 ACME, BETA = _gstin("27AABCA1234B1Z"), _gstin("29AAGCB9876C1Z")
+GAMMA = _gstin("07AAHCG4321D1Z")
 
 
 def _register_row(gstin: str, invoice: str, name: str = "Acme Pvt Ltd", taxable: float = 1000, cgst: float = 90, **extra) -> dict:
@@ -53,6 +54,7 @@ def _run(preset: dict, df1: pd.DataFrame, df2: pd.DataFrame) -> dict:
         key_file_1=strategy["primary_key_source"], key_file_2=strategy["primary_key_destination"],
         secondary_conditions=strategy["secondary_conditions"], rules=rule["reconciliation_mapping"],
         tolerances=rule["tolerances"], date_dayfirst=rule["date_format"] == "day_first",
+        matching_passes=strategy["matching_passes"],
     )
 
 
@@ -146,6 +148,41 @@ def test_the_preset_reconciles_like_the_owner_decided():
     notes = {record["COMPOSITE MATCH KEY"]: record.get("WITHIN TOLERANCE", "") for record in result["universal_data"]["matched_records"]}
     assert "97% similar" in next(note for key, note in notes.items() if str(key).endswith("INV-001"))
     assert "within ±1" in next(note for key, note in notes.items() if str(key).endswith("INV-003"))
+
+
+def test_serial_numbers_and_blank_numbers_are_proposed_for_review():
+    # Found on a real purchase register: the books hold the supplier's serial
+    # number ("193") or none at all, where the portal has "SMI/20-21/193".
+    register = [
+        _register_row(ACME, "193", taxable=5000, cgst=450),                # Serial number inside the portal's.
+        _register_row(ACME, "", taxable=2809.29, cgst=252.84),             # No number; one same-value invoice.
+        _register_row(ACME, "", taxable=700),                              # Two same-value invoices: left to a person.
+        _register_row(BETA, "", taxable=1200),                             # Same value, but another supplier only.
+    ]
+    portal = [
+        _portal_row(ACME, "SMI/20-21/193", taxable=5000, cgst=450),
+        _portal_row(ACME, "NE/20-21/0901", taxable=2809.49, cgst=252.84),  # 0.20 apart: within ±1.
+        _portal_row(ACME, "A-1", taxable=700), _portal_row(ACME, "A-2", taxable=700),
+        _portal_row(GAMMA, "G-1", taxable=1200),
+    ]
+    df1, df2 = _frames(register, portal)
+    preset = gst_preset(df1, df2)
+    passes = preset["rule"]["matching_strategy"]["matching_passes"]
+    assert [item["narrative_source"] for item in passes] == ["INVOICE NUMBER", None]
+    assert all(item["amount_source"] == "TAXABLE AMOUNT" and item["amount_tolerance"] == 1.0 for item in passes)
+
+    result = _run(preset, df1, df2)
+    summary = result["summary"]
+    # Nothing is accepted on its own: both pairs wait on Match Review.
+    assert (summary["exact_matches"], summary["exception_matches"], summary["ambiguous_matches"]) == (0, 2, 1)
+    explanations = sorted(record["MATCH EXPLANATION"] for record in result["universal_data"]["identity_resolution"]
+                          if record["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH")
+    assert explanations == [
+        "Matched in same supplier and taxable value: amounts differ by 0.20 (tolerance 1.00). Please confirm.",
+        "Matched in same supplier, similar invoice number and taxable value: amount 5,000.00 = 5,000.00; "
+        "reference 99% similar. Please confirm.",
+    ]
+    assert summary["only_in_file_1"] == 2  # The ambiguous row and the other supplier's row.
 
 
 def test_the_analysis_step_returns_the_preset():

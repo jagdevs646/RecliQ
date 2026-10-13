@@ -285,6 +285,10 @@ describe("ready-made setups", () => {
         primary_key_source: ["SUPPLIER GSTIN", "INVOICE NUMBER"],
         primary_key_destination: ["GSTR", "INVOICE NO."],
         secondary_conditions: [{ source_column: "SUPPLIER GSTIN", destination_column: "GSTR", comparison_method: "exact_text" }],
+        matching_passes: [{
+          type: "amount_tolerance", name: "Same supplier and taxable value", amount_source: "TAXABLE VALUE", amount_destination: "TAXABLE",
+          date_window_days: 0, amount_tolerance: 1, amount_tolerance_percent: 0, narrative_threshold: 90, respect_secondary_keys: true,
+        }],
       },
       reconciliation_mapping: [{ file_1_fields: ["IGST AMOUNT"], file_2_fields: ["IGST"], comparison_type: "numeric" }],
       tolerances: [{ field: "IGST AMOUNT", amount: 1 }],
@@ -299,6 +303,7 @@ describe("ready-made setups", () => {
     const after = applyReadyMadeSetup(before, gst);
     expect(after.primaryKeySource).toEqual(["SUPPLIER GSTIN", "INVOICE NUMBER"]);
     expect(after.secondaryConditions).toHaveLength(1);
+    expect(after.matchingPasses.map((item) => item.name)).toEqual(["Same supplier and taxable value"]);
     expect(after.rules[0].comparison_type).toBe("numeric");
     expect(after.tolerances).toEqual([{ field: "IGST AMOUNT", amount: 1 }]);
     expect(after.dateFormat).toBe("day_first");
@@ -306,6 +311,8 @@ describe("ready-made setups", () => {
     expect(readyMadeSetupApplied(after, gst)).toBe(true);
     after.rules[0].file_1_fields.push("CHANGED");  // An edit never changes the setup itself.
     expect(gst.rule!.reconciliation_mapping[0].file_1_fields).toEqual(["IGST AMOUNT"]);
+    after.matchingPasses[0].amount_tolerance = 5;
+    expect(gst.rule!.matching_strategy.matching_passes![0].amount_tolerance).toBe(1);
   });
 
   it("leaves the rule alone when the setup cannot be filled in", () => {

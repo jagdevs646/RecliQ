@@ -26,6 +26,7 @@ GST_PRESET_ID = "gst"
 GST_PRESET_LABEL = "GST: purchase register vs GSTR-2B"
 GST_NAME_SIMILARITY = 85      # Supplier names at least this similar count as matched, with a note.
 GST_AMOUNT_TOLERANCE = 1.0    # Rupees accepted on each amount, with a note.
+GST_NUMBER_SIMILARITY = 90    # Invoice numbers this similar ("193" in "SMI/20-21/193") support a proposed pair.
 _GSTIN_SHARE = 0.8
 
 _GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -172,6 +173,29 @@ def gst_preset(df1: pd.DataFrame, df2: pd.DataFrame) -> dict:
     if unpaired:
         notes.append("Not compared, because only one file has them: " + ", ".join(role.replace("_", " ") for role in unpaired) + ".")
 
+    # Purchase registers often hold only the supplier's serial number ("193")
+    # where the portal has the full one ("SMI/20-21/193"), or no number at
+    # all. For invoices the key leaves unpaired, two passes propose a pair
+    # from the same supplier (the GSTIN condition still applies) with the
+    # same taxable value. A pair needs a single candidate on both sides and
+    # goes to Match Review to confirm; it is never accepted on its own.
+    amount_pass = {
+        "type": "amount_tolerance", "amount_source": c1["taxable_value"], "amount_destination": c2["taxable_value"],
+        "amount_tolerance": GST_AMOUNT_TOLERANCE, "amount_tolerance_percent": 0, "date_window_days": 0,
+        "date_source": None, "date_destination": None, "narrative_threshold": GST_NUMBER_SIMILARITY,
+        "respect_secondary_keys": True, "enabled": True,
+    }
+    matching_passes = [
+        {**amount_pass, "name": "Same supplier, similar invoice number and taxable value",
+         "narrative_source": c1["invoice_number"], "narrative_destination": c2["invoice_number"]},
+        {**amount_pass, "name": "Same supplier and taxable value",
+         "narrative_source": None, "narrative_destination": None},
+    ]
+    notes.append(
+        "Invoices the GSTIN and invoice number do not pair are proposed for Match Review when the same supplier "
+        "has one invoice with the same taxable value (within ±1), first where the invoice numbers look alike."
+    )
+
     result["rule"] = {
         "matching_strategy": {
             "primary_key_source": keys_1,
@@ -182,6 +206,7 @@ def gst_preset(df1: pd.DataFrame, df2: pd.DataFrame) -> dict:
             "secondary_conditions": [{
                 "source_column": c1["gstin"], "destination_column": c2["gstin"], "comparison_method": "exact_text",
             }],
+            "matching_passes": matching_passes,
         },
         "reconciliation_mapping": mappings,
         "tolerances": tolerances,

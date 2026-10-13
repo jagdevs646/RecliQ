@@ -446,7 +446,13 @@ export interface ReadyMadeSetup {
   missing_2: string[];
   notes: string[];
   rule: {
-    matching_strategy: { primary_key_source: string[]; primary_key_destination: string[]; secondary_conditions: SecondaryMatchCondition[] };
+    matching_strategy: {
+      primary_key_source: string[];
+      primary_key_destination: string[];
+      secondary_conditions: SecondaryMatchCondition[];
+      /** Passes for records the key leaves unpaired; their pairs go to Match Review. */
+      matching_passes?: MatchingPass[];
+    };
     reconciliation_mapping: RuleMapping[];
     tolerances: ToleranceBand[];
     date_format: DateFormat;

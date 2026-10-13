@@ -465,6 +465,7 @@ export function applyReadyMadeSetup(config: SheetRuleDraft, setup: ReadyMadeSetu
     primaryKeySource: [...strategy.primary_key_source],
     primaryKeyDestination: [...strategy.primary_key_destination],
     secondaryConditions: strategy.secondary_conditions.map((condition) => ({ ...condition })),
+    matchingPasses: (strategy.matching_passes ?? []).map((item) => ({ ...item })),
     dateOnlyOverride: false,
     rules: setup.rule.reconciliation_mapping.map((rule) => ({ ...rule, file_1_fields: [...rule.file_1_fields], file_2_fields: [...rule.file_2_fields] })),
     tolerances: setup.rule.tolerances.map((band) => ({ ...band })),
