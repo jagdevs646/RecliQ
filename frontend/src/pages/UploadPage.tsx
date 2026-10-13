@@ -13,10 +13,10 @@ import { FilePairingStep } from "../components/FilePairingStep";
 import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { PrecheckPanel } from "../components/PrecheckPanel";
 import { DatesAndNamesSettings, MatchingPassesEditor, ToleranceNotices, TransformationsEditor } from "../components/RuleExtras";
-import { availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, suggestSheetPair } from "../lib/plan";
+import { applyReadyMadeSetup, readyMadeSetupApplied, availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, suggestSheetPair } from "../lib/plan";
 import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
-import type { DateFormat, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, SupportedFormats, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
+import type { DateFormat, ReadyMadeSetup, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, SupportedFormats, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
 
 
 interface Props {
@@ -1002,7 +1002,54 @@ const COMPARISON_OPTIONS: Array<{ value: SecondaryMatchCondition["comparison_met
   { value: "matcher_based", label: "Similar text" },
 ];
 
+const SETUP_ROLE_NAMES: Record<string, string> = {
+  gstin: "a GSTIN column", invoice_number: "an invoice number", taxable_value: "a taxable value",
+};
+
+/**
+ * Ready-made setups for one sheet pair (ADR-0001). A setup the data clearly
+ * fits is suggested with one question; every setup is also listed, so it can
+ * be found without the suggestion. Applying one only fills in the rule below.
+ */
+function ReadyMadeSetups({ setups, config, onChange, sourceLabel, destinationLabel, declined, onDecline }: {
+  setups: ReadyMadeSetup[]; config: SheetRuleDraft; onChange: (config: SheetRuleDraft) => void;
+  sourceLabel: string; destinationLabel: string; declined: boolean; onDecline: () => void;
+}) {
+  const applied = setups.find((setup) => readyMadeSetupApplied(config, setup));
+  const suggested = setups.find((setup) => setup.rule && (setup.status === "certain" || setup.status === "likely"));
+  const missingText = (setup: ReadyMadeSetup) => [
+    setup.missing_1.length ? `${sourceLabel} needs ${setup.missing_1.map((role) => SETUP_ROLE_NAMES[role] ?? role).join(", ")}` : "",
+    setup.missing_2.length ? `${destinationLabel} needs ${setup.missing_2.map((role) => SETUP_ROLE_NAMES[role] ?? role).join(", ")}` : "",
+  ].filter(Boolean).join("; ");
+  if (applied) {
+    return <div className="info-callout ready-setup-applied"><CheckCircle2 size={18} /><div>
+      <strong>{applied.label} applied.</strong> It filled in the keys, the columns to compare and their tolerances below; you can change any of them.
+      {applied.notes.map((note) => <small key={note}>{note}</small>)}
+    </div></div>;
+  }
+  return <>
+    {suggested && !declined && <div className="info-callout ready-setup-suggestion" role="status"><Sparkles size={18} /><div>
+      <strong>These look like GST invoice files.</strong> {suggested.status === "certain" ? "One of them was read from GSTR-2B." : "Both hold GSTINs, invoice numbers and tax amounts."} Use the GST setup?
+      <div className="ready-setup-actions">
+        <button type="button" className="primary" onClick={() => onChange(applyReadyMadeSetup(config, suggested))}>Use the GST setup</button>
+        <button type="button" className="secondary" onClick={onDecline}>No, thanks</button>
+      </div>
+    </div></div>}
+    <div className="suggestion-strip ready-setups">
+      <span>Ready-made setups</span>
+      {setups.map((setup) => <button key={setup.id} type="button" className="suggestion-chip" disabled={!setup.rule} onClick={() => onChange(applyReadyMadeSetup(config, setup))} title={setup.rule ? "Fill in this rule with the setup" : missingText(setup)}>
+        <Plus size={14} />{setup.label}
+      </button>)}
+      {setups.filter((setup) => !setup.rule).map((setup) => <small key={setup.id}>{missingText(setup)}.</small>)}
+    </div>
+  </>;
+}
+
 function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopyFrom, sourceLabel, destinationLabel }: SheetRuleConfigurationProps) {
+  // "No, thanks" to a suggested setup, per sheet pair (this panel is reused for every pair).
+  const [declinedSetups, setDeclinedSetups] = useState<Record<string, boolean>>({});
+  const pairKey = `${pairing.sourceFileId ?? ""}::${pairing.sheet1.id}::${pairing.destinationFileId ?? ""}::${pairing.sheet2.id}`;
+  const setups = config.analysis?.presets ?? [];
   // Keys are edited as ordered source ↔ destination pairs, so both sides
   // always have the same number of columns.
   const keyRows = Math.max(1, config.primaryKeySource.length, config.primaryKeyDestination.length);
@@ -1046,6 +1093,9 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
       </select>
       <small>Columns missing from this sheet are skipped.</small>
     </label>}
+
+    {setups.length > 0 && <ReadyMadeSetups setups={setups} config={config} onChange={onChange} sourceLabel={sourceLabel} destinationLabel={destinationLabel}
+      declined={Boolean(declinedSetups[pairKey])} onDecline={() => setDeclinedSetups((current) => ({ ...current, [pairKey]: true }))} />}
 
     <div className="rule-section">
       <div className="rule-section-heading">

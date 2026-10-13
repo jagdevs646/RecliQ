@@ -156,7 +156,7 @@ def gst_preset(df1: pd.DataFrame, df2: pd.DataFrame) -> dict:
         else:
             notes.append("The document types use different words in the two files, so they are not part of the key.")
     else:
-        notes.append("Only one file has a document type, so a credit note can pair with an invoice of the same number.")
+        notes.append("The files do not both have a document type, so a credit note can pair with an invoice of the same number.")
 
     mappings, tolerances = [], []
     if "supplier_name" in c1 and "supplier_name" in c2:

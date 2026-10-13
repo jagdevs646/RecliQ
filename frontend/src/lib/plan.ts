@@ -9,6 +9,7 @@ import type {
   NormalizationSettings,
   PrecheckIssue,
   PrecheckResult,
+  ReadyMadeSetup,
   SecondaryMatchCondition,
   SheetRuleDraft,
   RuleMapping,
@@ -448,6 +449,35 @@ export function sheetRuleToDraft(rule: SheetRulePayload, file1Columns: string[],
     dateFormat: rule.date_format ?? "day_first",
     tolerances: rule.tolerances ?? [],
   };
+}
+
+/**
+ * Fills a rule with a ready-made setup (such as GST): keys, "must also match"
+ * columns, compared fields, tolerances and date order. Everything else the
+ * user set (preparation steps, extra passes, report columns) is kept, and
+ * every filled-in choice stays editable.
+ */
+export function applyReadyMadeSetup(config: SheetRuleDraft, setup: ReadyMadeSetup): SheetRuleDraft {
+  if (!setup.rule) return config;
+  const strategy = setup.rule.matching_strategy;
+  return {
+    ...config,
+    primaryKeySource: [...strategy.primary_key_source],
+    primaryKeyDestination: [...strategy.primary_key_destination],
+    secondaryConditions: strategy.secondary_conditions.map((condition) => ({ ...condition })),
+    dateOnlyOverride: false,
+    rules: setup.rule.reconciliation_mapping.map((rule) => ({ ...rule, file_1_fields: [...rule.file_1_fields], file_2_fields: [...rule.file_2_fields] })),
+    tolerances: setup.rule.tolerances.map((band) => ({ ...band })),
+    dateFormat: setup.rule.date_format,
+  };
+}
+
+/** The rule's keys are the setup's keys, so it counts as applied. */
+export function readyMadeSetupApplied(config: SheetRuleDraft, setup: ReadyMadeSetup): boolean {
+  const strategy = setup.rule?.matching_strategy;
+  return Boolean(strategy)
+    && strategy!.primary_key_source.join("|") === config.primaryKeySource.join("|")
+    && strategy!.primary_key_destination.join("|") === config.primaryKeyDestination.join("|");
 }
 
 export function newPass(type: MatchingPass["type"], config: SheetRuleDraft): MatchingPass {

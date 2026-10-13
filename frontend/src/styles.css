@@ -1312,3 +1312,9 @@ textarea:focus-visible, input:focus-visible, select:focus-visible, button:focus-
   .category-meter > span, .admin-trend-point span { forced-color-adjust: none; background: Highlight; }
   .column-resize-handle::after { background: ButtonText; }
 }
+.ready-setup-suggestion, .ready-setup-applied { max-width: none; margin: 0 0 14px; }
+.ready-setup-suggestion > div, .ready-setup-applied > div { display: grid; gap: 6px; }
+.ready-setup-applied small { color: var(--color-text-secondary); }
+.ready-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.ready-setups { margin-bottom: 14px; }
+.ready-setups small { flex-basis: 100%; color: var(--color-text-secondary); }

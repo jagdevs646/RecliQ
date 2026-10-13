@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  applyReadyMadeSetup,
+  readyMadeSetupApplied,
   availableColumns,
   copyRuleSettings,
   derivedColumns,
@@ -28,7 +30,7 @@ import {
   suggestSheetPair,
   transformationIsComplete,
 } from "./plan";
-import type { PrecheckResult, SheetRuleDraft } from "../types";
+import type { PrecheckResult, ReadyMadeSetup, SheetRuleDraft } from "../types";
 
 function draft(overrides: Partial<SheetRuleDraft> = {}): SheetRuleDraft {
   return { ...emptyDraft(["INVOICE", "VENDOR", "AMOUNT", "DATE", "DEBIT", "CREDIT"], ["INVOICE NO", "VENDOR", "AMOUNT", "DATE"], null), ...overrides };
@@ -272,5 +274,42 @@ describe("pre-check gate", () => {
   it("summarizes only actionable issues for the audit log", () => {
     const summary = precheckSummary(result(0, 1));
     expect(summary.issues).toEqual([{ rule: "r", severity: "warning", category: "blank_keys", count: 3 }]);
+  });
+});
+
+describe("ready-made setups", () => {
+  const gst: ReadyMadeSetup = {
+    id: "gst", label: "GST: purchase register vs GSTR-2B", status: "certain", missing_1: [], missing_2: [], notes: [],
+    rule: {
+      matching_strategy: {
+        primary_key_source: ["SUPPLIER GSTIN", "INVOICE NUMBER"],
+        primary_key_destination: ["GSTR", "INVOICE NO."],
+        secondary_conditions: [{ source_column: "SUPPLIER GSTIN", destination_column: "GSTR", comparison_method: "exact_text" }],
+      },
+      reconciliation_mapping: [{ file_1_fields: ["IGST AMOUNT"], file_2_fields: ["IGST"], comparison_type: "numeric" }],
+      tolerances: [{ field: "IGST AMOUNT", amount: 1 }],
+      date_format: "day_first",
+    },
+  };
+
+  it("fills keys, conditions, fields and tolerances, and keeps the rest", () => {
+    const before = { ...emptyDraft(["SUPPLIER GSTIN", "INVOICE NUMBER", "IGST AMOUNT"], ["GSTR", "INVOICE NO.", "IGST"], null),
+      transformations: [{ operation: "trim" as const, side: "both" as const, columns: ["INVOICE NUMBER"], params: {} }], dateFormat: "month_first" as const };
+    expect(readyMadeSetupApplied(before, gst)).toBe(false);
+    const after = applyReadyMadeSetup(before, gst);
+    expect(after.primaryKeySource).toEqual(["SUPPLIER GSTIN", "INVOICE NUMBER"]);
+    expect(after.secondaryConditions).toHaveLength(1);
+    expect(after.rules[0].comparison_type).toBe("numeric");
+    expect(after.tolerances).toEqual([{ field: "IGST AMOUNT", amount: 1 }]);
+    expect(after.dateFormat).toBe("day_first");
+    expect(after.transformations).toEqual(before.transformations);
+    expect(readyMadeSetupApplied(after, gst)).toBe(true);
+    after.rules[0].file_1_fields.push("CHANGED");  // An edit never changes the setup itself.
+    expect(gst.rule!.reconciliation_mapping[0].file_1_fields).toEqual(["IGST AMOUNT"]);
+  });
+
+  it("leaves the rule alone when the setup cannot be filled in", () => {
+    const draft = emptyDraft(["A"], ["B"], null);
+    expect(applyReadyMadeSetup(draft, { ...gst, status: "unavailable", rule: null })).toBe(draft);
   });
 });

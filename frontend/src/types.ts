@@ -432,6 +432,25 @@ export interface AnalysisResponse {
     score: number;
     confidence: "High" | "Medium" | "Low" | "None";
   }[];
+  /** Ready-made setups for this sheet pair, such as GST. */
+  presets?: ReadyMadeSetup[];
+}
+
+/** A ready-made setup that fills in a sheet rule (backend presets.py). */
+export interface ReadyMadeSetup {
+  id: string;
+  label: string;
+  /** "certain" and "likely" are suggested; "available" is only offered; "unavailable" lists what is missing. */
+  status: "certain" | "likely" | "available" | "unavailable";
+  missing_1: string[];
+  missing_2: string[];
+  notes: string[];
+  rule: {
+    matching_strategy: { primary_key_source: string[]; primary_key_destination: string[]; secondary_conditions: SecondaryMatchCondition[] };
+    reconciliation_mapping: RuleMapping[];
+    tolerances: ToleranceBand[];
+    date_format: DateFormat;
+  } | null;
 }
 
 export interface GstConfiguration {
