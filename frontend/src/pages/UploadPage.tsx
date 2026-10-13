@@ -28,7 +28,8 @@ interface Props {
   features?: Record<string, boolean>;
 }
 
-const GST_REPORT_SHEETS = ["Mismatched invoices", "Present in source only", "Present in destination only", "Match confidence review"];
+// The tabs the shared report writes for a GST run (universal_reporter.py).
+const GST_REPORT_SHEETS = ["Summary", "Differences", "Only in the source file", "Only in the comparison file", "Match Review", "Matched", "Checks"];
 const EMPTY_MAPPING_UI_STATE: MappingBuilderUIState = {
   pickedKinds: {}, mode: "drag", left: [], right: [], past: [], future: [], templateName: "", autoMatches: [],
 };
@@ -1113,7 +1114,7 @@ function GstColumnMappingStep({ config, missingFile1, missingFile2, file1Name = 
 }
 
 function GstReportSetup({ threshold, onThresholdChange }: { threshold: number; onThresholdChange: (value: number) => void }) {
-  return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Configure GST report</h2><p>Choose how cautious the engine should be when supplier names need an intelligent text comparison.</p></div></div><label className="gst-threshold"><span>Supplier name confidence threshold</span><div><input type="range" min="70" max="100" step="1" value={threshold} onChange={(event) => onThresholdChange(Number(event.target.value))} /><output>{threshold}%</output></div><small>Names below this confidence score are added to the review sheet instead of being silently accepted.</small></label><div className="gst-report-sheets">{GST_REPORT_SHEETS.map((sheet) => <div key={sheet}><CheckCircle2 size={16} /><span>{sheet}</span><small>Included</small></div>)}</div></section>;
+  return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Configure GST report</h2><p>Choose how cautious the engine should be when supplier names need an intelligent text comparison.</p></div></div><label className="gst-threshold"><span>Supplier name confidence threshold</span><div><input type="range" min="70" max="100" step="1" value={threshold} onChange={(event) => onThresholdChange(Number(event.target.value))} /><output>{threshold}%</output></div><small>Supplier names less similar than this are reported as differences. Names at least this similar, but not identical, go to Match Review for you to confirm.</small></label><div className="gst-report-sheets">{GST_REPORT_SHEETS.map((sheet) => <div key={sheet}><CheckCircle2 size={16} /><span>{sheet}</span><small>Included</small></div>)}</div></section>;
 }
 
 function GstValidationAlert({ config, missingFile1, missingFile2, error, file1Name = "File 1", file2Name = "File 2" }: GstStepProps & { error: string }) {
