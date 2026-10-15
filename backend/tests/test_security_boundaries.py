@@ -50,8 +50,23 @@ def test_production_requires_secure_cookies_and_a_strong_csrf_secret():
         Settings(environment="production", auth_csrf_secret="x" * 32)
     with pytest.raises(ValueError, match="AUTH_CSRF_SECRET"):
         Settings(environment="production", session_cookie_secure=True, auth_csrf_secret=None)
-    settings = Settings(environment="production", session_cookie_secure=True, auth_csrf_secret="x" * 32)
+    settings = Settings(
+        environment="production",
+        session_cookie_secure=True,
+        auth_csrf_secret="x" * 32,
+        public_app_url="https://recliq.example.com",
+    )
     assert settings.effective_auth_csrf_secret == "x" * 32
+
+
+def test_production_requires_a_public_https_frontend_url():
+    secure_settings = {"environment": "production", "session_cookie_secure": True, "auth_csrf_secret": "x" * 32}
+    for url in ("http://localhost:5173", "https://localhost:5173", "http://recliq.example.com", "https://127.0.0.1"):
+        with pytest.raises(ValueError, match="PUBLIC_APP_URL"):
+            Settings(**secure_settings, public_app_url=url)
+
+    settings = Settings(**secure_settings, public_app_url="https://recliq.example.com")
+    assert settings.public_app_url == "https://recliq.example.com"
 
 
 def test_auth_rate_limits_persist_per_action(monkeypatch):

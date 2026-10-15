@@ -334,7 +334,7 @@ export class ApiClient {
     return this.request<AccountIdentity>("/auth/me");
   }
 
-  async register(payload: { username: string; email: string; display_name: string; password: string }): Promise<{ message: string; email: string; development_verification_url?: string }> {
+  async register(payload: { username: string; email: string; display_name: string; password: string }): Promise<{ message: string; email: string; approval_required?: boolean; development_verification_url?: string }> {
     return this.request("/auth/register", { method: "POST", body: JSON.stringify(payload) });
   }
 
@@ -460,6 +460,10 @@ export class ApiClient {
 
   async updateAdminUserStatus(id: string, status: "active" | "restricted" | "suspended", reason: string): Promise<unknown> {
     return this.request(`/admin/users/${id}/status`, { method: "PUT", body: JSON.stringify({ status, reason }) });
+  }
+
+  async adminApproveUserVerification(id: string, reason: string): Promise<{ message: string }> {
+    return this.request(`/admin/users/${id}/approve-verification`, { method: "POST", body: JSON.stringify({ reason }) });
   }
 
   async updateAdminUserPolicy(id: string, payload: { features: Record<string, boolean>; limits: Record<string, number | string[]> }): Promise<unknown> {

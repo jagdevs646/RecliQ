@@ -37,7 +37,7 @@ export interface WorkspaceOverview {
 
 export interface AdminUser {
   id: string; username: string; email: string; display_name: string; role: string; status: string;
-  email_verified: boolean; created_at: string; last_seen_at: string | null;
+  email_verified: boolean; email_verification_approved_by_admin: boolean; created_at: string; last_seen_at: string | null;
   usage: { reconciliation_count: number; file_count: number; uploaded_bytes: number; report_count: number; report_bytes: number; storage_bytes: number; jobs_by_status: Record<string, number> };
 }
 

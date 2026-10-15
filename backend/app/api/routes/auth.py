@@ -375,7 +375,7 @@ def oauth_callback(provider: str, request: Request, db: Session = Depends(get_db
 
         if not user or user.status in {"suspended", "deleted"} or user.role == "super_admin":
             return finish(f"{frontend}/#/dashboard?oauth_error=account_unavailable")
-        if not user.email_verified:
+        if not user.email_verified and not user.email_verification_approved_by_admin:
             return finish(f"{frontend}/#/dashboard?oauth_error=unverified_email")
         if user.mfa_enabled:
             return finish(f"{frontend}/#/dashboard?oauth_error=mfa_required")
@@ -418,9 +418,6 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
     features = effective_features(db, None)
     if not features.get("registration", False):
         raise HTTPException(status_code=403, detail="New account registration is temporarily unavailable.")
-    if not _verification_email_ready(db):
-        raise HTTPException(status_code=503, detail="Account verification email is not configured.")
-
     username = payload.username.strip()
     username_key = username.casefold()
     email = _normal_email(str(payload.email))
@@ -442,21 +439,36 @@ def register(payload: RegisterRequest, request: Request, db: Session = Depends(g
         email_verified=False,
     )
     db.add(user)
+    verification_token = None
+    try:
+        verification_delivery_ready = _verification_email_ready(db)
+    except Exception as exc:
+        logger.warning("Verification email availability could not be checked", extra={"error_type": type(exc).__name__})
+        verification_delivery_ready = False
     try:
         db.flush()
         db.add(UserPreference(user_id=user.id))
-        raw = _new_auth_token(db, user, "verify_email")
+        if verification_delivery_ready:
+            verification_token = _new_auth_token(db, user, "verify_email")
         db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail="That username or email is already registered.") from exc
-    try:
-        _send_action_email(recipient=user.email, title="verify your email", token=raw, route="verify-email")
-    except Exception as exc:
-        logger.exception("Verification email could not be sent", extra={"user_id": user.id})
-        raise HTTPException(status_code=503, detail="Your account was created, but the verification email could not be sent. Use Resend verification after email delivery is configured.") from exc
-    result = {"message": "Account created. Check your email to verify it before signing in.", "email": user.email}
-    development_url = _development_action_url(raw, "verify-email")
+    verification_sent = False
+    if verification_token:
+        try:
+            _send_action_email(recipient=user.email, title="verify your email", token=verification_token, route="verify-email")
+            verification_sent = True
+        except Exception as exc:
+            logger.warning("Verification email could not be sent", extra={"user_id": user.id, "error_type": type(exc).__name__})
+    if not verification_sent:
+        return {
+            "message": "Account created. Email verification is temporarily unavailable. A RecliQ administrator can approve this account for sign-in, or you can verify your email after delivery is restored.",
+            "email": user.email,
+            "approval_required": True,
+        }
+    result = {"message": "Account created. Check your email to verify it before signing in.", "email": user.email, "approval_required": False}
+    development_url = _development_action_url(verification_token, "verify-email")
     if development_url:
         result["message"] = "Account created. Use the local verification link below, then sign in. No email was sent."
         result["development_verification_url"] = development_url
@@ -472,6 +484,9 @@ def verify_email(payload: TokenRequest, db: Session = Depends(get_db)) -> dict[s
     if not user:
         raise HTTPException(status_code=400, detail="This verification link is invalid or has expired.")
     user.email_verified = True
+    user.email_verification_approved_by_admin = False
+    user.email_verification_approved_by = None
+    user.email_verification_approved_at = None
     db.commit()
     return {"message": "Email verified. You can now sign in."}
 
@@ -509,8 +524,8 @@ def login(payload: LoginRequest, request: Request, response: Response, db: Sessi
         raise HTTPException(status_code=401, detail="The username/email or password is incorrect.")
     if user.status in {"suspended", "deleted"}:
         raise HTTPException(status_code=403, detail="This account is not currently available. Contact support for assistance.")
-    if not user.email_verified:
-        raise HTTPException(status_code=403, detail="Verify your email before signing in.")
+    if not user.email_verified and not user.email_verification_approved_by_admin:
+        raise HTTPException(status_code=403, detail="This account is waiting for email verification or administrator approval before sign-in.")
     admin = user.role == "super_admin"
     if admin and (not user.mfa_enabled or not user.mfa_secret):
         raise HTTPException(status_code=403, detail="Administrator MFA is not configured. Contact the platform owner.")
@@ -559,12 +574,10 @@ def current_identity(request: Request, db: Session = Depends(get_db)) -> dict:
     features = effective_features(db, db.get(User, user_id) if user_id else None)
     notifications_enabled = bool(email_transport_status(db)["ready"])
     if not user_id:
-        # Sign-up needs registration allowed and a working verification email
-        # (see register()); the frontend offers "Create account" only then.
         capabilities = {
             "report_email": features.get("report_email", False),
             "email_notifications": notifications_enabled,
-            "registration": bool(features.get("registration", False) and notifications_enabled),
+            "registration": bool(features.get("registration", False)),
         }
         return {"authenticated": False, "user": None, "workspace": {"type": "guest", "id": guest_id, "label": "Guest Workspace"}, "features": features, "capabilities": capabilities}
     user = db.get(User, user_id)
@@ -699,6 +712,9 @@ def verify_email_change(payload: TokenRequest, db: Session = Depends(get_db), us
     user.email = normalized
     user.email_key = normalized.casefold()
     user.email_verified = True
+    user.email_verification_approved_by_admin = False
+    user.email_verification_approved_by = None
+    user.email_verification_approved_at = None
     db.commit()
     return {"message": "Email address updated."}
 

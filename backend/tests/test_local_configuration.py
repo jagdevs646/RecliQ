@@ -13,6 +13,12 @@ def test_local_email_transport_defaults_to_log_and_env_file_is_backend_scoped(mo
     assert Path(Settings.model_config["env_file"]).resolve() == Path(__file__).resolve().parents[1] / ".env"
 
 
+def test_empty_public_app_url_uses_local_development_default():
+    settings = Settings(_env_file=None, environment="development", public_app_url="")
+
+    assert settings.public_app_url == "http://localhost:5173"
+
+
 def test_relative_sqlite_url_resolves_under_backend_directory(monkeypatch):
     monkeypatch.chdir(Path(__file__).resolve().parents[2])
     settings = Settings(_env_file=None, database_url="sqlite:///./reconx_dev.db")

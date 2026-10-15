@@ -19,6 +19,9 @@ class User(IdMixin, TimestampMixin, Base):
     role: Mapped[str] = mapped_column(String(30), default="user", server_default="user", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="active", server_default="active", nullable=False)
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    email_verification_approved_by_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    email_verification_approved_by: Mapped[str | None] = mapped_column(String(36))
+    email_verification_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     # Encrypted at rest (app.core.secret_box); Python code sees the plain key.
     mfa_secret: Mapped[str | None] = mapped_column(EncryptedString(255))

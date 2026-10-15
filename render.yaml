@@ -72,6 +72,8 @@ services:
         value: RecliQ
       - key: SMTP_STARTTLS
         value: "true"
+      # Set this to the deployed frontend's public HTTPS URL, not the API URL.
+      # Production startup rejects localhost to prevent unusable account links.
       - key: PUBLIC_APP_URL
         sync: false
       - key: PUBLIC_API_URL

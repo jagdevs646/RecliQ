@@ -13,7 +13,7 @@ interface Props {
   initialMode?: AuthMode;
   resetToken?: string;
   notice?: string;
-  /** False when the server cannot create accounts (registration off or no verification email). */
+  /** False when the server has disabled account registration. */
   registrationOpen?: boolean;
 }
 
@@ -95,9 +95,7 @@ export function AuthDialog({ onClose, onAuthenticated, initialMode = "login", re
         return;
       }
       const detail = caught instanceof ApiError ? caught.message : caught instanceof Error ? caught.message : "The request could not be completed.";
-      setError(detail === "Account verification email is not configured."
-        ? "Email verification is unavailable on this deployment. For local testing, restart the API with EMAIL_BACKEND=log; for a hosted site, the operator must configure SMTP."
-        : detail);
+      setError(detail);
     } finally {
       setBusy(false);
     }

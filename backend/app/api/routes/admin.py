@@ -374,6 +374,7 @@ def users(
             "role": user.role,
             "status": user.status,
             "email_verified": user.email_verified,
+            "email_verification_approved_by_admin": user.email_verification_approved_by_admin,
             "created_at": user.created_at,
             "last_seen_at": user.last_seen_at,
             "usage": usage_by_user[user.id],
@@ -403,6 +404,9 @@ def user_detail(user_id: str, db: Session = Depends(get_db)) -> dict:
             "role": user.role,
             "status": user.status,
             "email_verified": user.email_verified,
+            "email_verification_approved_by_admin": user.email_verification_approved_by_admin,
+            "email_verification_approved_by": user.email_verification_approved_by,
+            "email_verification_approved_at": user.email_verification_approved_at,
             "mfa_enabled": user.mfa_enabled,
             "created_at": user.created_at,
             "last_login_at": user.last_login_at,
@@ -511,6 +515,55 @@ def platform_activity(
     total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
     rows = db.execute(statement.order_by(query.c.occurred_at.desc(), query.c.sequence.desc()).offset(offset).limit(limit)).mappings().all()
     return {"events": [dict(row) for row in rows], "total": total, "offset": offset, "limit": limit}
+
+
+@router.post("/users/{user_id}/approve-verification")
+def approve_user_verification(
+    user_id: str,
+    payload: ReasonPayload,
+    request: Request,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict[str, str | bool]:
+    user = db.scalar(select(User).where(User.id == user_id).with_for_update())
+    if not user:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    if user.role == "super_admin" or user.id == admin.id:
+        raise HTTPException(status_code=409, detail="Administrator accounts cannot use this user access approval.")
+    if user.status != "active":
+        raise HTTPException(status_code=409, detail="Reactivate this account before approving sign-in access.")
+    if user.email_verified or user.email_verification_approved_by_admin:
+        raise HTTPException(status_code=409, detail="This account already has sign-in access.")
+
+    now = datetime.now(timezone.utc)
+    before = {
+        "email_verified": user.email_verified,
+        "email_verification_approved_by_admin": user.email_verification_approved_by_admin,
+    }
+    user.email_verification_approved_by_admin = True
+    user.email_verification_approved_by = admin.id
+    user.email_verification_approved_at = now
+    record_admin_event(
+        db,
+        request,
+        actor_id=admin.id,
+        action="user.email_verification_approved",
+        target_type="user",
+        target_id=user.id,
+        before=before,
+        after={
+            "email_verified": False,
+            "email_verification_approved_by_admin": True,
+            "approved_at": now.isoformat(),
+        },
+        metadata={"reason": payload.reason},
+    )
+    db.commit()
+    return {
+        "message": "Sign-in access approved. The user can now sign in; email ownership was not verified.",
+        "email_verified": False,
+        "approved_by_admin": True,
+    }
 
 
 @router.put("/users/{user_id}/status")

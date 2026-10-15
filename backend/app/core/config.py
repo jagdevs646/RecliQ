@@ -1,5 +1,7 @@
 from functools import lru_cache
+import ipaddress
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -117,6 +119,26 @@ class Settings(BaseSettings):
                 raise ValueError("SESSION_COOKIE_SECURE must be true outside local development and tests.")
             if not self.auth_csrf_secret:
                 raise ValueError("AUTH_CSRF_SECRET must be configured outside local development and tests.")
+        self.public_app_url = self.public_app_url.strip().rstrip("/")
+        is_local_environment = self.environment.lower() in {"development", "test", "local"}
+        if not self.public_app_url and is_local_environment:
+            self.public_app_url = "http://localhost:5173"
+        try:
+            public_app = urlsplit(self.public_app_url)
+            public_host = (public_app.hostname or "").rstrip(".").lower()
+        except ValueError:
+            raise ValueError("PUBLIC_APP_URL must be an absolute frontend URL.") from None
+        try:
+            public_ip = ipaddress.ip_address(public_host) if public_host else None
+        except ValueError:
+            public_ip = None
+        if public_app.scheme not in {"http", "https"} or not public_host or public_app.username or public_app.password or public_app.query or public_app.fragment:
+            raise ValueError("PUBLIC_APP_URL must be an absolute frontend URL without credentials, query, or fragment.")
+        if not is_local_environment:
+            is_local_host = public_host == "localhost" or public_host.endswith(".localhost")
+            is_private_ip = public_ip is not None and (public_ip.is_private or public_ip.is_loopback or public_ip.is_link_local or public_ip.is_unspecified)
+            if public_app.scheme != "https" or is_local_host or is_private_ip:
+                raise ValueError("PUBLIC_APP_URL must be the public HTTPS address of the deployed frontend outside local development and tests.")
         try:
             database_url = make_url(self.database_url)
         except Exception:

@@ -13,7 +13,7 @@ type AdminTab = AdminSection | "settings";
 type AdminPolicy = { features: Record<string, boolean>; limits: Record<string, Record<string, AdminLimit>>; email_ready: boolean };
 type PlatformEmailSettings = { sender_email: string; transport: "smtp" | "local_log" | "disabled"; ready: boolean; smtp_ready: boolean; smtp_host_configured: boolean; smtp_auth_configured: boolean; local_only: boolean };
 type UserDetail = {
-  user: { id: string; username: string; email: string; display_name: string; role: string; status: string; email_verified: boolean; mfa_enabled: boolean; created_at: string; last_login_at: string | null; last_seen_at: string | null };
+  user: { id: string; username: string; email: string; display_name: string; role: string; status: string; email_verified: boolean; email_verification_approved_by_admin: boolean; email_verification_approved_by: string | null; email_verification_approved_at: string | null; mfa_enabled: boolean; created_at: string; last_login_at: string | null; last_seen_at: string | null };
   usage: AdminUser["usage"];
   limits: Record<string, AdminLimit>;
   features: Record<string, boolean>;
@@ -74,10 +74,11 @@ const adminTitles: Record<AdminTab, string> = {
   insights: "Product insights", complaints: "Complaints", activity: "Audit & activity", email: "Email management",
   preview: "User experience preview", settings: "Admin settings",
 };
-type UserColumnKey = "id" | "username" | "name" | "email" | "role" | "status" | "runs" | "storage" | "activity" | "created" | "actions";
+type UserColumnKey = "id" | "username" | "name" | "email" | "verification" | "role" | "status" | "runs" | "storage" | "activity" | "created" | "actions";
 const userColumnDefs: Array<{ key: UserColumnKey; label: string; width: number }> = [
   { key: "id", label: "User ID", width: 200 }, { key: "username", label: "Username", width: 140 },
   { key: "name", label: "Full name", width: 160 }, { key: "email", label: "Email", width: 220 },
+  { key: "verification", label: "Email access", width: 140 },
   { key: "role", label: "Role", width: 110 }, { key: "status", label: "Status", width: 110 },
   { key: "runs", label: "Runs", width: 85 }, { key: "storage", label: "Storage used", width: 115 },
   { key: "activity", label: "Last active", width: 145 }, { key: "created", label: "Date created", width: 145 },
@@ -92,13 +93,14 @@ function readUserGridPreferences() {
     if (!saved || typeof saved !== "object") return defaults;
     const columns: UserColumnKey[] = Array.isArray(saved.columns) ? saved.columns.filter((key: unknown): key is UserColumnKey => typeof key === "string" && userColumnDefs.some((column) => column.key === key)) : defaults.columns;
     const widths: Partial<Record<UserColumnKey, number>> = saved.widths && typeof saved.widths === "object" ? saved.widths : defaults.widths;
+    if (Array.isArray(saved.columns) && !saved.columns.includes("verification")) columns.push("verification");
     return { columns: columns.length ? columns : defaults.columns, widths, density: saved.density === "compact" ? "compact" as const : "comfortable" as const, wrap: saved.wrap !== false };
   } catch { return defaults; }
 }
 
 type PendingAction =
   | { kind: "status"; user: AdminUser; status: "active" | "restricted" | "suspended" }
-  | { kind: "command"; userId: string; username: string; command: "revoke" | "reset" | "delete" };
+  | { kind: "command"; userId: string; username: string; command: "revoke" | "reset" | "delete" | "approve_verification" };
 
 export function AdminPage({ section, userIdFilter = "", onNavigate }: { section: AdminTab; userIdFilter?: string; onNavigate: (section: AdminSection, userId?: string) => void }) {
   const adminTab = section;
@@ -308,7 +310,7 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
     setDialogReason(""); setDialogError(""); setPendingAction({ kind: "status", user, status });
   }
 
-  function requestAccountCommand(command: "revoke" | "reset" | "delete") {
+  function requestAccountCommand(command: "revoke" | "reset" | "delete" | "approve_verification") {
     if (!detail) return;
     setDialogReason(""); setDialogError(""); setPendingAction({ kind: "command", command, userId: detail.user.id, username: detail.user.username });
   }
@@ -327,10 +329,11 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
         await reloadUsers(); await reloadDetail(pendingAction.user.id);
       } else {
         const { command, userId, username } = pendingAction;
-        const wording = command === "revoke" ? "Active sessions revoked" : command === "reset" ? "Password reset required" : "Account access marked deleted";
+        const wording = command === "revoke" ? "Active sessions revoked" : command === "reset" ? "Password reset required" : command === "delete" ? "Account access marked deleted" : "Sign-in access approved; email ownership was not verified";
         if (command === "revoke") await api.adminRevokeSessions(userId, dialogReason.trim());
         else if (command === "reset") await api.adminRequirePasswordReset(userId, dialogReason.trim());
-        else await api.adminDeleteUser(userId, dialogReason.trim());
+        else if (command === "delete") await api.adminDeleteUser(userId, dialogReason.trim());
+        else await api.adminApproveUserVerification(userId, dialogReason.trim());
         setDetailMessage(`${wording} for ${username}.`);
         await reloadUsers(); await reloadDetail(userId);
       }
@@ -444,6 +447,11 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
     if (key === "username") return user.username;
     if (key === "name") return user.display_name || user.username;
     if (key === "email") return user.email;
+    if (key === "verification") {
+      const approved = user.email_verification_approved_by_admin;
+      const verified = user.email_verified;
+      return <span className={`admin-status ${verified || approved ? "is-active" : "is-restricted"}`}>{approved ? "Admin approved" : verified ? "Verified" : "Pending"}</span>;
+    }
     if (key === "role") return user.role.replace(/_/g, " ");
     if (key === "status") return <span className={`admin-status is-${user.status}`}>{user.status}</span>;
     if (key === "runs") return user.usage.reconciliation_count.toLocaleString();
@@ -574,8 +582,9 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
         {!detail && !detailLoading && !detailError && <p className="muted">Select an account to view its details.</p>}
         {detail && <section className="admin-user-detail">
           <p className="admin-user-identity">{detail.user.username} · {detail.user.email}</p>
-          <div className="admin-user-facts"><span>Status <strong>{detail.user.status}</strong></span><span>Role <strong>{detail.user.role}</strong></span><span>Email verified <strong>{detail.user.email_verified ? "Yes" : "No"}</strong></span><span>MFA <strong>{detail.user.mfa_enabled ? "Enabled" : "Not enabled"}</strong></span><span>Created <strong>{new Date(detail.user.created_at).toLocaleDateString()}</strong></span><span>Last active <strong>{detail.user.last_seen_at ? new Date(detail.user.last_seen_at).toLocaleString() : "Never"}</strong></span><span>Reconciliations <strong>{detail.usage.reconciliation_count}</strong></span><span>Total storage <strong>{formatBytes(detail.usage.storage_bytes)}</strong></span><span>Uploaded files <strong>{formatBytes(detail.usage.uploaded_bytes)}</strong></span><span>Reports and previews <strong>{formatBytes(detail.usage.report_bytes)}</strong></span></div>
-          <div className="admin-action-row">{detail.user.status !== "active" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "active"); }}>Reactivate</button>}{detail.user.status === "active" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "restricted"); }}>Restrict</button>}{detail.user.status !== "suspended" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "suspended"); }}>Suspend</button>}<button type="button" className="secondary" disabled={busy} onClick={() => requestAccountCommand("revoke")}>Force logout</button><button type="button" className="secondary" disabled={busy} onClick={() => requestAccountCommand("reset")}>Require password reset</button><button type="button" className="text-command is-danger" disabled={busy} onClick={() => requestAccountCommand("delete")}>Mark deleted</button><button type="button" className="secondary compact" onClick={() => { closeUserDetail(); onNavigate("complaints", detail.user.id); }}>View complaints ({detail.complaints})</button><button type="button" className="secondary compact" onClick={() => { setAuditTarget(detail.user.id); setAuditOffset(0); closeUserDetail(); onNavigate("activity"); }}>View platform activity</button></div>
+          <div className="admin-user-facts"><span>Status <strong>{detail.user.status}</strong></span><span>Role <strong>{detail.user.role}</strong></span><span>Email access <strong>{detail.user.email_verification_approved_by_admin ? "Admin approved" : detail.user.email_verified ? "Email verified" : "Pending"}</strong></span><span>MFA <strong>{detail.user.mfa_enabled ? "Enabled" : "Not enabled"}</strong></span><span>Created <strong>{new Date(detail.user.created_at).toLocaleDateString()}</strong></span><span>Last active <strong>{detail.user.last_seen_at ? new Date(detail.user.last_seen_at).toLocaleString() : "Never"}</strong></span><span>Reconciliations <strong>{detail.usage.reconciliation_count}</strong></span><span>Total storage <strong>{formatBytes(detail.usage.storage_bytes)}</strong></span><span>Uploaded files <strong>{formatBytes(detail.usage.uploaded_bytes)}</strong></span><span>Reports and previews <strong>{formatBytes(detail.usage.report_bytes)}</strong></span></div>
+          {detail.user.email_verification_approved_by_admin && <p className="success-text" role="status">An administrator approved sign-in access{detail.user.email_verification_approved_at ? ` on ${new Date(detail.user.email_verification_approved_at).toLocaleString()}` : ""}. The email address itself was not verified.</p>}
+          <div className="admin-action-row">{!detail.user.email_verified && !detail.user.email_verification_approved_by_admin && detail.user.role !== "super_admin" && detail.user.status === "active" && <button type="button" className="secondary" disabled={busy} onClick={() => requestAccountCommand("approve_verification")}>Approve sign-in access</button>}{detail.user.status !== "active" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "active"); }}>Reactivate</button>}{detail.user.status === "active" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "restricted"); }}>Restrict</button>}{detail.user.status !== "suspended" && <button type="button" className="secondary" disabled={busy} onClick={() => { const user = users.find((item) => item.id === detail.user.id); if (user) requestUserStatus(user, "suspended"); }}>Suspend</button>}<button type="button" className="secondary" disabled={busy} onClick={() => requestAccountCommand("revoke")}>Force logout</button><button type="button" className="secondary" disabled={busy} onClick={() => requestAccountCommand("reset")}>Require password reset</button><button type="button" className="text-command is-danger" disabled={busy} onClick={() => requestAccountCommand("delete")}>Mark deleted</button><button type="button" className="secondary compact" onClick={() => { closeUserDetail(); onNavigate("complaints", detail.user.id); }}>View complaints ({detail.complaints})</button><button type="button" className="secondary compact" onClick={() => { setAuditTarget(detail.user.id); setAuditOffset(0); closeUserDetail(); onNavigate("activity"); }}>View platform activity</button></div>
           <div className="admin-user-policy"><h4>Account-specific restrictions</h4><p className="muted">Feature overrides can only restrict global access. Numeric quotas may be raised or lowered within deployment hard caps; allowed formats remain limited by the global policy.</p>{Object.entries(featureLabels).map(([key, label]) => <label className="check-row" key={key}><input type="checkbox" checked={detail.feature_overrides[key] !== false} disabled={!detail.features[key]} onChange={(event) => setDetail({ ...detail, feature_overrides: { ...detail.feature_overrides, [key]: event.target.checked } })} /><span>{label}{!detail.features[key] ? " · disabled globally" : ""}</span></label>)}{Object.entries(limitLabels).map(([key, label]) => <label className="admin-detail-limit" key={key}>{label}<input type="number" min={0} value={Number(detail.limit_overrides[key] ?? detail.limits[key] ?? 0)} onChange={(event) => updateDetailLimit(event, key)} /></label>)}<fieldset className="admin-format-fieldset"><legend>Allowed upload formats</legend><div className="admin-format-grid">{availableFormats.map((format) => <label className="check-row" key={format.extension}><input type="checkbox" disabled={!(policy?.limits.registered?.allowed_formats as string[] | undefined)?.includes(format.extension)} checked={((detail.limit_overrides.allowed_formats as string[] | undefined) ?? (detail.limits.allowed_formats as string[] | undefined) ?? []).includes(format.extension)} onChange={(event) => updateUserFormat(format.extension, event.target.checked)} /><span><strong>{format.extension}</strong><small>{format.label}</small></span></label>)}</div></fieldset><button type="button" className="secondary" disabled={busy} onClick={() => void saveUserPolicy()}>Save account restrictions</button></div>
           <div className="admin-user-events"><h4>Sign-in sessions</h4>{detail.sessions.length ? detail.sessions.slice(0, 8).map((session) => <p key={session.id}><strong>{session.user_agent || "Signed-in device"}</strong><small>Last active {new Date(session.last_seen_at).toLocaleString()} · Expires {new Date(session.expires_at).toLocaleString()}{session.revoked_at ? " · Revoked" : " · Active"}{session.ip_address ? ` · ${session.ip_address}` : ""}</small></p>) : <p className="muted">No sign-in sessions recorded.</p>}<h4>Recent admin events</h4>{detail.admin_events.length ? detail.admin_events.map((event) => <p key={event.id}><strong>{event.action}</strong><small>{new Date(event.occurred_at).toLocaleString()} · {event.result}</small></p>) : <p className="muted">No account-specific administrative events.</p>}<h4>Report email history</h4>{detail.report_emails.length ? detail.report_emails.slice(0, 5).map((email) => <p key={email.id}><strong>{email.status}</strong><small>{email.recipients.join(", ")} · {new Date(email.created_at).toLocaleString()}</small></p>) : <p className="muted">No report email deliveries.</p>}</div>
         </section>}
@@ -624,11 +633,11 @@ export function AdminPage({ section, userIdFilter = "", onNavigate }: { section:
       </div>
     </AppModal>
     <dialog ref={confirmationRef} className="admin-confirm-dialog" aria-labelledby="admin-confirm-title" aria-describedby="admin-confirm-description" onCancel={(event) => { event.preventDefault(); setPendingAction(null); setDialogError(""); }}>
-      <div className="dialog-heading"><div><span className="eyebrow">Confirm administrator action</span><h2 id="admin-confirm-title">{pendingAction?.kind === "status" ? `${pendingAction.status === "active" ? "Reactivate" : pendingAction.status === "restricted" ? "Restrict" : "Suspend"} ${pendingAction.user.username}` : pendingAction?.command === "revoke" ? `Revoke sessions for ${pendingAction.username}` : pendingAction?.command === "reset" ? `Require password reset for ${pendingAction?.username}` : `Mark ${pendingAction?.kind === "command" ? pendingAction.username : "account"} deleted`}</h2></div><button type="button" className="icon-button" aria-label="Close confirmation" onClick={() => setPendingAction(null)}>×</button></div>
-      <p id="admin-confirm-description">{pendingAction?.kind === "command" && pendingAction.command === "delete" ? "This revokes account access and marks the account deleted. Existing records are retained; no source files are opened or removed." : "This action affects account access and will be recorded in the administrator audit trail."}</p>
+      <div className="dialog-heading"><div><span className="eyebrow">Confirm administrator action</span><h2 id="admin-confirm-title">{pendingAction?.kind === "status" ? `${pendingAction.status === "active" ? "Reactivate" : pendingAction.status === "restricted" ? "Restrict" : "Suspend"} ${pendingAction.user.username}` : pendingAction?.command === "revoke" ? `Revoke sessions for ${pendingAction.username}` : pendingAction?.command === "reset" ? `Require password reset for ${pendingAction?.username}` : pendingAction?.command === "approve_verification" ? `Approve sign-in access for ${pendingAction.username}` : `Mark ${pendingAction?.kind === "command" ? pendingAction.username : "account"} deleted`}</h2></div><button type="button" className="icon-button" aria-label="Close confirmation" onClick={() => setPendingAction(null)}>×</button></div>
+      <p id="admin-confirm-description">{pendingAction?.kind === "command" && pendingAction.command === "delete" ? "This revokes account access and marks the account deleted. Existing records are retained; no source files are opened or removed." : pendingAction?.kind === "command" && pendingAction.command === "approve_verification" ? "This allows the account to sign in without proving control of its email address. Use only after checking the request through another trusted channel. The approval applies to this account only, is recorded in the audit trail, and does not bypass password, MFA, or account-status checks." : "This action affects account access and will be recorded in the administrator audit trail."}</p>
       <label htmlFor="admin-action-reason">Audit reason<AutoResizeTextarea id="admin-action-reason" rows={3} maxLength={500} required minLength={5} value={dialogReason} aria-invalid={Boolean(dialogError)} onChange={(event) => { setDialogReason(event.target.value); setDialogError(""); }} placeholder="Explain why this action is needed" /></label>
       {dialogError && <p className="field-error" role="alert">{dialogError}</p>}
-      <div className="admin-dialog-actions"><button type="button" className="secondary" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction?.kind === "command" && pendingAction.command === "delete" ? "danger-button" : "primary"} disabled={busy} onClick={() => void confirmPendingAction()}>{busy ? "Applying…" : "Confirm action"}</button></div>
+      <div className="admin-dialog-actions"><button type="button" className="secondary" disabled={busy} onClick={() => setPendingAction(null)}>Cancel</button><button type="button" className={pendingAction?.kind === "command" && pendingAction.command === "delete" ? "danger-button" : "primary"} disabled={busy} onClick={() => void confirmPendingAction()}>{busy ? "Applying…" : pendingAction?.kind === "command" && pendingAction.command === "approve_verification" ? "Approve sign-in access" : pendingAction?.kind === "command" && pendingAction.command === "delete" ? "Mark deleted" : "Confirm action"}</button></div>
     </dialog>
   </section>;
 }

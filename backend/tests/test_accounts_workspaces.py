@@ -721,7 +721,7 @@ def test_smtp_registration_does_not_return_verification_token(client: TestClient
     assert "development_verification_url" not in response.json()
 
 
-def test_production_registration_requires_smtp(client: TestClient, monkeypatch):
+def test_production_registration_creates_pending_account_without_smtp(client: TestClient, monkeypatch):
     from app.core.config import get_settings
 
     settings = get_settings()
@@ -734,8 +734,177 @@ def test_production_registration_requires_smtp(client: TestClient, monkeypatch):
         "display_name": "Production Member",
         "password": "very-strong-test-password-9182",
     })
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Account verification email is not configured."
+    assert response.status_code == 201, response.text
+    assert response.json()["approval_required"] is True
+    assert "administrator can approve" in response.json()["message"]
+    assert "development_verification_url" not in response.json()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(username_key="prodmember").one()
+        assert user.role == "user"
+        assert user.email_verified is False
+        assert user.email_verification_approved_by_admin is False
+    finally:
+        db.close()
+
+
+def test_registration_smtp_failure_keeps_account_pending_for_admin_approval(client: TestClient, monkeypatch):
+    from app.api.routes import auth as auth_routes
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "email_backend", "smtp")
+    monkeypatch.setattr(settings, "smtp_host", "smtp.example.test")
+    monkeypatch.setattr(settings, "smtp_from_email", "recliq@example.test")
+
+    def fail_delivery(**_kwargs):
+        raise OSError("network unavailable")
+
+    monkeypatch.setattr(auth_routes, "_send_action_email", fail_delivery)
+    response = client.post("/api/auth/register", json={
+        "username": "smtpdownmember",
+        "email": "smtpdownmember@example.com",
+        "display_name": "SMTP Down Member",
+        "password": "very-strong-test-password-9182",
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["approval_required"] is True
+    assert "development_verification_url" not in response.json()
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(username_key="smtpdownmember").one()
+        assert user.email_verified is False
+        assert user.email_verification_approved_by_admin is False
+    finally:
+        db.close()
+
+
+def test_super_admin_can_approve_one_pending_account_and_user_can_sign_in(client: TestClient, monkeypatch):
+    from app.api.routes import auth as auth_routes
+    from app.models.account import AdminAuditEvent, AuthToken
+
+    monkeypatch.setattr(auth_routes, "_verification_email_ready", lambda _db: False)
+    registered = client.post("/api/auth/register", json={
+        "username": "approvalmember",
+        "email": "approvalmember@example.com",
+        "display_name": "Approval Member",
+        "password": "very-strong-test-password-9182",
+    })
+    assert registered.status_code == 201, registered.text
+    assert registered.json()["approval_required"] is True
+    blocked_login = client.post("/api/auth/login", json={
+        "identifier": "approvalmember",
+        "password": "very-strong-test-password-9182",
+    })
+    assert blocked_login.status_code == 403
+    assert "administrator approval" in blocked_login.json()["detail"]
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(username_key="approvalmember").one()
+        approval_link = auth_routes._new_auth_token(db, user, "verify_email")
+        db.commit()
+        user_id = user.id
+    finally:
+        db.close()
+
+    admin = create_user(username="approvaladmin", role="super_admin", mfa=True)
+    login(client, admin, totp=True)
+    csrf = client.get("/api/auth/me").headers["x-csrf-token"]
+    missing_reason = client.post(
+        f"/api/admin/users/{user_id}/approve-verification",
+        json={"reason": "No"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert missing_reason.status_code == 422
+
+    approved = client.post(
+        f"/api/admin/users/{user_id}/approve-verification",
+        json={"reason": "Confirmed this account request directly with the user."},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["approved_by_admin"] is True
+    assert approved.json()["email_verified"] is False
+    details = client.get(f"/api/admin/users/{user_id}").json()["user"]
+    assert details["email_verified"] is False
+    assert details["email_verification_approved_by_admin"] is True
+    assert details["email_verification_approved_by"] == admin.id
+    assert details["email_verification_approved_at"]
+    listing = client.get("/api/admin/users").json()
+    listed_user = next(item for item in listing["users"] if item["id"] == user_id)
+    assert listed_user["email_verification_approved_by_admin"] is True
+    verification = client.post(
+        "/api/auth/verify-email",
+        json={"token": approval_link},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert verification.status_code == 200, verification.text
+    assert "Email verified" in verification.json()["message"]
+
+    duplicate = client.post(
+        f"/api/admin/users/{user_id}/approve-verification",
+        json={"reason": "Repeated approval check."},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert duplicate.status_code == 409
+    db = SessionLocal()
+    try:
+        token = db.query(AuthToken).filter_by(user_id=user_id, purpose="verify_email").one()
+        assert token.consumed_at is not None
+        approved_user = db.get(User, user_id)
+        assert approved_user.email_verified is True
+        assert approved_user.email_verification_approved_by_admin is False
+        event = db.query(AdminAuditEvent).filter_by(
+            action="user.email_verification_approved", target_id=user_id,
+        ).one()
+        assert event.actor_id == admin.id
+        assert json.loads(event.metadata_json)["reason"] == "Confirmed this account request directly with the user."
+    finally:
+        db.close()
+
+    client.cookies.delete("recliq_auth")
+    assert login(client, user, password="very-strong-test-password-9182")["authenticated"] is True
+
+
+def test_verification_approval_is_super_admin_only_and_rejects_inactive_accounts(client: TestClient):
+    user = create_user(username="approvaltarget")
+    db = SessionLocal()
+    try:
+        pending = db.get(User, user.id)
+        pending.email_verified = False
+        pending.status = "suspended"
+        db.commit()
+    finally:
+        db.close()
+
+    ordinary_user = create_user(username="approvalcaller")
+    login(client, ordinary_user)
+    csrf = client.get("/api/auth/me").headers["x-csrf-token"]
+    forbidden = client.post(
+        f"/api/admin/users/{user.id}/approve-verification",
+        json={"reason": "A valid reason for testing."},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert forbidden.status_code == 403
+
+    client.cookies.delete("recliq_auth")
+    admin = create_user(username="approvalguard", role="super_admin", mfa=True)
+    login(client, admin, totp=True)
+    csrf = client.get("/api/auth/me").headers["x-csrf-token"]
+    inactive = client.post(
+        f"/api/admin/users/{user.id}/approve-verification",
+        json={"reason": "The account is not active yet."},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert inactive.status_code == 409
+
+    own_account = client.post(
+        f"/api/admin/users/{admin.id}/approve-verification",
+        json={"reason": "Administrator self approval check."},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert own_account.status_code == 409
 
 
 def test_admin_routes_require_authenticated_mfa_enabled_super_admin(client: TestClient):
