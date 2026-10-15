@@ -82,13 +82,17 @@ def reconcile(
     text_threshold: int = TEXT_REVIEW_THRESHOLD,
 ) -> GSTReconciliationOutcome:
     from app.reconciliation_engine.matching import IndexedCandidateMatcher, compare_values
+    from app.reconciliation_engine.cache import compact_identifier
 
     mismatched: list[dict] = []
     only_in_file1: list[dict] = []
     confidence_review: list[dict] = []
     matched_file2_indices: set = set()
 
-    gstr_groups_2 = {gstr: group for gstr, group in df2.groupby("GSTR")}
+    gstr_groups_2 = {
+        compact_identifier(group.iloc[0].get("__KEY_GSTR", gstr)): group
+        for gstr, group in df2.groupby("GSTR")
+    }
     gstr_matchers_2 = {
         gstr: IndexedCandidateMatcher(group, "INVOICE NO.", "invoice")
         for gstr, group in gstr_groups_2.items()
@@ -97,9 +101,10 @@ def reconcile(
     df1_records = df1.to_dict('records')
     for row_idx, row1 in enumerate(df1_records):
         gstr = row1.get("GSTR")
-        matcher = gstr_matchers_2.get(gstr)
+        gstr_key = compact_identifier(row1.get("__KEY_GSTR", gstr))
+        matcher = gstr_matchers_2.get(gstr_key)
         if matcher is None:
-            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
             only_in_file1.append(clean_r1)
             continue
@@ -110,7 +115,7 @@ def reconcile(
             matched_file2_indices,
         )
         if row2 is None or invoice_result is None:
-            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
             only_in_file1.append(clean_r1)
             continue
@@ -174,7 +179,7 @@ def reconcile(
     only_in_file2 = []
     for i, idx in enumerate(df2.index):
         if idx not in matched_file2_indices:
-            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO"}
+            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r2["ROW (File 2)"] = df2_records[i].get("_ROW_NO", idx + 2)
             only_in_file2.append(clean_r2)
 

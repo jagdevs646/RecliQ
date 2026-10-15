@@ -76,7 +76,7 @@ def test_multiple_file_pairs_download_as_zip_with_independent_workbooks():
         started = client.post("/api/reconciliation/generic", json=payload)
         assert started.status_code == 200
         job = started.json()
-        for _ in range(40):
+        for _ in range(120):
             job = client.get(f"/api/jobs/{job['id']}").json()
             if job["status"] in {"completed", "failed"}:
                 break

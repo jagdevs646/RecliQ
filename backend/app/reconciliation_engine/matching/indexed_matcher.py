@@ -43,6 +43,15 @@ IDENTIFIER_NAME_HINTS = (
     "doc",
     "code",
     "id",
+    "key",
+    "utr",
+    "cheque no",
+    "check no",
+    "trace no",
+    "transaction id",
+    "transaction reference",
+    "payment reference",
+    "bank reference",
 )
 
 NUMERIC_NAME_HINTS = (
@@ -82,6 +91,7 @@ _INVOICE_NON_AMOUNT_WORDS = re.compile(r"\bcreditors?\b|\b(?:(?:tax|credit|debit
 
 DATE_NAME_HINTS = ("date", "dt", "period")
 NAME_HINTS = ("name", "party", "vendor", "supplier", "customer", "trader", "firm", "company")
+_MAX_SECONDARY_PAIR_CACHE = 100_000
 
 
 @dataclass(frozen=True)
@@ -254,10 +264,9 @@ def detect_primary_key_type(
         return "invoice"
 
     normalized_name = normalize_text(combined_name)
-    explicit_identifier = _name_has_hint(
-        normalized_name,
-        ("voucher", "po", "purchase order", "order no", "challan", "reference", "ref", "document", "doc", "code", "id"),
-    ) or bool(re.search(r"\b(?:no|number)\s*$", normalized_name))
+    explicit_identifier = _name_has_hint(normalized_name, IDENTIFIER_NAME_HINTS) or bool(
+        re.search(r"\b(?:no|number)\s*$", normalized_name)
+    )
     if explicit_identifier:
         return "identifier"
     sample = non_empty_values(values or [], limit=100)
@@ -294,6 +303,30 @@ def normalized_identity_value(value: object, matcher_type: str) -> str | None:
         # and "ABC PRIVATE LIMITED" share one identity). Never fuzzy.
         normalized = active_normalizer().identity(value) or ""
     return normalized or None
+
+
+def detect_key_matcher_type(
+    values: Iterable[object] | None = None,
+    source_column: str = "",
+    destination_column: str = "",
+) -> str:
+    """Infer the deterministic identity rules for a selected key pair."""
+    return detect_primary_key_type(values, source_column, destination_column)
+
+
+def normalized_key_identity(
+    value: object,
+    source_column: str = "",
+    destination_column: str = "",
+    matcher_type: str | None = None,
+) -> str | None:
+    """Normalize keys consistently while keeping names and prose readable.
+
+    Identifier punctuation, spacing, and case are ignored; date and numeric
+    keys retain their typed semantics; names and prose retain word boundaries.
+    """
+    kind = matcher_type or detect_key_matcher_type([value], source_column, destination_column)
+    return normalized_identity_value(value, kind)
 
 
 def composite_identity_key(values: Sequence[object], matcher_types: Sequence[str]) -> tuple[str, ...] | None:
@@ -496,11 +529,12 @@ class IndexedCandidateMatcher:
         self.date_map: Dict[str, List[int]] = {}
         self.composite_map: Dict[tuple[str, ...], List[int]] = {}
         self.identity_map: Dict[str, List[int]] = {}
-        self.condition_exact_maps: Dict[str, Dict[str, List[int]]] = {}
+        self.condition_exact_maps: Dict[tuple[str, str], Dict[str, List[int]]] = {}
         self.condition_date_maps: Dict[str, Dict[str, List[int]]] = {}
         self.condition_numeric_values: Dict[str, List[tuple[float, int]]] = {}
         self.condition_token_blocks: Dict[str, Dict[str, List[int]]] = {}
         self._condition_candidate_cache: Dict[tuple, frozenset[int]] = {}
+        self._condition_match_cache: Dict[tuple, bool] = {}
 
         self._build_index()
 
@@ -624,16 +658,27 @@ class IndexedCandidateMatcher:
         """
         return {self.indices[position] for position in self._token_candidate_positions(target_value)}
 
-    def _condition_exact_map(self, column: str) -> Dict[str, List[int]]:
-        if column not in self.condition_exact_maps:
+    def _condition_exact_map(self, column: str, matcher_type: str) -> Dict[str, List[int]]:
+        cache_key = (column, matcher_type)
+        if cache_key not in self.condition_exact_maps:
             index: Dict[str, List[int]] = {}
-            normalizer = active_normalizer()
             for position, row in enumerate(self.rows):
-                value = normalizer.identity(row.get(column))
+                value = normalized_identity_value(row.get(column), matcher_type)
                 if value:
                     index.setdefault(value, []).append(position)
-            self.condition_exact_maps[column] = index
-        return self.condition_exact_maps[column]
+            self.condition_exact_maps[cache_key] = index
+        return self.condition_exact_maps[cache_key]
+
+    def _exact_condition_matcher_type(self, source_value: object, condition: dict) -> str:
+        configured = condition.get("matcher_type")
+        if configured:
+            return str(configured)
+        source_column = str(condition.get("source_column", ""))
+        destination_column = str(condition.get("destination_column", ""))
+        values = [source_value]
+        if destination_column in self.candidates_df.columns:
+            values.extend(self.candidates_df[destination_column].head(500).tolist())
+        return detect_key_matcher_type(values, source_column, destination_column)
 
     def _condition_date_map(self, column: str) -> Dict[str, List[int]]:
         if column not in self.condition_date_maps:
@@ -664,17 +709,48 @@ class IndexedCandidateMatcher:
             self.condition_token_blocks[column] = blocks
         return self.condition_token_blocks[column]
 
+    def _matcher_based_condition_matches(
+        self,
+        source_value: object,
+        destination_value: object,
+        destination_column: str,
+    ) -> bool:
+        try:
+            cache_key = (
+                destination_column,
+                type(source_value).__name__, source_value,
+                type(destination_value).__name__, destination_value,
+            )
+            cached = self._condition_match_cache.get(cache_key)
+        except (TypeError, ValueError):
+            cache_key = None
+            cached = None
+        if cached is not None:
+            return cached
+
+        source_tokens = set(tokens(source_value, use_synonyms=True))
+        destination_tokens = set(tokens(destination_value, use_synonyms=True))
+        matched = bool(
+            source_tokens.intersection(destination_tokens)
+            and compare_values(source_value, destination_value, "", destination_column).matched
+        )
+        if cache_key is not None and len(self._condition_match_cache) < _MAX_SECONDARY_PAIR_CACHE:
+            self._condition_match_cache[cache_key] = matched
+        return matched
+
     def _candidate_positions_for_condition(self, condition: dict) -> tuple[Set[int], str]:
         source_value = condition.get("source_value")
+        source_column = str(condition.get("source_column", ""))
         destination_column = str(condition.get("destination_column", ""))
         method = str(condition.get("comparison_method", ""))
         if not destination_column or destination_column not in self.candidates_df.columns:
             return set(), f"{destination_column or 'destination column'} is unavailable"
 
         if method == "exact_text":
-            # "Exact" after deterministic normalization, never fuzzy.
-            value = active_normalizer().identity(source_value)
-            positions = set(self._condition_exact_map(destination_column).get(value, [])) if value else set()
+            # Use the same typed identity for indexing and pair validation.
+            matcher_type = self._exact_condition_matcher_type(source_value, condition)
+            value = normalized_key_identity(source_value, source_column, destination_column, matcher_type)
+            positions = set(self._condition_exact_map(destination_column, matcher_type).get(value, [])) if value else set()
             return positions, f"{destination_column} exact text"
 
         if method == "normalized_date":
@@ -699,12 +775,11 @@ class IndexedCandidateMatcher:
             valid_positions = {
                 position
                 for position in candidate_positions
-                if compare_values(
+                if self._matcher_based_condition_matches(
                     source_value,
                     self.rows[position].get(destination_column),
-                    "",
                     destination_column,
-                ).matched
+                )
             }
             return valid_positions, f"{destination_column} explicit matcher"
 
@@ -715,9 +790,13 @@ class IndexedCandidateMatcher:
         source_column = str(condition.get("source_column", ""))
         source_value = source_row.get(source_column)
         condition["source_value"] = source_value
+        if condition.get("comparison_method") == "exact_text":
+            condition["matcher_type"] = self._exact_condition_matcher_type(source_value, condition)
         cache_key = (
             condition.get("comparison_method"),
+            condition.get("source_column"),
             condition.get("destination_column"),
+            condition.get("matcher_type"),
             condition.get("numeric_tolerance"),
             type(source_value).__name__,
             source_value,
@@ -777,8 +856,13 @@ class IndexedCandidateMatcher:
         method = str(condition.get("comparison_method", ""))
 
         if method == "exact_text":
-            source_identity = active_normalizer().identity(source_value)
-            return bool(source_identity) and source_identity == active_normalizer().identity(destination_value)
+            source_column = str(condition.get("source_column", ""))
+            matcher_type = self._exact_condition_matcher_type(source_value, condition)
+            source_identity = normalized_key_identity(source_value, source_column, destination_column, matcher_type)
+            destination_identity = normalized_key_identity(
+                destination_value, source_column, destination_column, matcher_type
+            )
+            return source_identity is not None and source_identity == destination_identity
 
         if method == "normalized_date":
             source_date = parse_date_value(source_value)
@@ -796,11 +880,8 @@ class IndexedCandidateMatcher:
             )
 
         if method == "matcher_based":
-            source_tokens = set(tokens(source_value, use_synonyms=True))
-            destination_tokens = set(tokens(destination_value, use_synonyms=True))
-            return bool(
-                source_tokens.intersection(destination_tokens)
-                and compare_values(source_value, destination_value, "", destination_column).matched
+            return self._matcher_based_condition_matches(
+                source_value, destination_value, destination_column
             )
 
         return False

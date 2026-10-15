@@ -43,6 +43,15 @@
 | CRUD | FastAPI-scoped services and route-specific mutation feedback | `docs/api.md`, `docs/support-policy.md` | Create returns to ticket list; reply stays in detail | API integration tests |
 | Email delivery monitoring | Database status summary and paginated recipient table in the shared modal | `ReportEmailDelivery`, `/admin/email-deliveries/summary`, `/admin/email-deliveries` | Status-filtered or all-deliveries detail | Summary refresh and recipient pagination tests |
 
+## Date & Amount Reconciliation
+
+- Date & Amount is an optional per-sheet-rule method; Standard matching remains the default and all standard rules/settings are preserved when switching methods.
+- At the method step, offer Date & Amount as a suggestion only when both files have data-detected date columns and the preselected amount or debit/credit columns exist. The user must activate the suggestion; it does not change the current method automatically.
+- Map Columns selects each file's date and either a signed amount or a debit/credit pair. Date interpretation is configured independently per file. A remaining ambiguous numeric date blocks the run; invalid dates, amounts, missing required matching text, and currency conflicts remain visible as review records rather than being converted to zero or silently discarded.
+- Report Setup defaults to transaction verification. Aggregate-only mode must say that transactions were not verified and must not increment verified match counts. Amount tolerance applies to one-to-one matches only. Date tolerance may cross month boundaries for one-to-one candidates; grouped matches require the exact same date and exact total.
+- The engine uses calendar-month and daily debit/credit aggregates for diagnostics, then confirms only exact transaction fingerprints, reciprocal unique tolerance pairs, or unique bounded one-to-many/many-to-one groups. Aggregate equality never establishes transaction equality. It does not automatically resolve many-to-many groupings; ambiguous or capped searches remain for manual review.
+- Matched output retains source file, sheet and row references, original selected date/amount/text values, normalized values, match method, tolerances, and group ID. Monthly and daily summary tabs appear only for Date & Amount reports; standard report sheet names stay unchanged.
+
 ## Component behavior
 
 | Component | Default | Hover | Focus | Active | Disabled | Busy | Error |

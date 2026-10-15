@@ -7,6 +7,7 @@ import pandas as pd
 
 from app.reconciliation_engine.cache import (
     canonical_date_value,
+    compact_identifier,
     is_blank,
     normalize_header,
     to_number,
@@ -68,11 +69,20 @@ def normalise_gst_df(df: pd.DataFrame, amount_columns: list[str]) -> pd.DataFram
     for col in ("GSTR", "INVOICE NO.", "NAME OF TRADER/FIRM/COMPANY"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.upper().str.strip()
+    if "GSTR" in df.columns:
+        df["__KEY_GSTR"] = df["GSTR"].map(compact_identifier)
+    if "INVOICE NO." in df.columns:
+        df["__KEY_INVOICE"] = df["INVOICE NO."].map(compact_identifier)
     return df
 
 
 def merge_duplicate_invoices(df: pd.DataFrame, merge_key_columns: list[str], amount_columns: list[str]) -> pd.DataFrame:
-    key_cols = [col for col in merge_key_columns if col in df.columns]
+    key_cols = []
+    normalized_key_columns = {"GSTR": "__KEY_GSTR", "INVOICE NO.": "__KEY_INVOICE"}
+    for column in merge_key_columns:
+        normalized_column = normalized_key_columns.get(column, column)
+        if normalized_column in df.columns:
+            key_cols.append(normalized_column)
     amt_cols = [col for col in amount_columns if col in df.columns]
     non_key_non_amount = [col for col in df.columns if col not in key_cols and col not in amt_cols]
 

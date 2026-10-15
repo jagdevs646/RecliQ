@@ -198,6 +198,7 @@ def test_identical_normalized_text_is_not_enough_for_the_shortcut():
     ("method", "source_value", "destination_values"),
     [
         ("exact_text", "ABC PVT LTD", ["ABC PRIVATE LIMITED", "Other Ltd"]),
+        ("exact_text", "UTR2600-0814", ["UTR26000814", "UTR26000815"]),
         ("normalized_date", "07/09/2026", ["2026-09-07", "2026-09-08"]),
         ("numeric_tolerance", 100, [100.5, 103]),
         ("matcher_based", "Alpha Consulting", ["Alpha Consulting Limited", "Beta Ltd"]),

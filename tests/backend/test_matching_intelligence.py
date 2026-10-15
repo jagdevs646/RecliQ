@@ -258,6 +258,61 @@ def test_name_primary_key_and_grouping_use_the_normalized_identity(tmp_path: Pat
     assert result["universal_data"]["matched_records"][0]["GROUP CLASSIFICATION"] == "Many-to-One Match"
 
 
+def test_utr_primary_key_ignores_punctuation_case_and_spacing_but_keeps_digits_exact(tmp_path: Path):
+    result = _run(
+        tmp_path,
+        [
+            {"UTR No": " UTR2600-0814 ", "Amount": 100},
+            {"UTR No": "UTR2600-0815", "Amount": 200},
+        ],
+        [
+            {"UTR No": "utr2600/0814", "Amount": 100},
+            {"UTR No": "UTR26000816", "Amount": 200},
+        ],
+        key_file_1=["UTR No"], key_file_2=["UTR No"],
+    )
+
+    assert result["summary"]["exact_matches"] == 1
+    assert result["summary"]["only_in_file_1"] == 1
+    assert result["summary"]["only_in_file_2"] == 1
+    matched = result["universal_data"]["matched_records"][0]
+    assert "UTR2600-0814" in matched["MATCH KEY"]
+    assert "utr2600/0814" in matched["MATCHED KEY"]
+    assert "Identifier punctuation, spacing, and case ignored" in matched["NORMALIZATION APPLIED"]
+
+
+def test_exact_secondary_utr_key_uses_same_identifier_identity_as_primary_keys(tmp_path: Path):
+    result = _run(
+        tmp_path,
+        [{"Record ID": "ROW-1", "UTR": "UTR2600-0814", "Amount": 100}],
+        [{"Record ID": "ROW1", "UTR": "UTR26000814", "Amount": 100}],
+        key_file_1=["Record ID"], key_file_2=["Record ID"],
+        secondary_conditions=[{
+            "source_column": "UTR", "destination_column": "UTR", "comparison_method": "exact_text",
+        }],
+    )
+
+    assert result["summary"]["exact_matches"] == 1
+    assert result["summary"]["only_in_file_1"] == 0
+    assert result["summary"]["only_in_file_2"] == 0
+    assert "Identifier punctuation, spacing, and case ignored" in result["universal_data"]["matched_records"][0]["NORMALIZATION APPLIED"]
+
+
+def test_name_key_normalization_preserves_word_boundaries():
+    from app.reconciliation_engine.matching.indexed_matcher import (
+        detect_key_matcher_type,
+        normalized_key_identity,
+    )
+
+    kind = detect_key_matcher_type(
+        ["Acme North", "Acmenorth"], "Party Name", "Party Name"
+    )
+    assert kind == "company_name"
+    assert normalized_key_identity("Acme North", "Party Name", "Party Name", kind) != normalized_key_identity(
+        "Acmenorth", "Party Name", "Party Name", kind
+    )
+
+
 def test_genuinely_ambiguous_entities_are_never_auto_matched(tmp_path: Path):
     result = _run(
         tmp_path,

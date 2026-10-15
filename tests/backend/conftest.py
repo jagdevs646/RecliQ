@@ -10,11 +10,19 @@ ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
 _RUN_DIR = Path(tempfile.mkdtemp(prefix="recliq-tests-"))
-os.environ.setdefault("DATABASE_URL", f"sqlite:///{(_RUN_DIR / 'test.db').as_posix()}")
-os.environ.setdefault("LOCAL_STORAGE_PATH", str(_RUN_DIR / "storage"))
-os.environ.setdefault("JOB_QUEUE_BACKEND", "local")
-os.environ.setdefault("LOG_FORMAT", "text")
-os.environ.setdefault("LOG_LEVEL", "WARNING")
+os.environ.update({
+    "ENVIRONMENT": "test",
+    "DATABASE_URL": f"sqlite:///{(_RUN_DIR / 'test.db').as_posix()}",
+    "STORAGE_BACKEND": "local",
+    "LOCAL_STORAGE_PATH": str(_RUN_DIR / "storage"),
+    "JOB_QUEUE_BACKEND": "local",
+    "SESSION_COOKIE_SECURE": "false",
+    "ENGINE": "rows",
+    "MAX_UPLOAD_MB": "50",
+    "MAX_ROWS_PER_SHEET": "500000",
+    "LOG_FORMAT": "text",
+    "LOG_LEVEL": "WARNING",
+})
 for _name in (
     "BOOTSTRAP_ADMIN_USERNAME",
     "BOOTSTRAP_ADMIN_EMAIL",

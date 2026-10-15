@@ -1,6 +1,6 @@
 import pandas as pd
 
-from app.reconciliation_engine.cache import parse_date_value
+from app.reconciliation_engine.cache import compact_identifier, parse_date_value
 
 
 def normalize_date_series(series: pd.Series) -> pd.Series:
@@ -15,14 +15,8 @@ def normalize_text_series(series: pd.Series) -> pd.Series:
 
 
 def normalize_identifier_series(series: pd.Series) -> pd.Series:
-    """
-    Normalize identifiers by removing common safe separators: - / | and spaces.
-    E.g. ABC-123, ABC/123, ABC 123 -> ABC123.
-    """
-    # First, convert to uppercase string
-    s = series.astype(str).str.upper()
-    # Remove -, /, |, \ and spaces
-    return s.str.replace(r'[\-\/\|\\\s]', '', regex=True)
+    """Retain only identifier letters and digits, as in the matcher identity."""
+    return series.map(lambda value: compact_identifier(value).upper())
 
 
 def normalize_number_series(series: pd.Series) -> pd.Series:

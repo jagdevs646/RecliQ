@@ -222,6 +222,64 @@ export interface NormalizationSettings {
 }
 
 export type DateFormat = "day_first" | "month_first";
+export type DateAmountDateFormat = "auto" | "day_first" | "month_first";
+export type ReconciliationMethod = "standard" | "date_amount";
+
+export interface DateAmountSettings {
+  dateSource: string;
+  dateDestination: string;
+  dateFormatSource: DateAmountDateFormat;
+  dateFormatDestination: DateAmountDateFormat;
+  amountModeSource: "single" | "debit_credit";
+  amountModeDestination: "single" | "debit_credit";
+  amountSource: string;
+  amountDestination: string;
+  debitSource: string;
+  creditSource: string;
+  debitDestination: string;
+  creditDestination: string;
+  positiveIsSource: "debit" | "credit";
+  positiveIsDestination: "debit" | "credit";
+  reverseDirectionSource: boolean;
+  reverseDirectionDestination: boolean;
+  textSource: string;
+  textDestination: string;
+  currencySource: string;
+  currencyDestination: string;
+  amountTolerance: string;
+  dateToleranceDays: number;
+  verifyTransactions: boolean;
+  allowGroupMatches: boolean;
+  maxGroupSize: number;
+}
+
+export interface DateAmountPayload {
+  date_source: string;
+  date_destination: string;
+  date_format_source: DateAmountDateFormat;
+  date_format_destination: DateAmountDateFormat;
+  amount_mode_source: "single" | "debit_credit";
+  amount_mode_destination: "single" | "debit_credit";
+  amount_source: string | null;
+  amount_destination: string | null;
+  debit_source: string | null;
+  credit_source: string | null;
+  debit_destination: string | null;
+  credit_destination: string | null;
+  positive_is_source: "debit" | "credit";
+  positive_is_destination: "debit" | "credit";
+  reverse_direction_source: boolean;
+  reverse_direction_destination: boolean;
+  text_source: string | null;
+  text_destination: string | null;
+  currency_source: string | null;
+  currency_destination: string | null;
+  amount_tolerance: string;
+  date_tolerance_days: number;
+  verify_transactions: boolean;
+  allow_group_matches: boolean;
+  max_group_size: number;
+}
 
 export interface SheetRuleDraft {
   file1Columns: string[];
@@ -235,6 +293,8 @@ export interface SheetRuleDraft {
   includeFile1: string[];
   includeFile2: string[];
   analysis: AnalysisResponse | null;
+  method: ReconciliationMethod;
+  dateAmount: DateAmountSettings;
   transformations: TransformationStep[];
   matchingPasses: MatchingPass[];
   normalization: NormalizationSettings;
@@ -248,6 +308,7 @@ export interface SheetRulePayload {
   source_sheets: string[];
   destination_sheets: string[];
   matching_strategy: {
+    method: ReconciliationMethod;
     primary_key_source: string[];
     primary_key_destination: string[];
     secondary_conditions: SecondaryMatchCondition[];
@@ -257,6 +318,7 @@ export interface SheetRulePayload {
     normalization: NormalizationSettings;
   };
   reconciliation_mapping: RuleMapping[];
+  date_amount: DateAmountPayload | null;
   include_columns_file_1: string[];
   include_columns_file_2: string[];
   transformations: TransformationStep[];
@@ -496,6 +558,22 @@ export interface ReconciliationSummary {
   only_in_file_1: number;
   only_in_file_2: number;
   confidence_review: number;
+  date_amount_method?: number;
+  date_amount_summary_only?: number;
+  verified_match_groups?: number;
+  verified_matched_source_rows?: number;
+  verified_matched_destination_rows?: number;
+  aggregate_periods?: number;
+  aggregate_balanced_months?: number;
+  monthly_summary_groups?: number;
+  daily_periods?: number;
+  daily_summary_groups?: number;
+  aggregate_balanced_groups?: number;
+  aggregate_difference_groups?: number;
+  source_unverified_rows?: number;
+  comparison_unverified_rows?: number;
+  date_tolerance_days?: number;
+  amount_tolerance?: number;
   source_records?: number;
   destination_records?: number;
   matched_records?: number;
@@ -552,6 +630,8 @@ export interface SheetRuleManifest {
   similarity_policy: SimilarityPolicy;
   date_only_override: boolean;
   mapping_count: number;
+  reconciliation_method?: ReconciliationMethod;
+  date_amount?: Record<string, unknown> | null;
   status: RuleStatus;
   error: string | null;
   summary: ReconciliationSummary;
@@ -562,7 +642,7 @@ export interface ReportScope {
   sheetRuleId?: string;
 }
 
-export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review" | "exception_matches" | "ambiguous_matches" | "not_found" | "auto_resolved";
+export type PreviewCategory = "discrepancies" | "only_file_1" | "only_file_2" | "review" | "exception_matches" | "ambiguous_matches" | "not_found" | "auto_resolved" | "monthly_summary" | "daily_summary";
 
 // ── Auto-resolution rules and learning ──────────────────────────────────
 export type RuleCategory = "only_in_source" | "only_in_destination" | "field_difference" | "to_confirm";

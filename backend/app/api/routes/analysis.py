@@ -63,6 +63,9 @@ def _rule_columns(rule: dict, side: str) -> list[str]:
         if side == "source" else ("amount_destination", "date_destination", "narrative_destination")
     )
     columns.extend(item[field] for item in rule.get("matching_passes", []) for field in pass_fields if item.get(field))
+    date_amount = rule.get("date_amount") or {}
+    direction = "source" if side == "source" else "destination"
+    columns.extend(date_amount.get(f"{field}_{direction}") for field in ("date", "amount", "debit", "credit", "text") if date_amount.get(f"{field}_{direction}"))
     for step in rule.get("transformations", []):
         if step.get("side", "both") not in {side, "both"}:
             continue

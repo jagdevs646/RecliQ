@@ -13,6 +13,8 @@ REPORT_DATA_CATEGORIES = (
     "field_differences",
     "identity_resolution",
     "auto_resolved",
+    "monthly_summary",
+    "daily_summary",
 )
 
 

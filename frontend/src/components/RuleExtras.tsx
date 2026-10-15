@@ -1,5 +1,5 @@
 import { ArrowRight, Info, Plus, X } from "lucide-react";
-import type { DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
+import type { DateAmountSettings, DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
 import { ALL_FIELDS, availableColumns, describeTolerance, limitsFromPasses, newPass } from "../lib/plan";
 
 interface EditorProps {
@@ -14,6 +14,97 @@ function ColumnSelect({ columns, value, onSelect, label, optional = false }: { c
     <option value="">{optional ? "Not used" : "Choose a column…"}</option>
     {columns.map((column) => <option key={column} value={column}>{column}</option>)}
   </select>;
+}
+
+function DateAmountSideFields({ side, label, columns, settings, onChange }: {
+  side: "source" | "destination";
+  label: string;
+  columns: string[];
+  settings: DateAmountSettings;
+  onChange: (change: Partial<DateAmountSettings>) => void;
+}) {
+  const source = side === "source";
+  const dateColumn = source ? settings.dateSource : settings.dateDestination;
+  const dateFormat = source ? settings.dateFormatSource : settings.dateFormatDestination;
+  const amountMode = source ? settings.amountModeSource : settings.amountModeDestination;
+  const amountColumn = source ? settings.amountSource : settings.amountDestination;
+  const debitColumn = source ? settings.debitSource : settings.debitDestination;
+  const creditColumn = source ? settings.creditSource : settings.creditDestination;
+  const positiveIs = source ? settings.positiveIsSource : settings.positiveIsDestination;
+  const reverseDirection = source ? settings.reverseDirectionSource : settings.reverseDirectionDestination;
+  const textColumn = source ? settings.textSource : settings.textDestination;
+  const currency = source ? settings.currencySource : settings.currencyDestination;
+  const sideLabel = source ? "source" : "comparison";
+
+  return <section className="date-amount-side" aria-label={`${label} date and amount fields`}>
+    <h4>{label}</h4>
+    <label><span>Transaction date</span>
+      <ColumnSelect columns={columns} value={dateColumn} onSelect={(value) => onChange(source ? { dateSource: value } : { dateDestination: value })} label={`${label} date column`} />
+    </label>
+    <label><span>Date format</span>
+      <select value={dateFormat} onChange={(event) => onChange(source ? { dateFormatSource: event.target.value as DateAmountSettings["dateFormatSource"] } : { dateFormatDestination: event.target.value as DateAmountSettings["dateFormatDestination"] })} aria-label={`${label} date format`}>
+        <option value="auto">Auto-detect; flag ambiguous dates</option>
+        <option value="day_first">Day first (DD/MM/YYYY)</option>
+        <option value="month_first">Month first (MM/DD/YYYY)</option>
+      </select>
+    </label>
+    <div className="date-amount-field-group">
+      <span>Amount columns</span>
+      <div className="segmented-control" role="group" aria-label={`${label} amount format`}>
+        <button type="button" className={amountMode === "single" ? "is-active" : ""} aria-pressed={amountMode === "single"} onClick={() => onChange(source ? { amountModeSource: "single" } : { amountModeDestination: "single" })}>Signed amount</button>
+        <button type="button" className={amountMode === "debit_credit" ? "is-active" : ""} aria-pressed={amountMode === "debit_credit"} onClick={() => onChange(source ? { amountModeSource: "debit_credit" } : { amountModeDestination: "debit_credit" })}>Debit + credit</button>
+      </div>
+      {amountMode === "single" ? <>
+        <ColumnSelect columns={columns} value={amountColumn} onSelect={(value) => onChange(source ? { amountSource: value } : { amountDestination: value })} label={`${label} signed amount column`} />
+        <label><span>Positive amounts represent</span>
+          <select value={positiveIs} onChange={(event) => onChange(source ? { positiveIsSource: event.target.value as "debit" | "credit" } : { positiveIsDestination: event.target.value as "debit" | "credit" })} aria-label={`${label} positive amount direction`}>
+            <option value="debit">Debit</option><option value="credit">Credit</option>
+          </select>
+        </label>
+      </> : <div className="date-amount-paired-columns">
+        <ColumnSelect columns={columns} value={debitColumn} onSelect={(value) => onChange(source ? { debitSource: value } : { debitDestination: value })} label={`${label} debit column`} />
+        <ColumnSelect columns={columns} value={creditColumn} onSelect={(value) => onChange(source ? { creditSource: value } : { creditDestination: value })} label={`${label} credit column`} />
+      </div>}
+    </div>
+    <label className="checkbox-line"><input type="checkbox" checked={reverseDirection} onChange={(event) => onChange(source ? { reverseDirectionSource: event.target.checked } : { reverseDirectionDestination: event.target.checked })} />Reverse debit and credit direction</label>
+    <label><span>Required text to match <small>(optional)</small></span>
+      <ColumnSelect columns={columns} value={textColumn} onSelect={(value) => onChange(source ? { textSource: value } : { textDestination: value })} label={`${label} required matching text column`} optional />
+    </label>
+    <label><span>Currency override <small>(optional)</small></span><input className="date-amount-text-input" value={currency} onChange={(event) => onChange(source ? { currencySource: event.target.value.toUpperCase() } : { currencyDestination: event.target.value.toUpperCase() })} maxLength={3} placeholder="INR" aria-label={`${label} currency override`} /></label>
+    <small className="field-hint">{sideLabel} currency is read from amount values when present; this override fills in missing currency labels.</small>
+  </section>;
+}
+
+/** The date, amount and mandatory dimensions used by the specialized ledger matcher. */
+export function DateAmountMappingEditor({ config, onChange, sourceLabel, destinationLabel }: EditorProps) {
+  const update = (change: Partial<DateAmountSettings>) => onChange({ ...config, dateAmount: { ...config.dateAmount, ...change } });
+  return <section className="date-amount-editor" aria-label="Date and amount mapping">
+    <div className="date-amount-side-grid">
+      <DateAmountSideFields side="source" label={sourceLabel} columns={config.file1Columns} settings={config.dateAmount} onChange={update} />
+      <DateAmountSideFields side="destination" label={destinationLabel} columns={config.file2Columns} settings={config.dateAmount} onChange={update} />
+    </div>
+    <p className="date-amount-note">Dates and amounts are normalized independently. Matching text, if selected, is a required exact dimension after case and whitespace normalization. Currency conversion is not performed.</p>
+  </section>;
+}
+
+/** Verification and bounded grouping choices for Date & Amount reports. */
+export function DateAmountReportOptions({ config, onChange }: Omit<EditorProps, "sourceLabel" | "destinationLabel">) {
+  const settings = config.dateAmount;
+  const update = (change: Partial<DateAmountSettings>) => onChange({ ...config, dateAmount: { ...settings, ...change } });
+  return <section className="rule-section date-amount-report-options" aria-label="Date and amount report options">
+    <div className="rule-section-heading"><div><h4>Verification and tolerances</h4><p>Aggregate periods are always reported. Transaction-level matching is a separate, stricter check.</p></div></div>
+    <div className="date-amount-verification" role="group" aria-label="Transaction verification mode">
+      <button type="button" className={settings.verifyTransactions ? "is-active" : ""} aria-pressed={settings.verifyTransactions} onClick={() => update({ verifyTransactions: true })}>Verify transactions</button>
+      <button type="button" className={!settings.verifyTransactions ? "is-active" : ""} aria-pressed={!settings.verifyTransactions} onClick={() => update({ verifyTransactions: false })}>Aggregate balances only</button>
+    </div>
+    {!settings.verifyTransactions && <p className="date-amount-warning" role="note">Aggregate balances do not prove individual transactions match. The report will label transactions as not verified.</p>}
+    <div className="date-amount-report-grid">
+      <label><span>Amount tolerance</span><input type="number" min="0" step="0.01" value={settings.amountTolerance} onChange={(event) => update({ amountTolerance: event.target.value })} aria-label="Amount tolerance" /><small>Non-negative; up to 6 decimal places. Group totals always match exactly.</small></label>
+      <label><span>Date tolerance (days)</span><input type="number" min="0" max="366" step="1" value={settings.dateToleranceDays} onChange={(event) => update({ dateToleranceDays: Math.max(0, Math.min(366, Math.round(Number(event.target.value) || 0))) })} aria-label="Date tolerance in days" /><small>Applied only to unique one-to-one candidates.</small></label>
+    </div>
+    <label className="checkbox-line"><input type="checkbox" checked={settings.allowGroupMatches} onChange={(event) => update({ allowGroupMatches: event.target.checked })} disabled={!settings.verifyTransactions} />Allow exact one-to-many or many-to-one groups</label>
+    {settings.allowGroupMatches && settings.verifyTransactions && <label className="date-amount-group-size"><span>Maximum records in one group</span><input type="number" min="2" max="8" step="1" value={settings.maxGroupSize} onChange={(event) => update({ maxGroupSize: Math.max(2, Math.min(8, Math.round(Number(event.target.value) || 2))) })} /><small>Search is bounded; ambiguous or capped candidates remain for review.</small></label>}
+  </section>;
 }
 
 // ── Extra matching passes ───────────────────────────────────────────────

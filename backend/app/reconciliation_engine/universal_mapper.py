@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 
 from app.reconciliation_engine.cache import to_number
-from app.reconciliation_engine.tolerance import percent_base
+
+
+def _number_or_none(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    return to_number(value)
 
 def build_universal_data_model(
     job_type: str,
@@ -20,6 +27,8 @@ def build_universal_data_model(
     secondary_keys: list[str] | None = None,
     compared_fields: list[str] | None = None,
     extra_metadata: dict | None = None,
+    comparison_field_labels: list[str] | None = None,
+    consume_reconciliation_results: bool = False,
 ) -> dict:
 
     # 1. One difference row per mismatched field. Records are identified by
@@ -32,7 +41,8 @@ def build_universal_data_model(
     has_critical = False
 
     # Analyze reconciliation_results (which contains mismatches)
-    for row in reconciliation_results:
+    comparison_field_labels = list(dict.fromkeys(comparison_field_labels or []))
+    for row_index, row in enumerate(reconciliation_results):
         match_key = str(
             row.get(
                 "COMPOSITE MATCH KEY",
@@ -52,55 +62,64 @@ def build_universal_data_model(
         # Determine specific field differences
         # Keys typically look like "FIELD (FILE 1)", "FIELD (FILE 2)", "FIELD DIFF", "FIELD STATUS"
         fields_processed = set()
-
-        for k in row.keys():
-            if k.endswith(" (FILE 1)"):
-                base_field = k.replace(" (FILE 1)", "")
-                if base_field in fields_processed or base_field == "ROW":
-                    continue
+        candidate_fields = (
+            comparison_field_labels
+            if comparison_field_labels
+            else [
+                key[:-len(" (FILE 1)")]
+                for key in row
+                if key.endswith(" (FILE 1)")
+            ]
+        )
+        for base_field in candidate_fields:
+            if base_field in fields_processed or base_field == "ROW":
+                continue
+            if f"{base_field} (FILE 1)" not in row:
+                continue
                 
-                f1_val = row.get(f"{base_field} (FILE 1)")
-                f2_val = row.get(f"{base_field} (FILE 2)")
-                status = row.get(f"{base_field} STATUS")
-                diff = row.get(f"{base_field} DIFF")
-                confidence = row.get(f"{base_field} CONFIDENCE")
+            f1_val = row.get(f"{base_field} (FILE 1)")
+            f2_val = row.get(f"{base_field} (FILE 2)")
+            status = row.get(f"{base_field} STATUS")
+            diff = row.get(f"{base_field} DIFF")
+            confidence = row.get(f"{base_field} CONFIDENCE")
 
-                # The engine reports a field only when its values are not
-                # identical, so every reported field is a difference, including
-                # near matches ("Minor spelling variation", 89%). Listing only
-                # outright mismatches left records counted but not shown.
-                if status is not None:
-                    fields_processed.add(base_field)
-                    
-                    # Update field stats
-                    field_mismatch_counts[base_field] = field_mismatch_counts.get(base_field, 0) + 1
-                    
-                    exc_type = "Value Difference" if diff is not None else "Text Difference"
-                    if diff is not None and abs(float(diff)) > 1000:
-                        has_critical = True
-                        
-                    exc_type_counts[exc_type] = exc_type_counts.get(exc_type, 0) + 1
-                    
-                    # A share of the larger of the two values, the measure a
-                    # "± %" tolerance uses, so the column agrees with it.
-                    diff_pct = None
-                    if diff is not None and to_number(f1_val) is not None and to_number(f2_val) is not None:
-                        base = percent_base(f1_val, f2_val)
-                        if base:
-                            diff_pct = float(diff) / base
-                        
-                    exceptions.append({
-                        **record_context,
-                        "Field": base_field,
-                        "File 1 Value": f1_val,
-                        "File 2 Value": f2_val,
-                        "Difference": diff,
-                        "Difference %": diff_pct,
-                        **({"Similarity": f"{status} ({confidence})"} if status != "Mismatch" and confidence else {}),
-                        **trailing_context,
-                    })
-                else:
-                    field_match_counts[base_field] = field_match_counts.get(base_field, 0) + 1
+            # The engine reports a field only when its values are not
+            # identical, so every reported field is a difference, including
+            # near matches ("Minor spelling variation", 89%). Listing only
+            # outright mismatches left records counted but not shown.
+            if status is not None:
+                fields_processed.add(base_field)
+
+                field_mismatch_counts[base_field] = field_mismatch_counts.get(base_field, 0) + 1
+
+                exc_type = "Value Difference" if diff is not None else "Text Difference"
+                if diff is not None and abs(float(diff)) > 1000:
+                    has_critical = True
+
+                exc_type_counts[exc_type] = exc_type_counts.get(exc_type, 0) + 1
+
+                diff_pct = None
+                if diff is not None:
+                    number_1, number_2 = _number_or_none(f1_val), _number_or_none(f2_val)
+                    base = max(abs(number_1), abs(number_2)) if number_1 is not None and number_2 is not None else 0.0
+                    if base:
+                        diff_pct = float(diff) / base
+
+                exceptions.append({
+                    **record_context,
+                    "Field": base_field,
+                    "File 1 Value": f1_val,
+                    "File 2 Value": f2_val,
+                    "Difference": diff,
+                    "Difference %": diff_pct,
+                    **({"Similarity": f"{status} ({confidence})"} if status != "Mismatch" and confidence else {}),
+                    **trailing_context,
+                })
+            else:
+                field_match_counts[base_field] = field_match_counts.get(base_field, 0) + 1
+
+        if consume_reconciliation_results:
+            reconciliation_results[row_index] = None
     
     # Add missing records to exception summary
     if file_1_not_found:

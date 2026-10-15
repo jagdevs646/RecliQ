@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import numpy as np
 import pandas as pd
 
 from app.reconciliation_engine.cache import (
@@ -17,6 +19,7 @@ from app.reconciliation_engine.cache import (
     detect_number_format,
     to_decimal,
     to_number,
+    tokens,
     use_date_convention,
 )
 from app.reconciliation_engine.matching import (
@@ -30,8 +33,24 @@ from app.reconciliation_engine.matching import (
     match_threshold,
     non_empty_values,
 )
-from app.reconciliation_engine.matching.indexed_matcher import normalized_identity_value
-from app.reconciliation_engine.matching.pass_matcher import pass_label, run_pass, validate_pass
+from app.reconciliation_engine.matching.indexed_matcher import (
+    composite_identity_key,
+    detect_key_matcher_type,
+    normalized_identity_value,
+    normalized_key_identity,
+)
+from app.reconciliation_engine.column_engine import (
+    DatePairComparison,
+    IdentifierPairComparison,
+    NumericPairComparison,
+    TextPairComparison,
+    compare_date_pairs,
+    compare_identifier_pairs,
+    compare_numeric_pairs,
+    compare_text_pairs,
+    unique_exact_pairs,
+)
+from app.reconciliation_engine.matching.pass_matcher import pass_label, run_column_pass, run_pass, validate_pass
 from app.reconciliation_engine.preprocessing import (
     aggregate_by_key,
     fields_label,
@@ -42,7 +61,7 @@ from app.reconciliation_engine.preprocessing import (
     read_excel_columns,
 )
 from app.reconciliation_engine.normalization import build_normalizer, normalize_dataframe, use_normalizer
-from app.reconciliation_engine.normalization.entities import EntityNormalizer, active_normalizer
+from app.reconciliation_engine.normalization.entities import EntityNormalizer
 from app.reconciliation_engine.tolerance import Band, apply_tolerance_bands, prepare_bands
 from app.reconciliation_engine.transformations import TransformationResult, apply_transformations, original_values
 from app.reconciliation_engine.learning import LearningContext
@@ -77,6 +96,7 @@ REQUIRED_GST_COLUMNS = [
 GST_AMOUNT_COLUMNS = ["TAXABLE VALUE", "IGST", "CGST", "SGST", "CESS", "INVOICE VALUE"]
 GST_MERGE_KEY_COLUMNS = ["GSTR", "NAME OF TRADER/FIRM/COMPANY", "INVOICE NO.", "INVOICE DATE"]
 GST_TEXT_REVIEW_THRESHOLD = 85
+_ENGINE_VERSIONS = {"rows": "rows-v1", "columns": "columns-v1"}
 
 
 @dataclass
@@ -104,6 +124,7 @@ class _GenericReconciliationRequest:
     evaluator: Evaluator | None
     learning: LearningContext | None
     tolerances: list[dict] | None
+    engine_mode: str
 
 
 @dataclass
@@ -145,6 +166,10 @@ class _PreparedGenericReconciliation:
     secondary_columns_2: list[str]
     pass_columns_1: list[str]
     pass_columns_2: list[str]
+    display_key_columns_1: list[str]
+    display_key_columns_2: list[str]
+    display_keys_nonblank_1: bool
+    display_keys_nonblank_2: bool
     allowed_f1_cols: set[str]
     allowed_f2_cols: set[str]
 
@@ -153,15 +178,16 @@ class _PreparedGenericReconciliation:
         return f"{count} rows combined (rows {row.get('__GROUPED_ROWS__', '')})" if count and count > 1 else ""
 
     @staticmethod
-    def display_key(row: dict[str, Any], key_columns: list[str], pass_columns: list[str]) -> str:
-        columns = key_columns or list(dict.fromkeys(pass_columns))
+    def display_key(row: dict[str, Any], columns: list[str], values_nonblank: bool = False) -> str:
+        if values_nonblank:
+            return " | ".join(str(row.get(column)) for column in columns)
         return " | ".join("" if is_blank(row.get(column)) else str(row.get(column)) for column in columns).strip(" |")
 
     def decision_keys(self, file_1_row: dict[str, Any], file_2_row: dict[str, Any]) -> tuple[str, str]:
         """The values a reviewer sees (MATCH KEY / CANDIDATE KEY) and decides on."""
         return (
-            self.display_key(file_1_row, self.file_1_id_col, self.pass_columns_1),
-            self.display_key(file_2_row, self.file_2_id_col, self.pass_columns_2),
+            self.display_key(file_1_row, self.display_key_columns_1, self.display_keys_nonblank_1),
+            self.display_key(file_2_row, self.display_key_columns_2, self.display_keys_nonblank_2),
         )
 
     def rejected_note(self, file_1_row: dict[str, Any], rejected_rows: list[dict[str, Any]], pass_name: str = "") -> str:
@@ -182,11 +208,23 @@ class _PreparedGenericReconciliation:
         for source, destination, kind in zip(self.file_1_id_col, self.file_2_id_col, self.raw_key_types):
             if kind in _TEXT_LIKE_TYPES:
                 applied += self.request.normalizer.explain(file_1_row.get(source), file_2_row.get(destination))
+            elif kind in _IDENTIFIER_TYPES and _identifier_formatting_matches(
+                file_1_row.get(source), file_2_row.get(destination), source, destination, kind
+            ):
+                applied.append("Identifier punctuation, spacing, and case ignored")
         for condition in self.normalized_secondary_conditions:
             if condition.get("comparison_method") == "exact_text":
-                applied += self.request.normalizer.explain(
-                    file_1_row.get(condition["source_column"]), file_2_row.get(condition["destination_column"])
+                source = file_1_row.get(condition["source_column"])
+                destination = file_2_row.get(condition["destination_column"])
+                kind = condition.get("matcher_type") or detect_key_matcher_type(
+                    [source, destination], condition["source_column"], condition["destination_column"]
                 )
+                if kind in _IDENTIFIER_TYPES and _identifier_formatting_matches(
+                    source, destination, condition["source_column"], condition["destination_column"], kind
+                ):
+                    applied.append("Identifier punctuation, spacing, and case ignored")
+                else:
+                    applied += self.request.normalizer.explain(source, destination)
         return list(dict.fromkeys(applied))
 
 
@@ -203,6 +241,19 @@ def validate_gst_columns(df: pd.DataFrame) -> list[str]:
 # Column-name types that are never amounts, even when the cell holds a number
 # ("Invoice No" 0 vs blank is a missing identifier, not a zero amount).
 _NON_AMOUNT_NAME_TYPES = {"date", "invoice", "gstin", "pan", "identifier", "company_name", "person_name"}
+_IDENTIFIER_TYPES = {"invoice", "gstin", "pan", "identifier"}
+
+
+def _identifier_formatting_matches(
+    value_1: object,
+    value_2: object,
+    column_1: str,
+    column_2: str,
+    matcher_type: str,
+) -> bool:
+    identity_1 = normalized_key_identity(value_1, column_1, column_2, matcher_type)
+    identity_2 = normalized_key_identity(value_2, column_1, column_2, matcher_type)
+    return identity_1 is not None and identity_1 == identity_2 and str(value_1) != str(value_2)
 
 
 def _blank_as_zero(
@@ -337,16 +388,41 @@ def _normalize_secondary_conditions(conditions: list[dict] | None) -> list[dict]
     return normalized
 
 
+def _infer_secondary_key_types(
+    file_1_df: pd.DataFrame,
+    file_2_df: pd.DataFrame,
+    conditions: list[dict],
+) -> None:
+    """Resolve one shared matcher type per exact secondary-key column pair."""
+    for condition in conditions:
+        if condition.get("comparison_method") != "exact_text":
+            continue
+        source_column = condition["source_column"]
+        destination_column = condition["destination_column"]
+        values = non_empty_values(
+            list(file_1_df[source_column].head(500)) + list(file_2_df[destination_column].head(500)),
+            limit=200,
+        )
+        condition["matcher_type"] = detect_key_matcher_type(
+            values, source_column, destination_column
+        )
+
+
 # Up to this many secondary-key candidates are scored directly on primary-key
 # similarity; larger sets are pre-filtered through the primary-key token index.
 _MAX_DIRECT_SIMILARITY_CANDIDATES = 25
 
 
-def _secondary_group_value(method: str):
+def _secondary_group_value(condition: dict):
     """Deterministic normal form of a secondary key, or None if not groupable."""
+    method = str(condition.get("comparison_method", ""))
     if method == "exact_text":
-        normalizer = active_normalizer()
-        return lambda value: None if is_blank(value) else normalizer.identity(value)
+        source_column = str(condition.get("source_column", ""))
+        destination_column = str(condition.get("destination_column", ""))
+        matcher_type = condition.get("matcher_type")
+        return lambda value: normalized_key_identity(
+            value, source_column, destination_column, matcher_type
+        )
     if method == "normalized_date":
         return lambda value: parsed.isoformat() if (parsed := parse_date_value(value)) else None
     return None  # Tolerance and fuzzy conditions do not define an identity.
@@ -356,7 +432,7 @@ def _add_secondary_group_keys(file_1_df: pd.DataFrame, file_2_df: pd.DataFrame, 
     """Add normalized secondary-key columns used to consolidate duplicate rows."""
     group_keys: list[str] = []
     for index, condition in enumerate(conditions):
-        normalize = _secondary_group_value(str(condition.get("comparison_method", "")))
+        normalize = _secondary_group_value(condition)
         if normalize is None:
             continue
         column = f"__SECONDARY_KEY_{index}__"
@@ -383,6 +459,18 @@ def _numeric_rule_columns(df: pd.DataFrame, field_lists: list[list[str]]) -> lis
     return [field for field in fields if field in df.columns]
 
 
+def _columns_have_no_blanks(df: pd.DataFrame, columns: list[str]) -> bool:
+    for column in columns:
+        values = df[column]
+        if values.isna().any():
+            return False
+        if values.dtype == object or pd.api.types.is_string_dtype(values.dtype):
+            blank = values.astype(str).str.strip().str.lower().isin({"", "nan", "none", "nat"})
+            if blank.any():
+                return False
+    return True
+
+
 def _secondary_mismatches(file_1_row: dict, file_2_row: dict, conditions: list[dict]) -> list[str]:
     """Describe which secondary keys differ for a row whose primary key matched."""
     return [
@@ -400,15 +488,28 @@ def _failed_secondary_conditions(file_1_row: dict, file_2_row: dict, conditions:
         destination_value = file_2_row.get(condition["destination_column"])
         method = condition.get("comparison_method")
         if method == "exact_text":
-            # Exact after deterministic normalization ("Pvt" == "Private").
-            passed = active_normalizer().equivalent(source_value, destination_value)
+            source_column = condition["source_column"]
+            destination_column = condition["destination_column"]
+            matcher_type = condition.get("matcher_type") or detect_key_matcher_type(
+                [source_value, destination_value], source_column, destination_column
+            )
+            source_identity = normalized_key_identity(source_value, source_column, destination_column, matcher_type)
+            destination_identity = normalized_key_identity(destination_value, source_column, destination_column, matcher_type)
+            passed = source_identity is not None and source_identity == destination_identity
         elif method == "normalized_date":
             passed = parse_date_value(source_value) is not None and parse_date_value(source_value) == parse_date_value(destination_value)
         elif method == "numeric_tolerance":
             left, right = to_number(source_value), to_number(destination_value)
             passed = left is not None and right is not None and abs(left - right) <= float(condition.get("numeric_tolerance") or 0)
+        elif method == "matcher_based":
+            source_tokens = set(tokens(source_value, use_synonyms=True))
+            destination_tokens = set(tokens(destination_value, use_synonyms=True))
+            passed = bool(
+                source_tokens.intersection(destination_tokens)
+                and compare_values(source_value, destination_value, "", condition["destination_column"]).matched
+            )
         else:
-            passed = compare_values(source_value, destination_value, condition["source_column"], condition["destination_column"]).matched
+            passed = False
         if not passed:
             failed.append(index)
     return failed
@@ -563,6 +664,7 @@ def run_generic_reconciliation(
     resolution_rules: list[dict] | None = None,
     learning: LearningContext | None = None,
     tolerances: list[dict] | None = None,
+    engine_mode: str | None = None,
 ) -> dict:
     """Reconcile one sheet rule.
 
@@ -577,12 +679,16 @@ def run_generic_reconciliation(
     """
     normalizer = build_normalizer(normalization, saved_aliases or ())
     evaluator = Evaluator.from_config(resolution_rules, learning)
+    engine_mode = str(engine_mode if engine_mode is not None else os.getenv("ENGINE", "rows")).strip().lower()
+    if engine_mode not in _ENGINE_VERSIONS:
+        raise ValueError("Reconciliation engine must be either 'rows' or 'columns'.")
     with use_date_convention(date_dayfirst), use_normalizer(normalizer):
         return _run_generic_reconciliation(
             file_1_df, file_2_df, output_path, key_file_1, key_file_2, rules,
             include_columns_file_1, include_columns_file_2, progress_callback, file_1_name, file_2_name,
             is_cancelled, write_report, secondary_conditions, similarity_policy, date_only_override,
             transformations, matching_passes, normalizer, date_dayfirst, evaluator, learning, tolerances,
+            engine_mode,
         )
 
 
@@ -610,6 +716,7 @@ def _run_generic_reconciliation(
     evaluator: Evaluator | None = None,
     learning: LearningContext | None = None,
     tolerances: list[dict] | None = None,
+    engine_mode: str = "rows",
 ) -> dict:
     request = _GenericReconciliationRequest(
         file_1_df=file_1_df,
@@ -635,6 +742,7 @@ def _run_generic_reconciliation(
         evaluator=evaluator,
         learning=learning,
         tolerances=tolerances,
+        engine_mode=engine_mode,
     )
     prepared = _prepare_generic_reconciliation(request)
     matches = _run_key_pass(prepared)
@@ -710,6 +818,7 @@ def _prepare_generic_reconciliation(
     for condition in normalized_secondary_conditions:
         validate_columns(file_1_df, [condition["source_column"]], "File 1 secondary condition")
         validate_columns(file_2_df, [condition["destination_column"]], "File 2 secondary condition")
+    _infer_secondary_key_types(file_1_df, file_2_df, normalized_secondary_conditions)
     for left, right in normalized_rules:
         validate_columns(file_1_df, left, "File 1 rule")
         validate_columns(file_2_df, right, "File 2 rule")
@@ -900,11 +1009,15 @@ def _prepare_generic_reconciliation(
             "Date-only matching can be ambiguous because multiple transactions may occur on the same date. "
             "Select at least one additional identifying column or explicitly enable the date-only override."
         )
-    indexed_matcher = (
-        IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types, build_fuzzy_indexes=False)
-        if has_keys else None
-    )
-    file_2_records = indexed_matcher.rows if indexed_matcher is not None else file_2_df.to_dict('records')
+    if request.engine_mode == "columns":
+        indexed_matcher = None
+        file_2_records = file_2_df.to_dict("records")
+    else:
+        indexed_matcher = (
+            IndexedCandidateMatcher(file_2_df, file_2_match_keys, key_matcher_types, build_fuzzy_indexes=False)
+            if has_keys else None
+        )
+        file_2_records = indexed_matcher.rows if indexed_matcher is not None else file_2_df.to_dict("records")
     is_composite_key = len(file_1_match_keys) > 1
     primary_key_1 = file_1_match_keys[0] if has_keys else None
     primary_key_2 = file_2_match_keys[0] if has_keys else None
@@ -914,6 +1027,14 @@ def _prepare_generic_reconciliation(
     secondary_columns_2 = [condition["destination_column"] for condition in normalized_secondary_conditions]
     pass_columns_1 = [config[f] for config in passes for f in ("amount_source", "date_source", "narrative_source") if config.get(f)]
     pass_columns_2 = [config[f] for config in passes for f in ("amount_destination", "date_destination", "narrative_destination") if config.get(f)]
+    display_key_columns_1 = file_1_id_col or list(dict.fromkeys(pass_columns_1))
+    display_key_columns_2 = file_2_id_col or list(dict.fromkeys(pass_columns_2))
+    display_keys_nonblank_1 = (
+        request.engine_mode == "columns" and _columns_have_no_blanks(file_1_df, display_key_columns_1)
+    )
+    display_keys_nonblank_2 = (
+        request.engine_mode == "columns" and _columns_have_no_blanks(file_2_df, display_key_columns_2)
+    )
     allowed_f1_cols = set(file_1_match_keys + file_1_id_col + secondary_columns_1 + pass_columns_1 + [r[0][i] for r in normalized_rules for i in range(len(r[0]))] + file_1_extra)
     allowed_f2_cols = set(file_2_match_keys + file_2_id_col + secondary_columns_2 + pass_columns_2 + [r[1][i] for r in normalized_rules for i in range(len(r[1]))] + file_2_extra)
 
@@ -955,6 +1076,10 @@ def _prepare_generic_reconciliation(
         secondary_columns_2=secondary_columns_2,
         pass_columns_1=pass_columns_1,
         pass_columns_2=pass_columns_2,
+        display_key_columns_1=display_key_columns_1,
+        display_key_columns_2=display_key_columns_2,
+        display_keys_nonblank_1=display_keys_nonblank_1,
+        display_keys_nonblank_2=display_keys_nonblank_2,
         allowed_f1_cols=allowed_f1_cols,
         allowed_f2_cols=allowed_f2_cols,
     )
@@ -981,10 +1106,82 @@ def _run_key_pass(prepared: _PreparedGenericReconciliation) -> _GenericMatchStat
     tracker.matching_records()
     # ── Pass 1: primary key (and mandatory secondary keys) ────────────────
     file_1_records = file_1_df.to_dict('records')
-    outcomes: list[dict] = []
+    outcomes: list[dict] = [
+        {
+            "row_idx": row_idx, "row": row, "classification": MatchClassification.NOT_FOUND,
+            "key_result": None, "threshold": None, "best_idx": None, "file_2_row": None, "candidate_row": None,
+            "secondary_mismatch": [], "pass_label": "", "explanation": None, "method": "", "learned_note": "",
+            "key_partners": {},
+        }
+        for row_idx, row in enumerate(file_1_records)
+    ]
     matched_file_2_indices: set[object] = set()
     next_cancel_check: float | None = None
-    for row_idx, file_1_row in enumerate(file_1_records):
+    fallback_positions = set(range(len(outcomes)))
+
+    if request.engine_mode == "columns" and has_keys:
+        identity_columns_1 = [f"__KEY_{index}__" for index in range(len(file_1_match_keys))]
+        identity_columns_2 = [f"__KEY_{index}__" for index in range(len(prepared.file_2_match_keys))]
+        destination_indices = list(prepared.file_2_df.index)
+        for source_position, destination_position in unique_exact_pairs(
+            file_1_df, prepared.file_2_df, identity_columns_1, identity_columns_2
+        ):
+            file_1_row = file_1_records[source_position]
+            file_2_row = prepared.file_2_records[destination_position]
+            if _failed_secondary_conditions(file_1_row, file_2_row, normalized_secondary_conditions):
+                continue
+
+            if is_composite_key:
+                identity = composite_identity_key(
+                    [file_1_row.get(column) for column in file_1_match_keys], key_matcher_types
+                )
+                if identity is None:
+                    continue
+                normalized = " | ".join(identity)
+                key_result = MatchResult(
+                    True, 100, "composite", "Exact composite key match",
+                    f"Exact normalized match across {len(file_1_match_keys)} primary-key columns",
+                    normalized, normalized,
+                )
+            else:
+                identity = normalized_identity_value(
+                    file_1_row.get(file_1_match_keys[0]), key_matcher_types[0]
+                )
+                if identity is None:
+                    continue
+                key_result = MatchResult(
+                    True, 100, key_matcher_types[0], "Exact normalized primary-key match",
+                    value1_normalized=identity, value2_normalized=identity,
+                )
+
+            destination_index = destination_indices[destination_position]
+            outcomes[source_position].update(
+                classification=MatchClassification.EXACT_MATCH,
+                key_result=key_result,
+                best_idx=destination_index,
+                file_2_row=file_2_row,
+                candidate_row=file_2_row,
+                pass_label="Primary key",
+            )
+            matched_file_2_indices.add(destination_index)
+            fallback_positions.discard(source_position)
+
+        if not normalized_secondary_conditions:
+            # With no secondary rule, preparation has already consolidated every
+            # complete duplicate key. Non-joined rows are unmatched, not fuzzy candidates.
+            fallback_positions.clear()
+
+        if fallback_positions and indexed_matcher is None:
+            indexed_matcher = IndexedCandidateMatcher(
+                prepared.file_2_df,
+                prepared.file_2_match_keys,
+                prepared.key_matcher_types,
+                build_fuzzy_indexes=False,
+            )
+            prepared.indexed_matcher = indexed_matcher
+
+    for row_idx in sorted(fallback_positions):
+        file_1_row = file_1_records[row_idx]
         if is_cancelled and row_idx % 25 == 0:
             now = time.monotonic()
             if next_cancel_check is None or now >= next_cancel_check:
@@ -992,13 +1189,7 @@ def _run_key_pass(prepared: _PreparedGenericReconciliation) -> _GenericMatchStat
                 if is_cancelled():
                     raise InterruptedError("Reconciliation cancelled by user")
 
-        outcome = {
-            "row_idx": row_idx, "row": file_1_row, "classification": MatchClassification.NOT_FOUND,
-            "key_result": None, "threshold": None, "best_idx": None, "file_2_row": None, "candidate_row": None,
-            "secondary_mismatch": [], "pass_label": "", "explanation": None, "method": "", "learned_note": "",
-            "key_partners": {},
-        }
-        outcomes.append(outcome)
+        outcome = outcomes[row_idx]
         if not has_keys:
             continue
 
@@ -1059,7 +1250,8 @@ def _run_key_pass(prepared: _PreparedGenericReconciliation) -> _GenericMatchStat
 
     # ── Pass 1b: similar primary keys after all exact matches are reserved ──
     if has_keys and normalized_secondary_conditions:
-        for row_idx, outcome in enumerate(outcomes):
+        for row_idx in sorted(fallback_positions):
+            outcome = outcomes[row_idx]
             if row_idx % 25 == 0:
                 now = time.monotonic()
                 if next_cancel_check is None or now >= next_cancel_check:
@@ -1196,7 +1388,8 @@ def _run_keyless_passes(
                     return False
                 return not (respect and _failed_secondary_conditions(source_row, destination_row, remaining))
 
-            matches, ambiguities = run_pass(config, open_sources, open_destinations, check)
+            pass_runner = run_column_pass if request.engine_mode == "columns" else run_pass
+            matches, ambiguities = pass_runner(config, open_sources, open_destinations, check)
             for match in matches:
                 outcome = outcomes[match.source_position]
                 destination_row = file_2_rows_all[file_2_positions[match.destination_position]]
@@ -1226,6 +1419,98 @@ def _run_keyless_passes(
                         classification=MatchClassification.AMBIGUOUS_MATCH,
                         explanation=f"{label}: {ambiguity.detail}, so none was chosen.",
                     )
+
+
+def _prepare_column_comparisons(
+    prepared: _PreparedGenericReconciliation,
+    outcomes: list[dict[str, Any]],
+) -> tuple[
+    dict[int, TextPairComparison],
+    dict[int, NumericPairComparison],
+    dict[int, IdentifierPairComparison],
+    dict[int, DatePairComparison],
+    np.ndarray,
+]:
+    """Batch safe one-column comparisons before building result rows."""
+    pair_positions = np.full(len(outcomes), -1, dtype=np.int64)
+    if prepared.request.engine_mode != "columns" or not prepared.file_2_df.index.is_unique:
+        return {}, {}, {}, {}, pair_positions
+
+    matched_outcomes = [
+        (outcome_index, outcome)
+        for outcome_index, outcome in enumerate(outcomes)
+        if outcome["file_2_row"] is not None and outcome["key_result"] is not None
+    ]
+    if not matched_outcomes:
+        return {}, {}, {}, {}, pair_positions
+
+    destination_positions = prepared.file_2_df.index.get_indexer(
+        [outcome["best_idx"] for _, outcome in matched_outcomes]
+    )
+    if (destination_positions < 0).any():
+        return {}, {}, {}, {}, pair_positions
+
+    source_positions = [outcome["row_idx"] for _, outcome in matched_outcomes]
+    pair_positions[[index for index, _ in matched_outcomes]] = np.arange(len(matched_outcomes))
+    batches: dict[int, TextPairComparison] = {}
+    numeric_batches: dict[int, NumericPairComparison] = {}
+    identifier_batches: dict[int, IdentifierPairComparison] = {}
+    date_batches: dict[int, DatePairComparison] = {}
+    text_types = {"text", "person_name", "company_name"}
+    identifier_types = {"invoice", "gstin", "pan", "identifier"}
+    for rule_index, (
+        (fields_1, fields_2), comparison_type, combination_types,
+        decimal_precision, number_format_1, number_format_2,
+    ) in enumerate(zip(
+        prepared.normalized_rules,
+        prepared.comparison_types,
+        prepared.combination_types,
+        prepared.comparison_precisions,
+        prepared.number_formats_1,
+        prepared.number_formats_2,
+    )):
+        if len(fields_1) != 1 or len(fields_2) != 1 or any(combination_types):
+            continue
+        if fields_1[0] not in prepared.file_1_df.columns or fields_2[0] not in prepared.file_2_df.columns:
+            continue
+        values_1 = prepared.file_1_df[fields_1[0]].iloc[source_positions].tolist()
+        values_2 = prepared.file_2_df[fields_2[0]].iloc[destination_positions].tolist()
+        if comparison_type in text_types:
+            batch = compare_text_pairs(values_1, values_2, prepared.request.normalizer)
+            if batch is not None:
+                batches[rule_index] = batch
+        elif comparison_type == "numeric":
+            batch = compare_numeric_pairs(
+                values_1, values_2, decimal_precision, number_format_1, number_format_2
+            )
+            if batch is not None:
+                numeric_batches[rule_index] = batch
+        elif comparison_type in identifier_types:
+            batch = compare_identifier_pairs(values_1, values_2)
+            if batch is not None:
+                identifier_batches[rule_index] = batch
+        elif comparison_type == "date":
+            batch = compare_date_pairs(values_1, values_2)
+            if batch is not None:
+                date_batches[rule_index] = batch
+    return batches, numeric_batches, identifier_batches, date_batches, pair_positions
+
+
+def _outcome_display_key(
+    prepared: _PreparedGenericReconciliation,
+    outcome: dict[str, Any],
+    side: int,
+    row: dict[str, Any],
+) -> str:
+    cache_key = f"_DISPLAY_KEY_{side}"
+    cached = outcome.get(cache_key)
+    if cached is None:
+        columns = prepared.display_key_columns_1 if side == 1 else prepared.display_key_columns_2
+        nonblank = prepared.display_keys_nonblank_1 if side == 1 else prepared.display_keys_nonblank_2
+        cached = prepared.display_key(row, columns, nonblank)
+        outcome[cache_key] = cached
+    return cached
+
 
 def _build_generic_results(
     prepared: _PreparedGenericReconciliation,
@@ -1260,8 +1545,6 @@ def _build_generic_results(
     secondary_names = prepared.secondary_names
     secondary_columns_1 = prepared.secondary_columns_1
     secondary_columns_2 = prepared.secondary_columns_2
-    pass_columns_1 = prepared.pass_columns_1
-    pass_columns_2 = prepared.pass_columns_2
     allowed_f1_cols = prepared.allowed_f1_cols
     allowed_f2_cols = prepared.allowed_f2_cols
     file_1_name = request.file_1_name
@@ -1275,6 +1558,13 @@ def _build_generic_results(
     raw_key_types = prepared.raw_key_types
     outcomes = matches.outcomes
     matched_file_2_indices = matches.matched_file_2_indices
+    (
+        column_text_batches,
+        column_numeric_batches,
+        column_identifier_batches,
+        column_date_batches,
+        column_pair_positions,
+    ) = _prepare_column_comparisons(prepared, outcomes)
     grouped_rows_note = prepared.grouped_rows_note
     display_key = prepared.display_key
     decision_keys = prepared.decision_keys
@@ -1288,11 +1578,24 @@ def _build_generic_results(
     field_discrepancy_count = 0
     normalization_counts: dict[str, int] = {}
     # ── Results ────────────────────────────────────────────────────────────
-    for outcome in outcomes:
+    for outcome_index, outcome in enumerate(outcomes):
         row_idx, file_1_row = outcome["row_idx"], outcome["row"]
         classification = outcome["classification"]
         key_result, file_2_row, candidate_row = outcome["key_result"], outcome["file_2_row"], outcome["candidate_row"]
         best_idx = outcome["best_idx"]
+        file_1_display_key = _outcome_display_key(prepared, outcome, 1, file_1_row)
+        file_2_display_key = (
+            _outcome_display_key(prepared, outcome, 2, file_2_row)
+            if file_2_row is not None else None
+        )
+        candidate_display_key = (
+            file_2_display_key
+            if candidate_row is file_2_row and file_2_display_key is not None
+            else prepared.display_key(
+                candidate_row, prepared.display_key_columns_2, prepared.display_keys_nonblank_2
+            )
+            if candidate_row is not None else ""
+        )
         normalization_applied = (
             key_normalization(file_1_row, file_2_row)
             if file_2_row is not None and outcome["pass_label"] == "Primary key"
@@ -1315,7 +1618,7 @@ def _build_generic_results(
         review_history = learned_confidence = ""
         confirmed_by = None
         if classification is MatchClassification.EXCEPTION_MATCH and file_2_row is not None and key_result is not None:
-            key_1, key_2 = decision_keys(file_1_row, file_2_row)
+            key_1, key_2 = file_1_display_key, file_2_display_key or ""
             if learning is not None:
                 review_history, learned_confidence = learning.describe(key_1, key_2, method, key_result.confidence)
                 if review_history:
@@ -1341,8 +1644,8 @@ def _build_generic_results(
             "MATCH CONFIDENCE": f"{key_result.confidence}%" if key_result else "0%",
             "MATCH THRESHOLD": f"{outcome['threshold']}%" if outcome["threshold"] is not None else "",
             # Raw key values make every audit row traceable without row lookups.
-            "MATCH KEY": display_key(file_1_row, file_1_id_col, pass_columns_1),
-            "CANDIDATE KEY": display_key(candidate_row, file_2_id_col, pass_columns_2) if candidate_row is not None else "",
+            "MATCH KEY": file_1_display_key,
+            "CANDIDATE KEY": candidate_display_key,
         }
         if passes and outcome["pass_label"]:
             identity_record["MATCH PASS"] = outcome["pass_label"]
@@ -1403,11 +1706,11 @@ def _build_generic_results(
             reconciliation_result["MATCH PASS"] = outcome["pass_label"]
         reconciliation_result.update(learned_fields)
         if not has_keys:
-            reconciliation_result["MATCH KEY"] = display_key(file_1_row, [], pass_columns_1)
-            reconciliation_result["MATCHED KEY"] = display_key(file_2_row, [], pass_columns_2)
+            reconciliation_result["MATCH KEY"] = file_1_display_key
+            reconciliation_result["MATCHED KEY"] = file_2_display_key or ""
         elif is_composite_key:
-            reconciliation_result["COMPOSITE MATCH KEY"] = display_key(file_1_row, file_1_id_col, [])
-            reconciliation_result["MATCHED COMPOSITE KEY"] = display_key(file_2_row, file_2_id_col, [])
+            reconciliation_result["COMPOSITE MATCH KEY"] = file_1_display_key
+            reconciliation_result["MATCHED COMPOSITE KEY"] = file_2_display_key or ""
             for source_column, destination_column in zip(file_1_id_col, file_2_id_col):
                 reconciliation_result[source_column] = file_1_row.get(source_column)
                 reconciliation_result[f"MATCHED {destination_column}"] = file_2_row.get(destination_column)
@@ -1438,34 +1741,109 @@ def _build_generic_results(
         has_field_difference = False
         field_rules: list[str] = []
         resolved_differences: list[str] = []
-        for (
+        for rule_index, (
             (file_1_fields, file_2_fields),
             comparison_type,
             (combination_type_file_1, combination_type_file_2),
             decimal_precision,
             number_format_file_1,
             number_format_file_2,
-        ) in zip(
+        ) in enumerate(zip(
             normalized_rules,
             comparison_types,
             prepared.combination_types,
             comparison_precisions,
             number_formats_1,
             number_formats_2,
-        ):
-            differences = compare_rule_values(
-                file_1_row,
-                file_2_row,
-                file_1_fields,
-                file_2_fields,
-                field_rules,
-                matcher_type_override=comparison_type,
-                decimal_precision=decimal_precision,
-                number_format_file_1=number_format_file_1,
-                number_format_file_2=number_format_file_2,
-                combination_type_file_1=combination_type_file_1,
-                combination_type_file_2=combination_type_file_2,
-            )
+        )):
+            batch = column_text_batches.get(rule_index)
+            numeric_batch = column_numeric_batches.get(rule_index)
+            identifier_batch = column_identifier_batches.get(rule_index)
+            date_batch = column_date_batches.get(rule_index)
+            pair_position = int(column_pair_positions[outcome_index])
+            if batch is not None and pair_position >= 0 and batch.equal[pair_position]:
+                field_rules.extend(batch.normalization_rules.get(pair_position, ()))
+                differences = {}
+            elif batch is not None and pair_position >= 0 and batch.scores[pair_position] >= 0:
+                label = fields_label(file_1_fields)
+                score = int(batch.scores[pair_position])
+                status = (
+                    "Minor spelling variation" if score >= 85
+                    else "Possible Match - Manual Review" if score >= 75
+                    else "Mismatch"
+                )
+                differences = {
+                    f"{label} (FILE 1)": batch.values_1[pair_position],
+                    f"{label} (FILE 2)": batch.values_2[pair_position],
+                    f"{label} CONFIDENCE": f"{score}%",
+                    f"{label} STATUS": status,
+                }
+            elif (
+                numeric_batch is not None
+                and pair_position >= 0
+                and numeric_batch.valid[pair_position]
+            ):
+                if numeric_batch.equal[pair_position]:
+                    differences = {}
+                else:
+                    label = fields_label(file_1_fields)
+                    differences = {
+                        f"{label} (FILE 1)": file_1_row.get(file_1_fields[0]),
+                        f"{label} (FILE 2)": file_2_row.get(file_2_fields[0]),
+                        f"{label} DIFF": float(numeric_batch.differences[pair_position]),
+                        f"{label} STATUS": "Mismatch",
+                    }
+            elif (
+                identifier_batch is not None
+                and pair_position >= 0
+                and identifier_batch.valid[pair_position]
+            ):
+                confidence = int(identifier_batch.confidence[pair_position])
+                if confidence == 100:
+                    differences = {}
+                else:
+                    label = fields_label(file_1_fields)
+                    differences = {
+                        f"{label} (FILE 1)": collect_rule_value(
+                                file_1_row, file_1_fields, known_matcher_type=comparison_type
+                        )[0],
+                        f"{label} (FILE 2)": collect_rule_value(
+                                file_2_row, file_2_fields, known_matcher_type=comparison_type
+                        )[0],
+                        f"{label} CONFIDENCE": f"{confidence}%",
+                        f"{label} STATUS": (
+                            "Identifier formatting difference only" if confidence == 97 else "Mismatch"
+                        ),
+                    }
+            elif date_batch is not None and pair_position >= 0 and date_batch.valid[pair_position]:
+                if date_batch.equal[pair_position]:
+                    differences = {}
+                else:
+                    label = fields_label(file_1_fields)
+                    differences = {
+                        f"{label} (FILE 1)": collect_rule_value(
+                            file_1_row, file_1_fields, known_matcher_type=comparison_type
+                        )[0],
+                        f"{label} (FILE 2)": collect_rule_value(
+                            file_2_row, file_2_fields, known_matcher_type=comparison_type
+                        )[0],
+                        f"{label} CONFIDENCE": "0%",
+                        f"{label} STATUS": "Mismatch",
+                    }
+            else:
+                differences = compare_rule_values(
+                    file_1_row,
+                    file_2_row,
+                    file_1_fields,
+                    file_2_fields,
+                    field_rules,
+                    matcher_type_override=comparison_type,
+                    decimal_precision=decimal_precision,
+                    number_format_file_1=number_format_file_1,
+                    number_format_file_2=number_format_file_2,
+                    combination_type_file_1=combination_type_file_1,
+                    combination_type_file_2=combination_type_file_2,
+                )
             if differences and evaluator is not None:
                 label = fields_label(file_1_fields)
                 value_1, value_2 = differences.get(f"{label} (FILE 1)"), differences.get(f"{label} (FILE 2)")
@@ -1507,6 +1885,11 @@ def _build_generic_results(
         stays_in_review=lambda record: record["IDENTITY CLASSIFICATION"] == MatchClassification.EXCEPTION_MATCH.value,
     )
     field_discrepancy_count -= tolerance.cleared_records
+    reconciliation_record_count = len(reconciliation_results)
+    confidence_review_count = sum(
+        1 for row in reconciliation_results
+        if int(str(row.get("MATCH CONFIDENCE", "100")).replace("%", "") or 0) < 100
+    )
 
     tracker.comparing_columns()
 
@@ -1525,7 +1908,9 @@ def _build_generic_results(
             if rule is not None:
                 auto_resolved.append({
                     **resolution_fields(rule, f"Only in {file_2_name}", "only_in_destination"),
-                    "Record": display_key(file_2_records[i], file_2_id_col, pass_columns_2),
+                    "Record": display_key(
+                        file_2_records[i], prepared.display_key_columns_2, prepared.display_keys_nonblank_2
+                    ),
                     **clean_f2_row, **referenced_values(rule, file_2_records[i]),
                 })
                 continue
@@ -1557,6 +1942,8 @@ def _build_generic_results(
             for condition in normalized_secondary_conditions
         ],
         compared_fields=[f"{fields_label(left)} ↔ {fields_label(right)}" for left, right in normalized_rules],
+        comparison_field_labels=[fields_label(left) for left, _ in normalized_rules],
+        consume_reconciliation_results=request.engine_mode == "columns",
         extra_metadata={
             "transformations": transformed_1.applied + [
                 step for step in transformed_2.applied if step not in transformed_1.applied
@@ -1571,6 +1958,8 @@ def _build_generic_results(
             "date_convention": "Day first (DD/MM/YYYY)" if date_dayfirst else "Month first (MM/DD/YYYY)",
             "numeric_precision": precision_metadata,
             "number_formats": number_format_metadata,
+            "engine": request.engine_mode,
+            "engine_version": _ENGINE_VERSIONS[request.engine_mode],
             "resolution_rules": [f"{rule.label()}: {describe_rule(rule)}" for rule in (evaluator.rules if evaluator else [])],
             "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
             "tolerance_bands": [band.describe() for band in tolerance_bands],
@@ -1578,6 +1967,8 @@ def _build_generic_results(
         },
     )
     universal_data["auto_resolved"] = auto_resolved
+    if request.engine_mode == "columns":
+        reconciliation_results.clear()
 
     if write_report:
         generate_enterprise_report(universal_data, {}, output_path)
@@ -1585,16 +1976,14 @@ def _build_generic_results(
     tracker.finalized()
 
     summary_stats = {
-        "report_rows": len(reconciliation_results),
+        "report_rows": reconciliation_record_count,
         "only_in_file_1": len(file_1_not_found),
         "only_in_file_2": len(file_2_not_found),
-        "confidence_review": sum(
-            1 for row in reconciliation_results if int(str(row.get("MATCH CONFIDENCE", "100")).replace("%", "") or 0) < 100
-        ),
+        "confidence_review": confidence_review_count,
         "source_records": len(file_1_df),
         "destination_records": len(file_2_df),
         "matched_records": len(matched_file_2_indices),
-        "fully_matched_records": len(matched_file_2_indices) - len(reconciliation_results),
+        "fully_matched_records": len(matched_file_2_indices) - reconciliation_record_count,
         "field_discrepancies": field_discrepancy_count,
         "exact_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXACT_MATCH.value for item in identity_resolution),
         "exception_matches": sum(item["IDENTITY CLASSIFICATION"] == MatchClassification.EXCEPTION_MATCH.value for item in identity_resolution),
@@ -1668,7 +2057,7 @@ def run_gst_reconciliation(
 
     tracker.building_indexes()
 
-    gstr_groups_2 = {gstr: group for gstr, group in df2.groupby("GSTR")}
+    gstr_groups_2 = {gstr: group for gstr, group in df2.groupby("__KEY_GSTR")}
     gstr_matchers_2 = {
         gstr: IndexedCandidateMatcher(group, "INVOICE NO.", "invoice")
         for gstr, group in gstr_groups_2.items()
@@ -1689,23 +2078,29 @@ def run_gst_reconciliation(
         if is_cancelled and row_idx % 25 == 0 and is_cancelled():
             raise InterruptedError("Reconciliation cancelled by user")
 
-        gstr = row1.get("GSTR")
+        gstr_key = row1.get("__KEY_GSTR")
 
-        matcher = gstr_matchers_2.get(gstr)
+        matcher = gstr_matchers_2.get(gstr_key)
         if matcher is None:
-            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
             only_in_file1.append(clean_r1)
             continue
 
-        best_idx, row2, invoice_result = matcher.find_best_match(
-            row1.get("INVOICE NO."),
-            "INVOICE NO.",
-            matched_file2_indices,
+        exact_invoice_candidates = matcher.find_exact_candidates(
+            row1.get("INVOICE NO."), matched_file2_indices
         )
+        if len(exact_invoice_candidates) == 1:
+            best_idx, row2, invoice_result = exact_invoice_candidates[0]
+        else:
+            best_idx, row2, invoice_result = matcher.find_best_match(
+                row1.get("INVOICE NO."),
+                "INVOICE NO.",
+                matched_file2_indices,
+            )
 
         if row2 is None or invoice_result is None:
-            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO"}
+            clean_r1 = {k: v for k, v in row1.items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r1["ROW (File 1)"] = row1.get("_ROW_NO", row_idx + 2)
             only_in_file1.append(clean_r1)
             continue
@@ -1716,9 +2111,9 @@ def run_gst_reconciliation(
             "ROW (File 1)": row1.get("_ROW_NO", row_idx + 2),
             "ROW (File 2)": row2.get("_ROW_NO", best_idx + 2),
             # Identify the invoice on every difference line of the report.
-            "MATCH KEY": f"{gstr} | {invoice_1}",
-            "MATCHED KEY": f"{gstr} | {invoice_2}",
-            "GSTR": gstr,
+            "MATCH KEY": f"{row1.get('GSTR')} | {invoice_1}",
+            "MATCHED KEY": f"{row2.get('GSTR')} | {invoice_2}",
+            "GSTR": row1.get("GSTR"),
             "INVOICE NO. (File1)": row1.get("INVOICE NO."),
             "INVOICE NO. (File2)": row2.get("INVOICE NO."),
             "INVOICE MATCH CONFIDENCE": f"{invoice_result.confidence}%",
@@ -1799,7 +2194,7 @@ def run_gst_reconciliation(
     only_in_file2 = []
     for i, idx in enumerate(df2.index):
         if idx in unmatched_df2_indices:
-            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO"}
+            clean_r2 = {k: v for k, v in df2_records[i].items() if k != "_ROW_NO" and not str(k).startswith("__")}
             clean_r2["ROW (File 2)"] = df2_records[i].get("_ROW_NO", idx + 2)
             only_in_file2.append(clean_r2)
 

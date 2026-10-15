@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 
-from app.reconciliation_engine.cache import normalize_text
+from app.reconciliation_engine.cache import compact_identifier, normalize_text
 from app.reconciliation_engine.matching.indexed_matcher import (
     detect_matcher_type,
     detect_primary_key_type,
@@ -26,6 +26,9 @@ MIN_SUGGESTION_SCORE = 0.45
 _ID_NAME = re.compile(r"\b(id|no|num|number|ref|reference|code|invoice|inv|voucher|bill|document|doc|gstin|pan|txn|transaction)\b")
 _AMOUNT_NAME = re.compile(r"\b(amount|amt|total|value|tax|qty|quantity|price|rate|balance|debit|credit|net|gross|sum)\b")
 _IDENTIFIER_TYPES = {"invoice", "gstin", "pan", "identifier"}
+# A column pair whose headings differ ("EMP#" and "ID") is still a key
+# candidate when this share of the smaller file's distinct values is shared.
+_VALUE_OVERLAP = 0.3
 
 
 def _normalized_values(series: pd.Series, matcher_type: str) -> list[str]:
@@ -52,6 +55,35 @@ def detect_date_columns(df: pd.DataFrame) -> list[str]:
     return dates
 
 
+def _identifier_values(df: pd.DataFrame) -> dict[str, set[str]]:
+    """Distinct compacted text per column, for columns whose values are mostly
+    unique and not plain numbers (amounts and counts are never keys)."""
+    found = {}
+    for column in df.columns:
+        if str(column).startswith("__"):
+            continue
+        values = [compact_identifier(value).upper() for value in non_empty_values(df[column].head(SAMPLE_ROWS).tolist(), limit=SAMPLE_ROWS)]
+        values = [value for value in values if value]
+        distinct = set(values)
+        if len(distinct) < 2 or len(distinct) < 0.5 * len(values):
+            continue
+        if sum(re.fullmatch(r"\d+(?:\.\d+)?", value) is not None and len(value) < 6 for value in distinct) > 0.5 * len(distinct):
+            continue
+        found[column] = distinct
+    return found
+
+
+def _value_pairs(df1: pd.DataFrame, df2: pd.DataFrame) -> list[tuple[str, str]]:
+    """Column pairs that share their values, whatever their headings say."""
+    values_1, values_2 = _identifier_values(df1), _identifier_values(df2)
+    pairs = []
+    for source, set_1 in values_1.items():
+        for destination, set_2 in values_2.items():
+            if len(set_1 & set_2) >= _VALUE_OVERLAP * min(len(set_1), len(set_2)):
+                pairs.append((source, destination))
+    return pairs
+
+
 def _candidate_pairs(df1: pd.DataFrame, df2: pd.DataFrame, mappings: Iterable[dict]) -> list[tuple[str, str]]:
     columns_2 = {normalize_text(column): column for column in df2.columns if not str(column).startswith("__")}
     pairs: list[tuple[str, str]] = []
@@ -65,6 +97,7 @@ def _candidate_pairs(df1: pd.DataFrame, df2: pd.DataFrame, mappings: Iterable[di
         source, target = mapping.get("source"), mapping.get("target")
         if target and mapping.get("confidence") in {"High", "Medium"} and source in df1.columns and target in df2.columns:
             pairs.append((source, target))
+    pairs.extend(_value_pairs(df1, df2))
     return list(dict.fromkeys(pairs))
 
 
@@ -99,6 +132,7 @@ def _score_pair(df1: pd.DataFrame, df2: pd.DataFrame, source: str, destination: 
         "destination": destination,
         "score": score,
         "uniqueness": uniqueness,
+        "overlap": overlap,
         "is_date": is_date,
         "is_amount": is_amount,
     }
@@ -154,6 +188,11 @@ def analyze_keys(df1: pd.DataFrame, df2: pd.DataFrame, mappings: Iterable[dict] 
             keys.append(partner)
             result["is_composite"] = True
             result["reason"] = f"{best['source']} repeats across rows; combining it with {partner['source']} identifies each record."
+    else:
+        result["reason"] = (
+            f"{best['overlap']:.0%} of the {best['source']} values also appear in {best['destination']}, "
+            "and each value identifies one record."
+        )
     result["recommended_key"] = [item["source"] for item in keys]
     result["recommended_key_destination"] = [item["destination"] for item in keys]
     result["confidence"] = min(100, int(best["score"] * 100))

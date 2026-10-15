@@ -162,6 +162,25 @@ def test_key_suggestion_uses_data_not_just_names():
     assert result["date_columns_2"] == ["POSTING DATE"]
 
 
+def test_key_suggestion_finds_columns_that_share_values_under_other_headings():
+    """A payroll pair: "EMP#" and "ID" hold the same codes, with no name in common."""
+    source = prepare_dataframe(pd.DataFrame({
+        "EMP#": [f"IGS{i:04d}" for i in range(1, 41)],
+        "State": ["CA", "RI", "OH", "NY"] * 10,
+        "Total ST": [32 + i for i in range(40)],
+    }))
+    destination = prepare_dataframe(pd.DataFrame({
+        "ORG UNIT": ["GM Energy"] * 36,
+        "ID": [f"IGS{i:04d}" for i in range(5, 41)],  # Four employees only in the other file.
+        "REGULAR HOURS HOURS": [32 + i for i in range(4, 40)],
+    }))
+
+    result = analyze_keys(source, destination, [])
+
+    assert (result["recommended_key"], result["recommended_key_destination"]) == (["EMP#"], ["ID"])
+    assert result["reason"] == "100% of the EMP# values also appear in ID, and each value identifies one record."
+
+
 def test_key_suggestion_keeps_long_digit_references_distinct():
     """The run reads 16+ digit references as text, so the suggestion must too."""
     references = [f"98765432109876543{i:03d}" for i in range(1, 60)]

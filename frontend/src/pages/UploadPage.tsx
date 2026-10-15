@@ -12,8 +12,8 @@ import type { SheetPairing } from "../components/SheetPairingStep";
 import { FilePairingStep } from "../components/FilePairingStep";
 import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { PrecheckPanel } from "../components/PrecheckPanel";
-import { DatesAndNamesSettings, MatchingPassesEditor, ToleranceNotices, TransformationsEditor } from "../components/RuleExtras";
-import { applyReadyMadeSetup, readyMadeSetupApplied, availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, suggestSheetPair } from "../lib/plan";
+import { DateAmountMappingEditor, DateAmountReportOptions, DatesAndNamesSettings, MatchingPassesEditor, ToleranceNotices, TransformationsEditor } from "../components/RuleExtras";
+import { applyReadyMadeSetup, readyMadeSetupApplied, readyMadeSetupRelevant, availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, shouldSuggestDateAmount, suggestSheetPair } from "../lib/plan";
 import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
 import { api } from "../services/api";
 import type { DateFormat, ReadyMadeSetup, GenericPlanPayload, GstConfiguration, Job, PrecheckResult, SupportedFormats, UploadedFile, SheetMetadata, SheetRuleDraft, SecondaryMatchCondition } from "../types";
@@ -373,8 +373,8 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
           : status === "error"
             ? config?.tolerances.length && !mappingIsReady(config) ? "Check mapped fields and tolerance values" : "Fix this rule's mappings"
             : status === "not-configured"
-              ? "Add at least one field mapping"
-              : `${mappedFields} mapped field${mappedFields === 1 ? "" : "s"}`;
+              ? config?.method === "date_amount" ? mappingPanelStatus(config) : "Add at least one field mapping"
+              : config?.method === "date_amount" ? mappingPanelStatus(config) : `${mappedFields} mapped field${mappedFields === 1 ? "" : "s"}`;
       return {
         id,
         label: `${pairing.sheet1.name} → ${pairing.sheet2.name}`,
@@ -414,11 +414,13 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
       const detail = config ? ruleStatus(config) : busy ? "Wait for this sheet pair's columns to finish loading." : "Choose matching columns or complete an amount-and-date fallback.";
       return { step: target, ruleId: pairId(pairing), message: `Rule ${index + 1}: ${detail}.` };
     }
-    const detail = !config?.rules.length
-      ? "Add at least one field mapping."
-      : config.tolerances.some((band) => !mappingIsReady(config))
-        ? "Complete or remove invalid tolerance values."
-        : "Complete the field mappings.";
+    const detail = config?.method === "date_amount"
+      ? "Choose valid date and amount columns for both files, then check the date and amount tolerances."
+      : !config?.rules.length
+        ? "Add at least one field mapping."
+        : config.tolerances.some(() => !mappingIsReady(config))
+          ? "Complete or remove invalid tolerance values."
+          : "Complete the field mappings.";
     return { step: target, ruleId: pairId(pairing), message: `Rule ${index + 1}: ${detail}` };
   }
 
@@ -783,7 +785,12 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
         status={mappingSetupStatus(activeConfig)}
         statusText={mappingPanelStatus(activeConfig)}
       />
-      <MappingBuilder
+      {activeConfig.method === "date_amount" ? <DateAmountMappingEditor
+        config={activeConfig}
+        onChange={(next) => updatePairConfig(activePairing, () => next)}
+        sourceLabel={`${workbookNameForPair("source", activePairing)} · ${activePairing.sheet1.name}`}
+        destinationLabel={`${workbookNameForPair("destination", activePairing)} · ${activePairing.sheet2.name}`}
+      /> : <MappingBuilder
         file1Columns={availableColumns(activeConfig, "source")}
         file2Columns={availableColumns(activeConfig, "destination")}
         rules={activeConfig.rules}
@@ -799,7 +806,7 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
         suggestions={(activeConfig.analysis?.recommended_mappings ?? []).filter((mapping) => mapping.target && mapping.confidence !== "Low" && mapping.confidence !== "None").map((mapping) => ({ source: mapping.source, target: mapping.target as string }))}
         uiState={mappingUIByRule[id] ?? EMPTY_MAPPING_UI_STATE}
         onUIStateChange={(update) => updateMappingUI(activePairing, update)}
-      />
+      />}
     </section>;
   }
 
@@ -826,6 +833,7 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
         file1Name={`${workbookNameForPair("source", activePairing)} - ${activePairing.sheet1.name}`}
         file2Name={`${workbookNameForPair("destination", activePairing)} - ${activePairing.sheet2.name}`}
       />
+      {activeConfig.method === "date_amount" && <DateAmountReportOptions config={activeConfig} onChange={(next) => updatePairConfig(activePairing, () => next)} />}
     </section>;
   }
 
@@ -862,7 +870,7 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
       </div>}
       {step === 3 && <div className="step-content">
         {jobType === "generic" ? <>
-          <div className="section-heading"><div><h2>Choose how records match</h2><p>Select columns that identify the same record in both sheets.</p></div></div>
+          <div className="section-heading"><div><h2>Choose how records match</h2><p>Use a matching key or choose Date &amp; Amount reconciliation for transaction-ledger data.</p></div></div>
           {busy && <div className="loading-state"><Loader2 className="animate-spin" /> {analysisStatus || "Analyzing sheet pairs…"}</div>}
           {pairings.length > 0 && <div className="rule-workspace">
             <RuleNavigator items={ruleNavigationItems(3)} activeId={activeRuleId} onSelect={setActiveRuleId} label="Matching key rules" />
@@ -895,7 +903,15 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
           </>
         ) : <GstReportSetup threshold={gstTextThreshold} onThresholdChange={setGstTextThreshold} />}
       </div>}
-      {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl>{jobType === "generic" && multiWorkbook ? <><div><dt>Workbooks</dt><dd>{sourceWorkbooks.length} source · {destinationWorkbooks.length} destination</dd></div><div><dt>File pairs</dt><dd>{new Set(pairings.map((pairing) => `${pairing.sourceFileId}::${pairing.destinationFileId}`)).size} (one report each, delivered as a ZIP)</dd></div></> : <><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div></>}<div><dt>Sheet rules</dt><dd>{pairings.length > 0 ? `${pairings.length} independent rule${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Matching key</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : pairings.length === 1 ? `${pairConfigs[pairId(pairings[0])]?.primaryKeySource.join(" + ")} → ${pairConfigs[pairId(pairings[0])]?.primaryKeyDestination.join(" + ")}` : "Configured per sheet rule (below)"}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : pairings.reduce((count, pairing) => count + (pairConfigs[pairId(pairing)]?.rules.length ?? 0), 0)}</dd></div><div><dt>Report columns</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0); }, 0)}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl>{jobType === "generic" && <section className="review-rules" aria-label="Sheet rule review">{pairings.map((pairing, index) => { const config = pairConfigs[pairId(pairing)]; if (!config) return null; const dateOnly = isDateOnlyKey(config); return <details key={pairId(pairing)} className="rule-panel" open={pairings.length <= 3}><summary>Rule {index + 1} · {ruleTitle(pairing)}<small>{ruleStatus(config)}</small></summary><div className="rule-panel-body"><dl>
+      {step === 6 && <div className="ready-card"><div><span className="eyebrow">Ready to reconcile</span><h2>{jobType === "gst" ? "GST invoice reconciliation" : "General reconciliation"}</h2><p>Review the setup below, then let RecliQ generate your report.</p></div><dl>{jobType === "generic" && multiWorkbook ? <><div><dt>Workbooks</dt><dd>{sourceWorkbooks.length} source · {destinationWorkbooks.length} destination</dd></div><div><dt>File pairs</dt><dd>{new Set(pairings.map((pairing) => `${pairing.sourceFileId}::${pairing.destinationFileId}`)).size} (one report each, delivered as a ZIP)</dd></div></> : <><div><dt>Source file ({file1Name})</dt><dd>{file1?.original_filename}</dd></div><div><dt>Destination file ({file2Name})</dt><dd>{file2?.original_filename}</dd></div></>}<div><dt>Sheet rules</dt><dd>{pairings.length > 0 ? `${pairings.length} independent rule${pairings.length !== 1 ? "s" : ""}` : "Single sheet"}</dd></div><div><dt>Reconciliation method</dt><dd>{jobType === "gst" ? "GST invoice matching" : pairings.length === 1 ? (pairConfigs[pairId(pairings[0])]?.method === "date_amount" ? "Date & Amount" : "Standard matching") : "Configured per sheet rule (below)"}</dd></div><div><dt>Matching setup</dt><dd>{jobType === "gst" ? "GSTR + Invoice No." : pairings.length === 1 && pairConfigs[pairId(pairings[0])]?.method === "date_amount" ? "Date, amount, direction and optional required text" : pairings.length === 1 ? `${pairConfigs[pairId(pairings[0])]?.primaryKeySource.join(" + ")} → ${pairConfigs[pairId(pairings[0])]?.primaryKeyDestination.join(" + ")}` : "Configured per sheet rule (below)"}</dd></div><div><dt>Mapped fields</dt><dd>{jobType === "gst" ? `${gstConfig?.required_columns.length ?? 0} verified GST fields` : pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.method === "date_amount" ? 1 : config?.rules.length ?? 0); }, 0)}</dd></div><div><dt>Report setup</dt><dd>{jobType === "gst" ? `GST report (confidence ${gstTextThreshold}%)` : pairings.some((pairing) => pairConfigs[pairId(pairing)]?.method === "date_amount") ? "Monthly and daily summaries" : `${pairings.reduce((count, pairing) => { const config = pairConfigs[pairId(pairing)]; return count + (config?.includeFile1.length ?? 0) + (config?.includeFile2.length ?? 0); }, 0)} optional context columns`}</dd></div><div><dt>Orientation</dt><dd>{orientation === "vertical" ? "Column headers" : "Row headers"}</dd></div></dl>{jobType === "generic" && <section className="review-rules" aria-label="Sheet rule review">{pairings.map((pairing, index) => { const config = pairConfigs[pairId(pairing)]; if (!config) return null; const dateOnly = config.method === "standard" && hasKeys(config) && isDateOnlyKey(config); const da = config.dateAmount; return <details key={pairId(pairing)} className="rule-panel" open={pairings.length <= 3}><summary>Rule {index + 1} · {ruleTitle(pairing)}<small>{ruleStatus(config)}</small></summary><div className="rule-panel-body"><dl>
+        <dt>Method</dt><dd>{config.method === "date_amount" ? "Date & Amount transaction reconciliation" : "Standard record matching"}</dd>
+        {config.method === "date_amount" ? <>
+          <dt>Date columns</dt><dd>{da.dateSource || "Not selected"} ({da.dateFormatSource}) → {da.dateDestination || "Not selected"} ({da.dateFormatDestination})</dd>
+          <dt>Amount columns</dt><dd>{da.amountModeSource === "single" ? da.amountSource || "Not selected" : `${da.debitSource || "Debit"} + ${da.creditSource || "Credit"}`} → {da.amountModeDestination === "single" ? da.amountDestination || "Not selected" : `${da.debitDestination || "Debit"} + ${da.creditDestination || "Credit"}`}</dd>
+          <dt>Direction and required text</dt><dd>{da.reverseDirectionSource || da.reverseDirectionDestination ? "Direction reversed on a selected side" : "Configured debit/credit signs"}{da.textSource && da.textDestination ? ` · ${da.textSource} ↔ ${da.textDestination}` : " · no required text field"}</dd>
+          <dt>Verification</dt><dd>{da.verifyTransactions ? "Transaction verification enabled" : "Aggregate balances only · transactions not verified"}</dd>
+          <dt>Tolerances and groups</dt><dd>Amount ±{da.amountTolerance || "0"} · date ±{da.dateToleranceDays} day(s){da.allowGroupMatches && da.verifyTransactions ? ` · exact groups up to ${da.maxGroupSize} rows` : " · grouped matching off"}</dd>
+        </> : <>
         <dt>Primary key</dt><dd>{hasKeys(config) ? `${config.primaryKeySource.join(" + ")} → ${config.primaryKeyDestination.join(" + ")}` : "None — matched on amount and date"}</dd>
         <dt>Must also match</dt><dd>{config.secondaryConditions.length ? config.secondaryConditions.map(describeCondition).join("; ") : "Nothing else (key only)"}</dd>
         <dt>Key comparison</dt><dd>{config.similarityPolicy.matcher_type_override ?? "Automatic by data type"} · minimum confidence {config.similarityPolicy.threshold !== undefined ? `${config.similarityPolicy.threshold}%` : "automatic"}</dd>
@@ -905,6 +921,7 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
         <dt>Dates</dt><dd>{dateFormatLabel(config.dateFormat)}</dd>
         <dt>Mapped fields</dt><dd>{config.rules.length}</dd>
         {config.tolerances.length > 0 && <><dt>Accepted differences</dt><dd>{config.tolerances.map(describeTolerance).join("; ")} (applied after matching)</dd></>}
+        </>}
         <dt>Report context columns</dt><dd>{config.includeFile1.length + config.includeFile2.length}</dd>
       </dl></div></details>; })}</section>}
       {jobType === "generic" && <PrecheckPanel result={precheck} loading={precheckLoading} error={precheckError} acknowledged={precheckAcknowledged} onAcknowledge={setPrecheckAcknowledged} onRerun={() => runPrecheck()} onApplyDateFormat={applyDateFormat} />}
@@ -944,6 +961,8 @@ function GstMatchingKeyStep({ config, missingFile1, missingFile2, error, file1Na
 }
 
 function mappingPanelStatus(config: SheetRuleDraft | undefined): string {
+  if (!config) return "Waiting for sheet analysis";
+  if (config.method === "date_amount") return mappingIsReady(config) ? "Date and amount fields configured" : "Choose the required date and amount fields";
   if (!config?.rules.length) return "Add at least one field mapping";
   if (config.tolerances.length && !mappingIsReady(config)) return "Complete or remove invalid tolerance values";
   return `${config.rules.length} mapped field${config.rules.length === 1 ? "" : "s"}${config.tolerances.length ? ` · ${config.tolerances.length} tolerance${config.tolerances.length === 1 ? "" : "s"}` : ""}`;
@@ -1016,6 +1035,8 @@ function ReadyMadeSetups({ setups, config, onChange, sourceLabel, destinationLab
   sourceLabel: string; destinationLabel: string; declined: boolean; onDecline: () => void;
 }) {
   const applied = setups.find((setup) => readyMadeSetupApplied(config, setup));
+  setups = setups.filter(readyMadeSetupRelevant);
+  if (!applied && !setups.length) return null;
   const suggested = setups.find((setup) => setup.rule && (setup.status === "certain" || setup.status === "likely"));
   const missingText = (setup: ReadyMadeSetup) => [
     setup.missing_1.length ? `${sourceLabel} needs ${setup.missing_1.map((role) => SETUP_ROLE_NAMES[role] ?? role).join(", ")}` : "",
@@ -1074,6 +1095,8 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
   const suggestedDestination = config.analysis?.recommended_keys_2.filter((column) => config.file2Columns.includes(column)) ?? [];
   const suggestionUsable = suggestedSource.length > 0 && suggestedSource.length === suggestedDestination.length;
   const suggestionApplied = suggestedSource.join("|") === config.primaryKeySource.join("|") && suggestedDestination.join("|") === config.primaryKeyDestination.join("|");
+  const dateAmountSuggestion = config.method === "standard" && !hasKeys(config)
+    && !(suggestionUsable && !suggestionApplied) && shouldSuggestDateAmount(config);
   const similarRecordSettingsActive = config.similarityPolicy.matcher_type_override !== undefined || config.similarityPolicy.threshold !== undefined;
   const applySuggestion = () => onChange({ ...config, primaryKeySource: suggestedSource, primaryKeyDestination: suggestedDestination, dateOnlyOverride: false });
 
@@ -1094,9 +1117,26 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
       <small>Columns missing from this sheet are skipped.</small>
     </label>}
 
-    {setups.length > 0 && <ReadyMadeSetups setups={setups} config={config} onChange={onChange} sourceLabel={sourceLabel} destinationLabel={destinationLabel}
+    <div className="rule-section reconciliation-method-choice">
+      <div className="rule-section-heading"><div><h4>Reconciliation method</h4><p>Choose the matching model for this sheet pair. You can switch later without losing the other method's settings.</p></div></div>
+      <div className="segmented-control" role="group" aria-label="Reconciliation method">
+        <button type="button" className={config.method === "standard" ? "is-active" : ""} aria-pressed={config.method === "standard"} onClick={() => onChange({ ...config, method: "standard" })}>Standard matching</button>
+        <button type="button" className={config.method === "date_amount" ? "is-active" : ""} aria-pressed={config.method === "date_amount"} onClick={() => onChange({ ...config, method: "date_amount" })}>Date &amp; Amount</button>
+      </div>
+      {dateAmountSuggestion && <div className="suggestion-strip date-amount-suggestion" role="status">
+        <span>Suggested for these files</span>
+        <button type="button" className="suggestion-chip" onClick={() => onChange({ ...config, method: "date_amount" })}>
+          <Sparkles size={14} />Use Date &amp; Amount
+        </button>
+        <small>Both files have detected date columns and likely amount columns. You can switch back to Standard matching at any time.</small>
+      </div>}
+      {config.method === "date_amount" && <div className="info-callout date-amount-method-note"><CheckCircle2 size={18} /><span>Step 4 maps each file's dates and amount structure. RecliQ checks monthly and daily debit/credit totals, then verifies only unambiguous transaction matches.</span></div>}
+    </div>
+
+    {config.method === "standard" && setups.length > 0 && <ReadyMadeSetups setups={setups} config={config} onChange={onChange} sourceLabel={sourceLabel} destinationLabel={destinationLabel}
       declined={Boolean(declinedSetups[pairKey])} onDecline={() => setDeclinedSetups((current) => ({ ...current, [pairKey]: true }))} />}
 
+    {config.method === "standard" && <>
     <div className="rule-section">
       <div className="rule-section-heading">
         <div><h4>Match records on</h4><p>Select the columns that identify the same record in both sheets.</p></div>
@@ -1154,6 +1194,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
         <label><span>How similar (%)</span><input type="number" min="0" max="100" placeholder="Automatic" value={config.similarityPolicy.threshold ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, threshold: event.target.value === "" ? undefined : Number(event.target.value) } })} /></label>
       </div>
     </details>
+    </>}
   </section>;
 }
 

@@ -515,6 +515,35 @@ body.is-resizing-column { cursor: col-resize; user-select: none; }
 .method-control input { width: 90px; flex: none; }
 .rule-section > .text-command { justify-self: start; }
 .rule-empty { margin: 0; color: var(--color-text-muted); font-size: var(--font-small); }
+.reconciliation-method-choice { gap: 12px; }
+.date-amount-method-note { max-width: none; margin: 0; }
+.date-amount-editor { display: grid; gap: 14px; }
+.date-amount-side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.date-amount-side { display: grid; align-content: start; gap: 11px; min-width: 0; padding: 16px; border: 1px solid var(--color-border-subtle); border-radius: 7px; background: var(--color-surface); }
+.date-amount-side h4 { margin: 0; font-size: var(--font-body); overflow-wrap: anywhere; }
+.date-amount-side > label, .date-amount-field-group { display: grid; gap: 6px; min-width: 0; color: var(--color-text-secondary); font-size: var(--font-small); font-weight: 700; }
+.date-amount-side > label > span small, .date-amount-side > label > span small { color: var(--color-text-muted); font-weight: 500; }
+.date-amount-side select, .date-amount-side input, .date-amount-report-grid input, .date-amount-group-size input { width: 100%; min-width: 0; min-height: 38px; padding: 0 10px; border: 1px solid var(--color-border-strong); border-radius: 7px; background: var(--color-surface); color: var(--color-text); font-size: var(--font-small); }
+.date-amount-side select.is-empty { border-style: dashed; color: var(--color-text-faint); }
+.date-amount-side .segmented-control { width: fit-content; max-width: 100%; flex-wrap: wrap; }
+.date-amount-paired-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.date-amount-side .checkbox-line, .date-amount-report-options .checkbox-line { display: flex; align-items: flex-start; gap: 8px; color: var(--color-text-secondary); font-size: var(--font-small); }
+.date-amount-side .checkbox-line input, .date-amount-report-options .checkbox-line input { width: auto; min-height: 0; margin-top: 3px; }
+.date-amount-side .field-hint { line-height: 1.45; }
+.date-amount-text-input { max-width: 100px; }
+.date-amount-note { margin: 0; color: var(--color-text-muted); font-size: var(--font-small); line-height: 1.5; }
+.date-amount-report-options { padding-bottom: 0; }
+.date-amount-verification { display: flex; flex-wrap: wrap; gap: 2px; width: fit-content; max-width: 100%; padding: 3px; border: 1px solid var(--color-border); border-radius: 7px; background: var(--color-surface-muted); }
+.date-amount-verification button { min-height: 34px; padding: 0 12px; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-muted); font-size: var(--font-small); font-weight: 700; cursor: pointer; }
+.date-amount-verification button.is-active { background: var(--color-surface); color: var(--color-text); box-shadow: var(--shadow-sm); }
+.date-amount-report-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 260px)); gap: 12px; }
+.date-amount-report-grid label, .date-amount-group-size { display: grid; gap: 5px; max-width: 100%; color: var(--color-text-secondary); font-size: var(--font-small); font-weight: 700; }
+.date-amount-report-grid small, .date-amount-group-size small { color: var(--color-text-muted); font-weight: 500; line-height: 1.4; }
+.date-amount-warning { margin: 0; padding: 10px 12px; border-left: 3px solid var(--color-warning); background: var(--color-warning-soft); color: var(--color-text-secondary); font-size: var(--font-small); line-height: 1.5; }
+.date-amount-group-size { max-width: 260px; }
+.date-amount-results-banner { display: grid; gap: 4px; padding: 13px 16px; border: 1px solid var(--color-success-border); border-left: 4px solid var(--color-success); border-radius: 7px; background: var(--color-success-soft); color: var(--color-text-secondary); font-size: var(--font-small); line-height: 1.5; }
+.date-amount-results-banner strong { color: var(--color-text); }
+.date-amount-results-banner.is-warning { border-color: var(--color-warning-border); border-left-color: var(--color-warning); background: var(--color-warning-soft); }
 .suggestion-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border: 1px dashed var(--color-primary-border); border-radius: 7px; background: var(--color-primary-subtle); }
 .suggestion-strip > span { color: var(--color-text-secondary); font-size: var(--font-small); font-weight: 800; }
 .suggestion-strip small { flex-basis: 100%; color: var(--color-text-muted); font-size: var(--font-small); }
@@ -530,6 +559,7 @@ body.is-resizing-column { cursor: col-resize; user-select: none; }
 .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 240px)); gap: 12px; }
 .advanced-grid label { display: grid; gap: 4px; color: var(--color-text-muted); font-size: var(--font-small); font-weight: 700; }
 @media (max-width: 760px) { .key-pair-row.has-method { grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr) 34px; } .key-pair-row.has-method .method-control { grid-column: 1 / 4; } .rule-section-heading { flex-direction: column; } .advanced-grid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .date-amount-side-grid, .date-amount-report-grid { grid-template-columns: minmax(0, 1fr); }.date-amount-side { padding: 13px; }.date-amount-paired-columns { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 760px) { .rule-config-files { grid-template-columns: minmax(0, 1fr); gap: 8px; } .rule-config-files > svg { transform: rotate(90deg); } .rule-config-status { justify-items: start; max-width: 100%; }.rule-config-status > small { text-align: left; } }
 @media (max-width: 1120px) { .result-card-grid.is-three-column { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .result-card-grid.is-three-column { grid-template-columns: 1fr; } .results-scope-bar select { min-width: 0; width: 100%; } .review-rules dl { grid-template-columns: 1fr; } }

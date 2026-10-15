@@ -28,6 +28,7 @@ from app.reconciliation_engine.engine import (
     run_generic_reconciliation,
     run_gst_reconciliation,
 )
+from app.reconciliation_engine.date_amount import reconcile_date_amount
 from app.schemas.reconciliation import (
     GenericReconciliationRequest,
     GSTReconciliationRequest,
@@ -65,6 +66,8 @@ _UNIVERSAL_RECORD_CATEGORIES = (
     "field_differences",
     "identity_resolution",
     "auto_resolved",
+    "monthly_summary",
+    "daily_summary",
 )
 
 
@@ -107,6 +110,57 @@ def _merge_rule_universal_data(rule_results: list[dict]) -> dict:
         for label, count in ((result["universal_data"].get("metadata") or {}).get("resolution_rules_used") or {}).items():
             rules_used[label] = rules_used.get(label, 0) + count
     merged.setdefault("metadata", {})["resolution_rules_used"] = rules_used
+    methods: dict[str, int] = {}
+    for result in rule_results:
+        method = str(result.get("reconciliation_method") or "standard")
+        methods[method] = methods.get(method, 0) + 1
+    merged["metadata"]["reconciliation_methods"] = methods
+    date_summaries = [
+        (result.get("universal_data", {}).get("metadata") or {}).get("date_amount")
+        for result in rule_results
+    ]
+    if methods == {"date_amount": len(rule_results)} and all(date_summaries):
+        monthly_rows = merged.get("monthly_summary") or []
+        daily_rows = merged.get("daily_summary") or []
+        period_statuses: dict[str, list[bool]] = {}
+        for row in monthly_rows:
+            period_statuses.setdefault(str(row.get("Period") or ""), []).append(
+                row.get("Aggregate status") in {"Balanced", "Aggregate Balanced — Transactions Not Verified"}
+            )
+        verified_groups = sum(int(item.get("verified_match_groups", 0) or 0) for item in date_summaries)
+        merged["metadata"]["date_amount"] = {
+            "summary_only": all(bool(item.get("summary_only")) for item in date_summaries),
+            "summary_only_partial": any(bool(item.get("summary_only")) for item in date_summaries)
+            and not all(bool(item.get("summary_only")) for item in date_summaries),
+            "period_start": min((item["period_start"] for item in date_summaries if item.get("period_start")), default=None),
+            "period_end": max((item["period_end"] for item in date_summaries if item.get("period_end")), default=None),
+            "aggregate_periods": len({row.get("Period") for row in monthly_rows if row.get("Period")}),
+            "aggregate_balanced_months": sum(all(statuses) for statuses in period_statuses.values()),
+            "monthly_summary_groups": len(monthly_rows),
+            "daily_periods": len({row.get("Period") for row in daily_rows if row.get("Period")}),
+            "daily_summary_groups": len(daily_rows),
+            "aggregate_balanced_groups": sum(row.get("Aggregate status") in {"Balanced", "Aggregate Balanced — Transactions Not Verified"} for row in monthly_rows),
+            "aggregate_difference_groups": sum(row.get("Aggregate status") not in {"Balanced", "Aggregate Balanced — Transactions Not Verified"} for row in monthly_rows),
+            "verified_match_groups": verified_groups,
+            "verified_matched_source_rows": sum(int(item.get("verified_matched_source_rows", 0) or 0) for item in date_summaries),
+            "verified_matched_destination_rows": sum(int(item.get("verified_matched_destination_rows", 0) or 0) for item in date_summaries),
+            "source_unverified_rows": sum(int(item.get("source_unverified_rows", 0) or 0) for item in date_summaries),
+            "comparison_unverified_rows": sum(int(item.get("comparison_unverified_rows", 0) or 0) for item in date_summaries),
+            "source_invalid_rows": sum(int(item.get("source_invalid_rows", 0) or 0) for item in date_summaries),
+            "comparison_invalid_rows": sum(int(item.get("comparison_invalid_rows", 0) or 0) for item in date_summaries),
+            "amount_tolerance": "Per sheet rule",
+            "date_tolerance_days": "Per sheet rule",
+            "group_matches_enabled": any(bool(item.get("group_matches_enabled")) for item in date_summaries),
+            "date_format_source": "Per sheet rule",
+            "date_format_destination": "Per sheet rule",
+            "matching_rules": list(dict.fromkeys(rule for item in date_summaries for rule in item.get("matching_rules", []))),
+        }
+        merged["metadata"].pop("date_amount_config", None)
+    elif any(date_summaries):
+        # A mixed-method report uses the standard result summary, while keeping
+        # each Date & Amount rule's monthly/daily tables and manifest intact.
+        merged["metadata"]["date_amount"] = None
+        merged["metadata"].pop("date_amount_config", None)
     # Records already live in the merged categories; keep only rule metadata
     # here so the stored audit JSON does not hold every record twice.
     merged["execution_results"] = [
@@ -564,6 +618,8 @@ def _process_claimed_job(job_id: str) -> None:
                 "similarity_policy": pair.get("similarity_policy", {}),
                 "date_only_override": bool(pair.get("date_only_override", False)),
                 "matching_passes": pair.get("matching_passes", []),
+                "reconciliation_method": pair.get("reconciliation_method", "standard"),
+                "date_amount": pair.get("date_amount"),
                 "transformations": pair.get("transformations", []),
                 "tolerances": pair.get("tolerances", []),
                 "normalization": pair.get("normalization", {}),
@@ -629,6 +685,16 @@ def _process_claimed_job(job_id: str) -> None:
                         is_cancelled=is_cancelled,
                         write_report=False,
                     )
+                elif pair.get("reconciliation_method") == "date_amount":
+                    res = reconcile_date_amount(
+                        df1, df2, pair.get("date_amount") or {},
+                        file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
+                        file_2_name=f"{destination_record.original_filename} ({sheet_name_2})",
+                        include_columns_file_1=pair.get("include_columns_file_1", []),
+                        include_columns_file_2=pair.get("include_columns_file_2", []),
+                        progress_callback=rule_progress,
+                        is_cancelled=is_cancelled,
+                    )
                 else:
                     res = run_generic_reconciliation(
                         file_1_df=df1, file_2_df=df2, output_path=output_path,
@@ -649,6 +715,7 @@ def _process_claimed_job(job_id: str) -> None:
                         resolution_rules=resolution_rules,
                         learning=learning,
                         tolerances=pair.get("tolerances", []),
+                        engine_mode=settings.engine,
                     )
 
                 for k, v in res["summary"].items():

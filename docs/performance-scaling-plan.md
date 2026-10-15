@@ -1,6 +1,6 @@
 # Scaling RecliQ to 1,000,000 rows per file
 
-**Status (13 October 2026): Phases 1, 1b and 1c are complete; Phase 2 implementation is complete, with owner visual approval still open. Phase 3.1 harness groundwork has started; the column engine is not implemented.** The owner-controlled 100,000-row Phase 1b run measured 40.27 seconds end to end and 18.80 seconds for reading and matching, below the Phase 1 result of 57.80 seconds and 25.82 seconds. Phase 1c split generic reconciliation into typed preparation, key matching, keyless matching and result-building stages; all four output comparisons are identical. Phase 2 stores parsed sheets and result categories as Parquet, serves bounded result queries, streams report generation and runs data-quality checks in a worker process. The 500,000-row results API check is now under one second (p95 51.8 ms); report data parity against the previous writer passes. The report's visual presentation still needs owner approval. Phase 0 live-container sizing remains owner-controlled; Phase 4 is not started. The owner chose the index semantics for D5: similar text must share a word, without using column names. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
+**Status (14 October 2026): Phases 1, 1b and 1c are complete. Phase 2 implementation and data checks are complete; owner visual approval of the report remains open. Phase 3 has a selectable column engine and large-file parity harness, but is not complete or ready to become the default. The full 1,000,000-row matrix produced identical row/column results in all five scenarios. The column engine failed the plan's under-30-second target on all five and exceeded 4 GB peak RSS on four. A subsequent bounded-cache optimization preserved parity and improved the 100,000-row similar-secondary run, but the 1,000,000-row similar-secondary case remains far above the time and memory gates. D5 index semantics are set by the owner. D6, the owner-defined shadow period for switching defaults, remains open. Phase 0 live-container sizing and Phase 4 remain owner-controlled. Measurements can be repeated with the scripts in [`scripts/perf`](../scripts/perf/README.md).
 
 - Code measured: `main` at commit `2a3a10c` (1 October 2026); measurements taken 1 to 3 October 2026. `main` has since moved to `4197f58` (3 October), which changed the tolerance editor, number display and workbook pairing but not the engine's matching code. The last round of checks (reader comparison, results-page cost, text-score batch, one prototype per process, and the test suite with the three engine changes) ran on `4197f58`. Line references are to `4197f58`. Re-run the baseline table on the current code before closing Phase 0.
 - Machine: laptop, AMD Ryzen 5 3550H (4 cores, 8 threads), 21.9 GB RAM, Windows 11, Python 3.12.10, pandas 2.2.2, on mains power with nothing else running.
@@ -558,7 +558,7 @@ One detail needs care in 2.1: a column that holds both numbers and text cannot b
 | A 1,000,000-row CSV uploads and is refused before reconciliation with a clear message | API upload and data-quality pre-check test verifies the one-million-row upload is accepted, then blocked with the unchanged 500,000-row-per-sheet limit. | Done |
 | 500,000-row-per-file data check completes without API-process memory growth | Windows local-worker test completed in 24.43 s; API-process RSS grew 0.6 MB during the check. | Done |
 
-The Phase 2 implementation and measured API/data-parity checks are complete. Do not call its report presentation approved until the owner completes the visual review. Phase 3 has started with the comparison-harness groundwork below; the column engine has not started. Phase 4 remains out of scope.
+The Phase 2 implementation and measured API/data-parity checks are complete. Do not call its report presentation approved until the owner completes the visual review. Phase 3 implementation and evidence are tracked below; its runtime acceptance and release gates remain open. Phase 4 remains out of scope.
 
 ### Phase 3. Column-based matching behind a setting (5 to 7 weeks)
 
@@ -579,7 +579,26 @@ A setting, `ENGINE=rows` (default) or `ENGINE=columns`, chooses the implementati
 
 Done when: at 1,000,000 rows per file on 4 cores and under 4 GB, each of these matches and compares in under 30 s: the keyed benchmark; keyed with one exact-text "must also match" column; keyed with one similar-text "must also match" column; the keyless amount + date ±3 days pass. And the harness shows no unexplained difference on the fixtures and benchmark files.
 
-**Phase 3 progress (13 October 2026):** The order-independent result comparator and the two planned benchmark scenarios have been added and tested. This is harness groundwork, not completion of Phase 3. Once the column engine exists, every engine fixture must run through both implementations using this comparator; benchmark-result parity and the 1,000,000-row target remain open. D5 is decided: use the index rule everywhere (similar text must share a word; column names do not affect the condition). The row engine's secondary-condition behavior is unchanged in this step.
+**Phase 3 progress (14 October 2026):** The selectable column engine has unique exact-key matching, batched text/numeric/identifier/date comparison, a DuckDB-backed keyless amount-range pass, row-engine fallbacks for unsupported or invalid cases, and bounded per-matcher caching for repeated secondary text pairs. Fuzzy text comparison also scores repeated canonical value pairs once when cardinality permits. The row engine remains the default (`ENGINE=rows`). The comparator streams large JSON result arrays into a temporary SQLite index and compares record multisets independent of order. The repository-root backend suite passes with 370 tests in each engine mode. The full 1,000,000-row matrix produced identical row/column results in all five scenarios. After the cache optimization, the similar-secondary column run was repeated at 1,000,000 rows and remained identical to the saved row baseline.
+
+| Acceptance check | Latest evidence | Status |
+|---|---|---|
+| Engine fixtures exercise both implementations | Root backend suite: 370 passed with `ENGINE=rows` and 370 with `ENGINE=columns` | Pass |
+| Million-row result parity | `keyed`, `secondary_exact`, `secondary`, `keyless`, and the additional `keyless_percent_narrative`: streaming comparisons returned `identical: true`, zero differences in every case | Pass for all five scenarios |
+| Million-row runtime and peak RSS | Complete run below; a post-optimization similar-secondary rerun measured 299.98 s and 6,434 MB for columns. The host's idle/4-core state was not independently instrumented. | Runtime fails all five; memory fails four |
+| Four required 1,000,000-row workloads | Keyed, exact-secondary, similar-secondary and keyless amount/date ±3 days were measured in both modes and compared | Measured; every column-engine runtime exceeds 30 s |
+| Explanations on read (3.9) | Per-record explanations are still materialized during reconciliation; lazy explanation generation is not implemented | Open |
+| Shadow run and default switch (3.10) | No production dual-run/difference log has been implemented. D6 requires the owner to set the shadow duration or job count; `ENGINE=rows` remains the default. | Open |
+
+| 1,000,000-row scenario | Row engine: seconds / peak MB | Column engine: seconds / peak MB | Results identical | Column target (<30 s, <4,000 MB) |
+|---|---:|---:|---|---|
+| `keyed` | 130.90 / 5,884 | 114.59 / 5,325 | Yes | Fail both |
+| `secondary_exact` | 142.60 / 5,836 | 157.21 / 6,380 | Yes | Fail both |
+| `secondary` | 310.34 / 5,886 | 335.54 / 6,437 | Yes | Fail both; post-cache columns: 299.98 / 6,434 |
+| `keyless` (amount + date ±3 days) | 99.89 / 4,877 | 103.79 / 5,155 | Yes | Fail both |
+| `keyless_percent_narrative` (additional stress case) | 143.78 / 4,170 | 77.64 / 3,861 | Yes | Runtime fail; memory pass |
+
+The Phase 3 column-engine work is therefore **in progress, not complete**. Result parity passes on all five measured million-row scenarios, including the post-cache similar-secondary rerun. Performance does not: the complete matrix misses the 30-second target on all five and exceeds 4 GB peak RSS on four; in that matrix columns are slower than rows on three of five. The post-cache similar-secondary run improved from 335.54 s to 299.98 s but still exceeds both gates. The current implementation's memory use and mapped-field/result-building time require further architectural work. Steps 3.9-3.10 are also outstanding. D5 is decided: use the index rule everywhere (similar text must share a word; column names do not affect the condition). The row engine's secondary-condition behavior remains unchanged.
 
 ### Phase 4. Run it where it fits (1 to 2 weeks)
 

@@ -31,6 +31,7 @@ from app.reconciliation_engine.matching.indexed_matcher import (
 )
 from app.reconciliation_engine.normalization.entities import build_normalizer, use_normalizer
 from app.reconciliation_engine.transformations import apply_transformations
+from app.reconciliation_engine.date_amount import inspect_date_amount_inputs
 from app.schemas.reconciliation import ReconciliationPlan
 
 _NUMERIC_DATE = re.compile(r"^\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\s*$")
@@ -142,6 +143,8 @@ def _numeric_share(series: pd.Series) -> tuple[float, pd.Series]:
 
 
 def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
+    if rule.get("reconciliation_method") == "date_amount":
+        return inspect_date_amount_inputs(df1, df2, rule.get("date_amount") or {})
     issues: list[dict] = []
     dayfirst = bool(rule.get("date_dayfirst", True))
     frames = {"source": df1, "destination": df2}

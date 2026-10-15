@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from _helpers import upload
 from app.main import app
-from app.reconciliation_engine.engine import run_generic_reconciliation
+from app.reconciliation_engine.engine import run_generic_reconciliation, run_gst_reconciliation
 from app.reconciliation_engine.ingestion.finance_formats import GSTR2B_COLUMNS
 from app.reconciliation_engine.presets import _GSTIN_CHARS, gst_preset, gstin_is_valid
 from app.reconciliation_engine.preprocessing import prepare_dataframe
@@ -148,6 +148,28 @@ def test_the_preset_reconciles_like_the_owner_decided():
     notes = {record["COMPOSITE MATCH KEY"]: record.get("WITHIN TOLERANCE", "") for record in result["universal_data"]["matched_records"]}
     assert "97% similar" in next(note for key, note in notes.items() if str(key).endswith("INV-001"))
     assert "within ±1" in next(note for key, note in notes.items() if str(key).endswith("INV-003"))
+
+
+def test_gst_primary_keys_ignore_identifier_formatting_in_supplier_and_invoice_numbers():
+    formatted_gstin = f"{ACME[:2]}-{ACME[2:]}"
+    source_rows = [
+        _portal_row(formatted_gstin, "INV-001", taxable=600, cgst=54),
+        _portal_row(ACME, "INV/001", taxable=400, cgst=36),
+    ]
+    df1 = prepare_dataframe(pd.DataFrame(source_rows))
+    df2 = prepare_dataframe(pd.DataFrame([_portal_row(ACME, "INV001")]))
+
+    result = run_gst_reconciliation(
+        df1, df2, Path("unused.xlsx"), write_report=False,
+    )
+
+    assert result["summary"]["matched_records"] == 1
+    assert result["summary"]["fully_matched_records"] == 1
+    assert result["summary"]["only_in_file_1"] == 0
+    assert result["summary"]["only_in_file_2"] == 0
+    matched = result["universal_data"]["matched_records"][0]
+    assert matched["INVOICE NO. (File1)"] == "INV-001"
+    assert matched["INVOICE NO. (File2)"] == "INV001"
 
 
 def test_serial_numbers_and_blank_numbers_are_proposed_for_review():

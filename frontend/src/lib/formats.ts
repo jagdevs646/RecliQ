@@ -13,6 +13,39 @@ const PERCENT_COLUMN = "Difference %";
 const TWO_DECIMALS: Intl.NumberFormatOptions = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 // A plain decimal with more than two places, optionally a percentage. Codes ("007.1234", "1.2.3") do not qualify.
 const LONG_DECIMAL_TEXT = /^-?(0|[1-9]\d*)\.\d{3,}%?$/;
+const ISO_DATE_VALUE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/i;
+
+export function isDateColumn(column: string): boolean {
+  const normalizedColumn = column
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return /(^|\s)(date|dt)(\s|$)/.test(normalizedColumn);
+}
+
+function formatDateOnlyValue(value: unknown, column: string): string | null {
+  if (typeof value !== "string") return null;
+  if (!isDateColumn(column)) return null;
+
+  const match = ISO_DATE_VALUE.exec(value.trim());
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(date);
+}
 
 function hasFraction(value: unknown): boolean {
   return typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value);
@@ -40,6 +73,8 @@ export function formatRecordValue(value: unknown, column: string, decimals?: Set
     const percent = value.endsWith("%");
     return `${Number(percent ? value.slice(0, -1) : value).toFixed(2)}${percent ? "%" : ""}`;
   }
+  const dateOnly = formatDateOnlyValue(value, column);
+  if (dateOnly) return dateOnly;
   return String(value);
 }
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -161,6 +163,7 @@ class NormalizationSettings(BaseModel):
 
 
 class MatchingStrategy(BaseModel):
+    method: Literal["standard", "date_amount"] = "standard"
     primary_key_source: list[str] = Field(default_factory=list)
     primary_key_destination: list[str] = Field(default_factory=list)
     secondary_conditions: list[SecondaryMatchCondition] = Field(default_factory=list)
@@ -174,8 +177,72 @@ class MatchingStrategy(BaseModel):
     def keys_or_passes(self) -> "MatchingStrategy":
         if len(self.primary_key_source) != len(self.primary_key_destination):
             raise ValueError("Choose the same number of key columns in both files.")
-        if not self.primary_key_source and not any(item.enabled for item in self.matching_passes):
+        if self.method == "standard" and not self.primary_key_source and not any(item.enabled for item in self.matching_passes):
             raise ValueError("Choose at least one key column, or add an amount/date matching pass.")
+        if self.method == "date_amount" and (self.primary_key_source or self.primary_key_destination):
+            raise ValueError("Date & Amount reconciliation uses its mapped date and amount fields, not primary keys.")
+        return self
+
+
+class DateAmountConfig(BaseModel):
+    """Explicit date, amount and optional mandatory-text rules for ledger matching."""
+
+    date_source: str
+    date_destination: str
+    date_format_source: Literal["auto", "day_first", "month_first"] = "auto"
+    date_format_destination: Literal["auto", "day_first", "month_first"] = "auto"
+    amount_mode_source: Literal["single", "debit_credit"] = "single"
+    amount_mode_destination: Literal["single", "debit_credit"] = "single"
+    amount_source: str | None = None
+    amount_destination: str | None = None
+    debit_source: str | None = None
+    credit_source: str | None = None
+    debit_destination: str | None = None
+    credit_destination: str | None = None
+    positive_is_source: Literal["debit", "credit"] = "debit"
+    positive_is_destination: Literal["debit", "credit"] = "debit"
+    reverse_direction_source: bool = False
+    reverse_direction_destination: bool = False
+    text_source: str | None = None
+    text_destination: str | None = None
+    currency_source: str | None = None
+    currency_destination: str | None = None
+    amount_tolerance: str = Field(default="0", max_length=32)
+    date_tolerance_days: int = Field(default=0, ge=0, le=366)
+    verify_transactions: bool = True
+    allow_group_matches: bool = True
+    max_group_size: int = Field(default=4, ge=2, le=8)
+
+    @model_validator(mode="after")
+    def validate_configuration(self) -> "DateAmountConfig":
+        if not self.date_source.strip() or not self.date_destination.strip():
+            raise ValueError("Choose a date column from each file.")
+        for side in ("source", "destination"):
+            mode = getattr(self, f"amount_mode_{side}")
+            amount = getattr(self, f"amount_{side}")
+            debit, credit = getattr(self, f"debit_{side}"), getattr(self, f"credit_{side}")
+            if mode == "single" and not (amount and amount.strip()):
+                raise ValueError(f"Choose the signed amount column in the {side} file.")
+            if mode == "debit_credit" and not (debit and debit.strip() and credit and credit.strip()):
+                raise ValueError(f"Choose both debit and credit columns in the {side} file.")
+        if bool(self.text_source) != bool(self.text_destination):
+            raise ValueError("Choose the optional matching text column in both files, or in neither.")
+        for side in ("source", "destination"):
+            currency = getattr(self, f"currency_{side}")
+            if currency:
+                normalized = currency.strip().upper()
+                if not re.fullmatch(r"[A-Z]{3}", normalized):
+                    raise ValueError("Currency overrides must be three-letter codes, such as INR or USD.")
+                setattr(self, f"currency_{side}", normalized)
+        if self.currency_source and self.currency_destination and self.currency_source != self.currency_destination:
+            raise ValueError("Currency conversion is not supported. Choose matching currencies or convert the data before reconciliation.")
+        try:
+            tolerance = Decimal(self.amount_tolerance.strip())
+        except (InvalidOperation, AttributeError):
+            raise ValueError("Amount tolerance must be a non-negative decimal amount.") from None
+        if not tolerance.is_finite() or tolerance < 0 or tolerance.as_tuple().exponent < -6:
+            raise ValueError("Amount tolerance must be finite, non-negative and have at most 6 decimal places.")
+        self.amount_tolerance = format(tolerance, "f")
         return self
 
 
@@ -186,6 +253,7 @@ class SheetRuleConfig(BaseModel):
     source_sheets: list[str] = Field(default_factory=list)
     destination_sheets: list[str] = Field(default_factory=list)
     matching_strategy: MatchingStrategy
+    date_amount: DateAmountConfig | None = None
     reconciliation_mapping: list[RuleMapping] = Field(default_factory=list)
     include_columns_file_1: list[str] = Field(default_factory=list)
     include_columns_file_2: list[str] = Field(default_factory=list)
@@ -196,6 +264,14 @@ class SheetRuleConfig(BaseModel):
     date_format: Literal["day_first", "month_first"] = "day_first"
     # Accepted differences in compared fields, applied after matching.
     tolerances: list[ToleranceBand] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def method_configuration(self) -> "SheetRuleConfig":
+        if self.matching_strategy.method == "date_amount" and self.date_amount is None:
+            raise ValueError("Configure the date and amount columns for this reconciliation method.")
+        if self.matching_strategy.method == "standard" and self.date_amount is not None:
+            raise ValueError("Date & Amount settings can only be used with the Date & Amount method.")
+        return self
 
 
 class FilePairConfig(BaseModel):
@@ -253,6 +329,8 @@ class ReconciliationPlan(BaseModel):
                         "source_files_2": [source.model_dump() for source in destination_files],
                         "key_file_1": rule.matching_strategy.primary_key_source,
                         "key_file_2": rule.matching_strategy.primary_key_destination,
+                        "reconciliation_method": rule.matching_strategy.method,
+                        "date_amount": rule.date_amount.model_dump() if rule.date_amount else None,
                         "rules": [mapping.model_dump() for mapping in rule.reconciliation_mapping],
                         "include_columns_file_1": rule.include_columns_file_1,
                         "include_columns_file_2": rule.include_columns_file_2,

@@ -16,7 +16,7 @@ backend/.venv/Scripts/python scripts/perf/bench.py 100000 read keyed
 | `field_types.py` | Shows which comparison type the engine picks for each compared column, row by row. |
 | `engine_patches.py` | The three in-place changes of Phase 1, as text patches applied to a copy of `engine.py`. |
 | `quickwins.py` | Runs the engine with any of those changes, saves the complete result, and compares two runs value by value. |
-| `result_comparison.py` | Compares saved universal result JSON files by record identity, ignoring record order while reporting field-level differences. |
+| `result_comparison.py` | Compares saved universal results independent of record order. In-memory comparisons provide field-level details; file comparisons stream large arrays through a temporary SQLite index to keep memory bounded. |
 | `patched_engine_plugin.py` | pytest plugin that runs the backend test suite with those changes applied in memory. |
 | `proto_keyed.py` | The keyed reconciliation as one join and column comparisons, in pandas, Polars and DuckDB. With `io` it also times file formats. |
 | `proto_keyless.py` | The keyless "amount + date window" pass as a join in DuckDB. |

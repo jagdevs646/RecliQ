@@ -4,6 +4,8 @@
  */
 import type {
   AnalysisResponse,
+  DateAmountPayload,
+  DateAmountSettings,
   DateFormat,
   MatchingPass,
   NormalizationSettings,
@@ -30,6 +32,18 @@ export const DEFAULT_NORMALIZATION: NormalizationSettings = {
 };
 
 export function emptyDraft(file1Columns: string[], file2Columns: string[], analysis: AnalysisResponse | null): SheetRuleDraft {
+  const guess = (columns: string[], pattern: RegExp) => columns.find((column) => pattern.test(column)) ?? "";
+  const dateSource = analysis?.date_columns_1?.find((column) => file1Columns.includes(column)) ?? guess(file1Columns, /date|\bdt\b/i);
+  const dateDestination = analysis?.date_columns_2?.find((column) => file2Columns.includes(column)) ?? guess(file2Columns, /date|\bdt\b/i);
+  const debitSource = guess(file1Columns, /\b(debit|dr)\b/i);
+  const creditSource = guess(file1Columns, /\b(credit|cr)\b/i);
+  const debitDestination = guess(file2Columns, /\b(debit|dr)\b/i);
+  const creditDestination = guess(file2Columns, /\b(credit|cr)\b/i);
+  const guessAmount = (columns: string[]) => columns.find((column) =>
+    /amount|amt|value|total|balance|paid|payment|fee|cost/i.test(column) && !/date|\bdt\b/i.test(column),
+  ) ?? "";
+  const amountSource = guessAmount(file1Columns);
+  const amountDestination = guessAmount(file2Columns);
   return {
     file1Columns,
     file2Columns,
@@ -42,6 +56,34 @@ export function emptyDraft(file1Columns: string[], file2Columns: string[], analy
     includeFile1: [],
     includeFile2: [],
     analysis,
+    method: "standard",
+    dateAmount: {
+      dateSource,
+      dateDestination,
+      dateFormatSource: "auto",
+      dateFormatDestination: "auto",
+      amountModeSource: debitSource && creditSource ? "debit_credit" : "single",
+      amountModeDestination: debitDestination && creditDestination ? "debit_credit" : "single",
+      amountSource,
+      amountDestination,
+      debitSource,
+      creditSource,
+      debitDestination,
+      creditDestination,
+      positiveIsSource: "debit",
+      positiveIsDestination: "debit",
+      reverseDirectionSource: false,
+      reverseDirectionDestination: false,
+      textSource: "",
+      textDestination: "",
+      currencySource: "",
+      currencyDestination: "",
+      amountTolerance: "0",
+      dateToleranceDays: 0,
+      verifyTransactions: true,
+      allowGroupMatches: true,
+      maxGroupSize: 4,
+    },
     transformations: [],
     matchingPasses: [],
     normalization: { ...DEFAULT_NORMALIZATION },
@@ -55,6 +97,25 @@ const DATE_COLUMN_HINT = /date|\bdt\b/i;
 /** Column names are compared the way the server normalizes headers. */
 export function normalizeHeader(value: string): string {
   return value.replace(/[\r\n]/g, "").trim().toUpperCase();
+}
+
+/** Offer the method only when both files have data-detected dates and mapped amount fields. */
+export function shouldSuggestDateAmount(config: SheetRuleDraft): boolean {
+  const settings = config.dateAmount;
+  const hasColumn = (columns: string[], selected: string) =>
+    Boolean(selected && columns.some((column) => normalizeHeader(column) === normalizeHeader(selected)));
+  const detectedDate = (side: "source" | "destination") => {
+    const detected = side === "source" ? config.analysis?.date_columns_1 : config.analysis?.date_columns_2;
+    const selected = side === "source" ? settings.dateSource : settings.dateDestination;
+    return Boolean(detected?.some((column) => normalizeHeader(column) === normalizeHeader(selected)));
+  };
+  const sourceAmountReady = settings.amountModeSource === "single"
+    ? hasColumn(config.file1Columns, settings.amountSource)
+    : hasColumn(config.file1Columns, settings.debitSource) && hasColumn(config.file1Columns, settings.creditSource);
+  const destinationAmountReady = settings.amountModeDestination === "single"
+    ? hasColumn(config.file2Columns, settings.amountDestination)
+    : hasColumn(config.file2Columns, settings.debitDestination) && hasColumn(config.file2Columns, settings.creditDestination);
+  return detectedDate("source") && detectedDate("destination") && sourceAmountReady && destinationAmountReady;
 }
 
 /** Columns created by transformations (e.g. a signed amount), per side. */
@@ -138,6 +199,7 @@ export function hasKeys(config: SheetRuleDraft): boolean {
 /** Matching setup is complete (step 3). Keys are optional when a keyless pass exists. */
 export function ruleIsReady(config: SheetRuleDraft | undefined): boolean {
   if (!config) return false;
+  if (config.method === "date_amount") return true;
   const passesReady = config.matchingPasses.every(passIsComplete);
   const keyed = hasKeys(config);
   const keysComplete = config.primaryKeySource.length === config.primaryKeyDestination.length
@@ -152,6 +214,7 @@ export function ruleIsReady(config: SheetRuleDraft | undefined): boolean {
 }
 
 export function ruleStatus(config: SheetRuleDraft): string {
+  if (config.method === "date_amount") return "Date & Amount method · configure date and amount columns in the next step";
   const keyed = hasKeys(config);
   if (!keyed && !config.matchingPasses.length) return "Choose the key columns";
   if (keyed && ![...config.primaryKeySource, ...config.primaryKeyDestination].every(Boolean)) return "Choose the key columns";
@@ -174,6 +237,7 @@ export type RuleSetupStatus = "not-configured" | "partial" | "configured" | "err
 /** Status shown in rule navigation, derived from the same requirements used by Continue. */
 export function matchingSetupStatus(config: SheetRuleDraft | undefined): RuleSetupStatus {
   if (!config) return "not-configured";
+  if (config.method === "date_amount") return "configured";
   const keyTouched = config.primaryKeySource.length > 0 || config.primaryKeyDestination.length > 0;
   const keysComplete = config.primaryKeySource.length === config.primaryKeyDestination.length
     && [...config.primaryKeySource, ...config.primaryKeyDestination].every(Boolean);
@@ -205,6 +269,15 @@ export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft)
     && [item.amount_destination, item.date_destination, item.narrative_destination].every((column) => !column || has2.has(column));
   const rules = copy.rules.filter((rule) => rule.file_1_fields.every((field) => has1.has(field)) && rule.file_2_fields.every((field) => has2.has(field)));
   const fields = new Set(rules.map(comparedFieldLabel));
+  const dateAmount = structuredClone(copy.dateAmount);
+  const hasSourceColumn = (column: string) => !column || has1.has(column);
+  const hasDestinationColumn = (column: string) => !column || has2.has(column);
+  for (const key of ["dateSource", "amountSource", "debitSource", "creditSource", "textSource"] as const) {
+    if (!hasSourceColumn(dateAmount[key])) dateAmount[key] = "";
+  }
+  for (const key of ["dateDestination", "amountDestination", "debitDestination", "creditDestination", "textDestination"] as const) {
+    if (!hasDestinationColumn(dateAmount[key])) dateAmount[key] = "";
+  }
   return {
     ...withSteps,
     primaryKeySource: keyPairs.map(([left]) => left),
@@ -218,6 +291,8 @@ export function copyRuleSettings(source: SheetRuleDraft, target: SheetRuleDraft)
     matchingPasses: copy.matchingPasses.filter(passColumnsExist),
     normalization: copy.normalization,
     dateFormat: copy.dateFormat,
+    method: copy.method,
+    dateAmount,
     tolerances: copy.tolerances.filter((band) => band.field === ALL_FIELDS || fields.has(band.field)),
   };
 }
@@ -326,6 +401,7 @@ export function pruneTolerances(tolerances: ToleranceBand[], rules: RuleMapping[
 
 /** Step 4 is complete: fields are mapped and every tolerance band is usable. */
 export function mappingIsReady(config: SheetRuleDraft | undefined): boolean {
+  if (config?.method === "date_amount") return dateAmountMappingIsReady(config);
   if (!config?.rules.length) return false;
   return config.tolerances.every((band) => toleranceIsComplete(band, config));
 }
@@ -333,10 +409,53 @@ export function mappingIsReady(config: SheetRuleDraft | undefined): boolean {
 /** Map-stage status distinguishes an untouched rule from an invalid mapping. */
 export function mappingSetupStatus(config: SheetRuleDraft | undefined): RuleSetupStatus {
   if (!config) return "not-configured";
+  if (config.method === "date_amount") {
+    const settings = config.dateAmount;
+    const hasAnyInput = Boolean(settings.dateSource || settings.dateDestination || settings.amountSource || settings.amountDestination
+      || settings.debitSource || settings.creditSource || settings.debitDestination || settings.creditDestination);
+    if (!hasAnyInput) return "not-configured";
+    return dateAmountMappingIsReady(config) ? "configured" : "error";
+  }
   if (config.rules.some((rule) => !rule.file_1_fields.length || !rule.file_2_fields.length)) return "error";
   if (config.tolerances.some((band) => !toleranceIsComplete(band, config))) return "error";
   if (!config.rules.length) return "not-configured";
   return mappingIsReady(config) ? "configured" : "partial";
+}
+
+/** Step 4 is complete only when each file has usable date and amount columns. */
+export function dateAmountMappingIsReady(config: SheetRuleDraft): boolean {
+  const settings = config.dateAmount;
+  const source = new Set(config.file1Columns.map(normalizeHeader));
+  const destination = new Set(config.file2Columns.map(normalizeHeader));
+  const has = (columns: Set<string>, value: string) => Boolean(value && columns.has(normalizeHeader(value)));
+  const sourceAmountReady = settings.amountModeSource === "single"
+    ? has(source, settings.amountSource)
+    : has(source, settings.debitSource) && has(source, settings.creditSource);
+  const destinationAmountReady = settings.amountModeDestination === "single"
+    ? has(destination, settings.amountDestination)
+    : has(destination, settings.debitDestination) && has(destination, settings.creditDestination);
+  const tolerance = settings.amountTolerance.trim();
+  const toleranceReady = /^\d+(?:\.\d{1,6})?$/.test(tolerance);
+  const currencyReady = (value: string) => !value.trim() || /^[A-Za-z]{3}$/.test(value.trim());
+  const matchingCurrency = !settings.currencySource.trim() || !settings.currencyDestination.trim()
+    || settings.currencySource.trim().toUpperCase() === settings.currencyDestination.trim().toUpperCase();
+  return has(source, settings.dateSource)
+    && has(destination, settings.dateDestination)
+    && sourceAmountReady
+    && destinationAmountReady
+    && (Boolean(settings.textSource) === Boolean(settings.textDestination))
+    && (!settings.textSource || has(source, settings.textSource))
+    && (!settings.textDestination || has(destination, settings.textDestination))
+    && toleranceReady
+    && currencyReady(settings.currencySource)
+    && currencyReady(settings.currencyDestination)
+    && matchingCurrency
+    && Number.isInteger(settings.dateToleranceDays)
+    && settings.dateToleranceDays >= 0
+    && settings.dateToleranceDays <= 366
+    && Number.isInteger(settings.maxGroupSize)
+    && settings.maxGroupSize >= 2
+    && settings.maxGroupSize <= 8;
 }
 
 /**
@@ -389,37 +508,67 @@ export function describeTolerance(band: ToleranceBand): string {
 /** One sheet rule of the canonical plan sent to the API. */
 export function draftToSheetRule(config: SheetRuleDraft, ids: { sheetRuleId: string; sourceSheet: string; destinationSheet: string; label: string }): SheetRulePayload {
   const keyed = hasKeys(config);
+  const dateAmount = config.dateAmount;
+  const dateAmountPayload: DateAmountPayload = {
+    date_source: dateAmount.dateSource,
+    date_destination: dateAmount.dateDestination,
+    date_format_source: dateAmount.dateFormatSource,
+    date_format_destination: dateAmount.dateFormatDestination,
+    amount_mode_source: dateAmount.amountModeSource,
+    amount_mode_destination: dateAmount.amountModeDestination,
+    amount_source: dateAmount.amountSource || null,
+    amount_destination: dateAmount.amountDestination || null,
+    debit_source: dateAmount.debitSource || null,
+    credit_source: dateAmount.creditSource || null,
+    debit_destination: dateAmount.debitDestination || null,
+    credit_destination: dateAmount.creditDestination || null,
+    positive_is_source: dateAmount.positiveIsSource,
+    positive_is_destination: dateAmount.positiveIsDestination,
+    reverse_direction_source: dateAmount.reverseDirectionSource,
+    reverse_direction_destination: dateAmount.reverseDirectionDestination,
+    text_source: dateAmount.textSource || null,
+    text_destination: dateAmount.textDestination || null,
+    currency_source: dateAmount.currencySource.trim() || null,
+    currency_destination: dateAmount.currencyDestination.trim() || null,
+    amount_tolerance: dateAmount.amountTolerance,
+    date_tolerance_days: dateAmount.dateToleranceDays,
+    verify_transactions: dateAmount.verifyTransactions,
+    allow_group_matches: dateAmount.allowGroupMatches,
+    max_group_size: dateAmount.maxGroupSize,
+  };
   return {
     sheet_rule_id: ids.sheetRuleId,
     source_sheets: [ids.sourceSheet],
     destination_sheets: [ids.destinationSheet],
     matching_strategy: {
-      primary_key_source: keyed ? config.primaryKeySource : [],
-      primary_key_destination: keyed ? config.primaryKeyDestination : [],
-      secondary_conditions: config.secondaryConditions,
+      method: config.method,
+      primary_key_source: config.method === "standard" && keyed ? config.primaryKeySource : [],
+      primary_key_destination: config.method === "standard" && keyed ? config.primaryKeyDestination : [],
+      secondary_conditions: config.method === "standard" ? config.secondaryConditions : [],
       similarity_policy: config.similarityPolicy,
-      date_only_override: keyed && isDateOnlyKey(config) && config.dateOnlyOverride,
-      matching_passes: config.matchingPasses.map((item) => ({
+      date_only_override: config.method === "standard" && keyed && isDateOnlyKey(config) && config.dateOnlyOverride,
+      matching_passes: config.method === "standard" ? config.matchingPasses.map((item) => ({
         ...item,
         date_source: item.date_source || null,
         date_destination: item.date_destination || null,
         narrative_source: item.narrative_source || null,
         narrative_destination: item.narrative_destination || null,
-      })),
+      })) : [],
       normalization: config.normalization,
     },
-    reconciliation_mapping: config.rules,
+    reconciliation_mapping: config.method === "standard" ? config.rules : [],
+    date_amount: config.method === "date_amount" ? dateAmountPayload : null,
     include_columns_file_1: config.includeFile1,
     include_columns_file_2: config.includeFile2,
-    transformations: config.transformations,
+    transformations: config.method === "standard" ? config.transformations : [],
     date_format: config.dateFormat,
-    tolerances: config.tolerances.map((band) => ({
+    tolerances: config.method === "standard" ? config.tolerances.map((band) => ({
       field: band.field,
       amount: band.amount || null,
       percent: band.percent || null,
       days: band.days || null,
       similarity: band.similarity || null,
-    })),
+    })) : [],
     report_label: ids.label,
   };
 }
@@ -427,6 +576,34 @@ export function draftToSheetRule(config: SheetRuleDraft, ids: { sheetRuleId: str
 /** A saved sheet rule back in the editor, to change it and run again. The reverse of draftToSheetRule. */
 export function sheetRuleToDraft(rule: SheetRulePayload, file1Columns: string[], file2Columns: string[], analysis: AnalysisResponse | null): SheetRuleDraft {
   const strategy = rule.matching_strategy;
+  const payload = rule.date_amount;
+  const dateAmount = payload ? {
+    dateSource: payload.date_source,
+    dateDestination: payload.date_destination,
+    dateFormatSource: payload.date_format_source,
+    dateFormatDestination: payload.date_format_destination,
+    amountModeSource: payload.amount_mode_source,
+    amountModeDestination: payload.amount_mode_destination,
+    amountSource: payload.amount_source ?? "",
+    amountDestination: payload.amount_destination ?? "",
+    debitSource: payload.debit_source ?? "",
+    creditSource: payload.credit_source ?? "",
+    debitDestination: payload.debit_destination ?? "",
+    creditDestination: payload.credit_destination ?? "",
+    positiveIsSource: payload.positive_is_source,
+    positiveIsDestination: payload.positive_is_destination,
+    reverseDirectionSource: payload.reverse_direction_source,
+    reverseDirectionDestination: payload.reverse_direction_destination,
+    textSource: payload.text_source ?? "",
+    textDestination: payload.text_destination ?? "",
+    currencySource: payload.currency_source ?? "",
+    currencyDestination: payload.currency_destination ?? "",
+    amountTolerance: payload.amount_tolerance,
+    dateToleranceDays: payload.date_tolerance_days,
+    verifyTransactions: payload.verify_transactions,
+    allowGroupMatches: payload.allow_group_matches,
+    maxGroupSize: payload.max_group_size,
+  } satisfies DateAmountSettings : emptyDraft(file1Columns, file2Columns, analysis).dateAmount;
   return {
     ...emptyDraft(file1Columns, file2Columns, analysis),
     primaryKeySource: strategy.primary_key_source ?? [],
@@ -448,6 +625,8 @@ export function sheetRuleToDraft(rule: SheetRulePayload, file1Columns: string[],
     transformations: rule.transformations ?? [],
     dateFormat: rule.date_format ?? "day_first",
     tolerances: rule.tolerances ?? [],
+    method: strategy.method ?? "standard",
+    dateAmount,
   };
 }
 
@@ -462,6 +641,7 @@ export function applyReadyMadeSetup(config: SheetRuleDraft, setup: ReadyMadeSetu
   const strategy = setup.rule.matching_strategy;
   return {
     ...config,
+    method: "standard",
     primaryKeySource: [...strategy.primary_key_source],
     primaryKeyDestination: [...strategy.primary_key_destination],
     secondaryConditions: strategy.secondary_conditions.map((condition) => ({ ...condition })),
@@ -471,6 +651,13 @@ export function applyReadyMadeSetup(config: SheetRuleDraft, setup: ReadyMadeSetu
     tolerances: setup.rule.tolerances.map((band) => ({ ...band })),
     dateFormat: setup.rule.date_format,
   };
+}
+
+/** Worth showing for these sheets: it can be applied, or at least one file
+ * has its anchor column (a GSTIN), so saying what is missing helps. Files
+ * with nothing in common with the setup never see it. */
+export function readyMadeSetupRelevant(setup: ReadyMadeSetup): boolean {
+  return Boolean(setup.rule) || !setup.missing_1.includes("gstin") || !setup.missing_2.includes("gstin");
 }
 
 /** The rule's keys are the setup's keys, so it counts as applied. */

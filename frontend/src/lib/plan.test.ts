@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyReadyMadeSetup,
   readyMadeSetupApplied,
+  readyMadeSetupRelevant,
   availableColumns,
   copyRuleSettings,
   derivedColumns,
@@ -20,6 +21,8 @@ import {
   pruneTolerances,
   ruleIsReady,
   clearTolerance,
+  dateAmountMappingIsReady,
+  shouldSuggestDateAmount,
   guessToleranceKind,
   setToleranceLimit,
   toleranceFor,
@@ -189,6 +192,77 @@ describe("rule readiness", () => {
   });
 });
 
+describe("Date & Amount setup", () => {
+  it("suggests date and debit/credit columns without changing the default method", () => {
+    const config = emptyDraft(["POSTED DATE", "Debit", "Credit"], ["Date", "Dr", "Cr"], null);
+    expect(config.method).toBe("standard");
+    expect(config.dateAmount).toMatchObject({
+      dateSource: "POSTED DATE", dateDestination: "Date",
+      amountModeSource: "debit_credit", amountModeDestination: "debit_credit",
+      debitSource: "Debit", creditSource: "Credit", debitDestination: "Dr", creditDestination: "Cr",
+    });
+  });
+
+  it("recommends Date & Amount only when both files have detected dates and amount fields", () => {
+    const analysis = {
+      recommended_keys_1: [], recommended_keys_2: [], key_confidence: 0,
+      is_composite_key: false, date_columns_1: ["POSTED DATE"], date_columns_2: ["DATE"],
+      recommended_mappings: [],
+    };
+    const config = emptyDraft(["POSTED DATE", "AMOUNT"], ["DATE", "TOTAL"], analysis);
+    expect(shouldSuggestDateAmount(config)).toBe(true);
+    expect(shouldSuggestDateAmount({ ...config, analysis: { ...analysis, date_columns_2: [] } })).toBe(false);
+    expect(shouldSuggestDateAmount({ ...config, dateAmount: { ...config.dateAmount, amountDestination: "" } })).toBe(false);
+  });
+
+  it("uses Date & Amount as the step-3 method and validates all required step-4 fields", () => {
+    const baseDraft = draft({ method: "date_amount" });
+    const base = { ...baseDraft, dateAmount: { ...baseDraft.dateAmount, dateSource: "", dateDestination: "", amountSource: "", amountDestination: "" } };
+    expect(ruleIsReady(base)).toBe(true);
+    expect(matchingSetupStatus(base)).toBe("configured");
+    expect(mappingIsReady(base)).toBe(false);
+    const ready = {
+      ...base,
+      dateAmount: {
+        ...base.dateAmount,
+        dateSource: "DATE", dateDestination: "DATE",
+        amountSource: "AMOUNT", amountDestination: "AMOUNT",
+        textSource: "VENDOR", textDestination: "VENDOR",
+      },
+    };
+    expect(dateAmountMappingIsReady(ready)).toBe(true);
+    expect(mappingSetupStatus(ready)).toBe("configured");
+    expect(mappingIsReady({ ...ready, dateAmount: { ...ready.dateAmount, textDestination: "" } })).toBe(false);
+    expect(mappingIsReady({ ...ready, dateAmount: { ...ready.dateAmount, amountTolerance: "0.0000001" } })).toBe(false);
+  });
+
+  it("serializes to the canonical date_amount contract and restores the editor state", () => {
+    const base = draft({ method: "date_amount" });
+    const config = {
+      ...base,
+      dateAmount: {
+        ...base.dateAmount,
+        dateSource: "DATE", dateDestination: "DATE",
+        amountModeSource: "debit_credit" as const, amountModeDestination: "single" as const,
+        debitSource: "DEBIT", creditSource: "CREDIT", amountDestination: "AMOUNT",
+        amountTolerance: "0.05", dateToleranceDays: 2, verifyTransactions: false,
+      },
+    };
+    const payload = draftToSheetRule(config, { sheetRuleId: "rule", sourceSheet: "A", destinationSheet: "B", label: "Ledger" });
+    expect(payload.matching_strategy.method).toBe("date_amount");
+    expect(payload.matching_strategy.primary_key_source).toEqual([]);
+    expect(payload.reconciliation_mapping).toEqual([]);
+    expect(payload.date_amount).toMatchObject({
+      date_source: "DATE", amount_mode_source: "debit_credit", debit_source: "DEBIT",
+      credit_source: "CREDIT", amount_destination: "AMOUNT", amount_tolerance: "0.05",
+      date_tolerance_days: 2, verify_transactions: false,
+    });
+    expect(sheetRuleToDraft(payload, base.file1Columns, base.file2Columns, null)).toMatchObject({
+      method: "date_amount", dateAmount: { dateSource: "DATE", amountModeSource: "debit_credit", verifyTransactions: false },
+    });
+  });
+});
+
 describe("transformations", () => {
   it("expose derived signed-amount columns on their side only", () => {
     const config = draft({ transformations: [{ operation: "debit_credit_to_signed", side: "source", columns: [], params: { debit_column: "DEBIT", credit_column: "CREDIT" }, output_column: "Signed Amount" }] });
@@ -313,6 +387,14 @@ describe("ready-made setups", () => {
     expect(gst.rule!.reconciliation_mapping[0].file_1_fields).toEqual(["IGST AMOUNT"]);
     after.matchingPasses[0].amount_tolerance = 5;
     expect(gst.rule!.matching_strategy.matching_passes![0].amount_tolerance).toBe(1);
+  });
+
+  it("is shown only when it applies or a file has a GSTIN", () => {
+    expect(readyMadeSetupRelevant(gst)).toBe(true);
+    const unrelated = { ...gst, status: "unavailable" as const, rule: null,
+      missing_1: ["gstin", "invoice_number", "taxable_value"], missing_2: ["gstin", "taxable_value"] };
+    expect(readyMadeSetupRelevant(unrelated)).toBe(false);
+    expect(readyMadeSetupRelevant({ ...unrelated, missing_2: ["taxable_value"] })).toBe(true);
   });
 
   it("leaves the rule alone when the setup cannot be filled in", () => {

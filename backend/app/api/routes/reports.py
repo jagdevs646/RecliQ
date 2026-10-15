@@ -91,6 +91,8 @@ _PREVIEW_SECTIONS = {
     "ambiguous_matches": "identity_resolution",
     "not_found": "identity_resolution",
     "auto_resolved": "auto_resolved",
+    "monthly_summary": "monthly_summary",
+    "daily_summary": "daily_summary",
 }
 
 # Identity-scoped categories select audit rows by their recorded classification.
@@ -453,7 +455,7 @@ def download_job_report(
     )
 
 
-_PAIR_RECORD_CATEGORIES = ("exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "identity_resolution", "auto_resolved")
+_PAIR_RECORD_CATEGORIES = ("exceptions", "matched_records", "missing_in_file_1", "missing_in_file_2", "identity_resolution", "auto_resolved", "monthly_summary", "daily_summary")
 
 
 def _file_pair_universal_data(universal_data: dict[str, Any], file_pair_id: str) -> dict[str, Any]:

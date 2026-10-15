@@ -152,10 +152,19 @@ class UniversalReporter:
         only2 = f"04 Only in {_clean_file_label(self.file2)}"[:31]
         if only1[3:] == only2[3:]:
             only1, only2 = "03 Only in File 1", "04 Only in File 2"
+        date_amount = bool((self.data.get("metadata") or {}).get("date_amount"))
+        if not date_amount:
+            return {
+                "summary": "01 Summary", "differences": "02 Differences", "only_1": only1,
+                "only_2": only2, "review": "05 Match Review", "matched": "06 Matched",
+                "monthly": "10 Monthly Summary", "daily": "11 Daily Summary",
+                "checks": "07 Checks", "rules": "08 Sheet Rules", "resolved": "09 Auto-resolved",
+            }
         return {
             "summary": "01 Summary", "differences": "02 Differences", "only_1": only1,
             "only_2": only2, "review": "05 Match Review", "matched": "06 Matched",
-            "checks": "07 Checks", "rules": "08 Sheet Rules", "resolved": "09 Auto-resolved",
+            "monthly": "07 Monthly Summary", "daily": "08 Daily Summary",
+            "checks": "09 Checks", "rules": "10 Sheet Rules", "resolved": "11 Auto-resolved",
         }
 
     def _review_records(self) -> _FilteredRows:
@@ -177,10 +186,11 @@ class UniversalReporter:
     def _counts(self) -> dict[str, int]:
         stats = self.data.get("statistics") or {}
         identity = stats.get("identity") or {}
+        date_amount = (self.data.get("metadata") or {}).get("date_amount") or {}
         return {
             "total_1": int(stats.get("total_file_1", 0) or 0),
             "total_2": int(stats.get("total_file_2", 0) or 0),
-            "matched": len(self.data.get("matched_records") or []),
+            "matched": int(date_amount.get("verified_match_groups", 0) or 0) if date_amount else len(self.data.get("matched_records") or []),
             "differ": int(stats.get("mismatched", len(self.data.get("exceptions") or [])) or 0),
             "only_1": len(self.data.get("missing_in_file_2") or []),
             "only_2": len(self.data.get("missing_in_file_1") or []),
@@ -192,6 +202,19 @@ class UniversalReporter:
 
     def _matching_description(self) -> list[tuple[str, str]]:
         metadata = self.data.get("metadata") or {}
+        date_amount = metadata.get("date_amount") or {}
+        if date_amount:
+            mode = "Aggregate balances only; transactions were not verified." if date_amount.get("summary_only") else "Monthly and daily debit/credit totals were checked before transaction matching."
+            if date_amount.get("summary_only_partial"):
+                mode = "Some sheet rules used aggregate-only comparison; transaction verification varies by rule."
+            description = [("Method", mode)]
+            description.append(("Date formats", f"{date_amount.get('date_format_source')} ↔ {date_amount.get('date_format_destination')}"))
+            description.append(("Amount tolerance", str(date_amount.get("amount_tolerance", "0"))))
+            description.append(("Date tolerance", f"{date_amount.get('date_tolerance_days', 0)} day(s)"))
+            description.append(("Grouping", "Exact same-day subsets only; ambiguous candidates remain for review." if date_amount.get("group_matches_enabled") else "Grouped transaction matching was not enabled."))
+            if metadata.get("secondary_keys"):
+                description.append(("Required text", ", ".join(metadata["secondary_keys"]) + " — Unicode, case and spacing normalized; identifier punctuation ignored"))
+            return description
         rules = self.data.get("sheet_rules") or []
         if len(rules) > 1:
             description = [("Primary key", f"Each sheet rule uses its own keys; see '{self.sheet_names['rules']}'.")]
@@ -283,11 +306,14 @@ class UniversalReporter:
             "only_2": self.config.include_missing_file_2,
             "review": self.config.include_field_differences and bool(self._review_records()),
             "matched": self.config.include_matched,
+            "monthly": bool(self.data.get("monthly_summary")),
+            "daily": bool(self.data.get("daily_summary")),
             "checks": self.config.include_controls,
             "rules": bool(self.data.get("sheet_rules")) and (
                 len(self.data.get("sheet_rules") or []) > 1
                 or any(
                     rule.get("status") != "completed"
+                    or rule.get("reconciliation_method") == "date_amount"
                     or rule.get("secondary_conditions")
                     or rule.get("date_only_override")
                     or rule.get("transformations")
@@ -378,6 +404,15 @@ class UniversalReporter:
         ws.set_column("H:H", 22)
         ws.set_column("I:I", 3)
         counts = self._counts()
+        date_amount = (self.data.get("metadata") or {}).get("date_amount") or {}
+        reconciliation_methods = (self.data.get("metadata") or {}).get("reconciliation_methods") or {}
+        mixed_methods = len(reconciliation_methods) > 1
+        date_amount_mode = bool(date_amount)
+        monthly_rows = self.data.get("monthly_summary") or []
+        aggregate_differences = sum(
+            row.get("Aggregate status") not in {"Balanced", "Aggregate Balanced — Transactions Not Verified"}
+            for row in monthly_rows
+        ) if date_amount_mode else 0
         ws.merge_range("B1:H1", "Reconciliation Report", self.formats["summary_title"])
         ws.set_row(0, 34)
         ws.merge_range(
@@ -387,7 +422,31 @@ class UniversalReporter:
         )
         ws.set_row(1, 20)
         attention = counts["differ"] + counts["only_1"] + counts["only_2"]
-        if attention == 0 and counts["review"] == 0:
+        if date_amount_mode and date_amount.get("summary_only"):
+            status = f"Aggregate comparison complete: {aggregate_differences:,} monthly group(s) differ. Transactions were not verified."
+            status_format = workbook.add_format({
+                "font_name": "Arial", "font_size": 12, "bold": True, "font_color": self.colors["warning"],
+                "bg_color": self.colors["warn_bg"], "valign": "vcenter", "indent": 1,
+            })
+        elif date_amount_mode and date_amount.get("summary_only_partial"):
+            status = f"Date and amount comparison complete. {aggregate_differences:,} monthly group(s) differ; some sheet rules did not verify transactions."
+            status_format = workbook.add_format({
+                "font_name": "Arial", "font_size": 12, "bold": True, "font_color": self.colors["warning"],
+                "bg_color": self.colors["warn_bg"], "valign": "vcenter", "indent": 1,
+            })
+        elif date_amount_mode and attention == 0 and counts["review"] == 0 and aggregate_differences == 0:
+            status = f"All {counts['matched']:,} transaction group(s) were verified; monthly and daily totals agree."
+            status_format = workbook.add_format({
+                "font_name": "Arial", "font_size": 12, "bold": True, "font_color": self.colors["pass"],
+                "bg_color": self.colors["pass_bg"], "valign": "vcenter", "indent": 1,
+            })
+        elif mixed_methods and attention == 0 and counts["review"] == 0:
+            status = "Multiple reconciliation methods completed. Review the method-specific summaries and Sheet Rules before sign-off."
+            status_format = workbook.add_format({
+                "font_name": "Arial", "font_size": 12, "bold": True, "font_color": self.colors["primary"],
+                "bg_color": self.colors["neutral_bg"], "valign": "vcenter", "indent": 1,
+            })
+        elif attention == 0 and counts["review"] == 0:
             status = f"All {counts['total_1']:,} records match. No action needed."
             status_format = workbook.add_format({
                 "font_name": "Arial", "font_size": 12, "bold": True, "font_color": self.colors["pass"],
@@ -403,7 +462,11 @@ class UniversalReporter:
         ws.set_row(3, 26)
 
         denominator = counts["matched"] + counts["differ"] + counts["only_1"] + counts["only_2"] + counts["resolved"]
-        agreement_rate = counts["matched"] / denominator if denominator else 0
+        if date_amount_mode:
+            verified_source_rows = int(date_amount.get("verified_matched_source_rows", 0) or 0)
+            agreement_rate = verified_source_rows / counts["total_1"] if counts["total_1"] and not date_amount.get("summary_only") and not date_amount.get("summary_only_partial") else 0
+        else:
+            agreement_rate = counts["matched"] / denominator if denominator else 0
         rate_format = "card_rate_pass" if agreement_rate >= 0.99 else "card_rate_warning"
         results = [
             ("Matched – all fields agree", counts["matched"], "Found in both files and every compared field is the same.", "matched", "pass"),
@@ -415,12 +478,21 @@ class UniversalReporter:
             results.append(("Needs review", counts["review"], "Matched through secondary keys or several possible matches were found; confirm these records.", "review", "review"))
         if counts["resolved"]:
             results.append(("Auto-resolved by rules", counts["resolved"], "Exceptions explained by your configured rules; details remain available on the report tab.", "resolved", "accent"))
+        if date_amount_mode:
+            results = [
+                ("Verified transaction groups", counts["matched"], "Unique one-to-one and unambiguous grouped matches; see the Matched tab.", "matched", "pass"),
+                (f"Only in {self.file1}", counts["only_1"], f"Source rows without a confirmed transaction group in {self.file2}.", "only_1", "critical"),
+                (f"Only in {self.file2}", counts["only_2"], f"Comparison rows without a confirmed transaction group in {self.file1}.", "only_2", "critical"),
+            ]
+            if counts["review"]:
+                results.append(("Needs review", counts["review"], "Duplicate, tolerance, or grouped candidates were not uniquely supported.", "review", "review"))
+            results.append(("Monthly aggregate groups", len(monthly_rows), "Debit, credit and net totals by calendar month, currency and required text.", "monthly", "accent"))
 
         cards = [
             ("B6:B6", "B7:B7", f"Records in {self.file1}", counts["total_1"], "card_value"),
             ("C6:D6", "C7:D7", f"Records in {self.file2}", counts["total_2"], "card_value"),
-            ("E6:F6", "E7:F7", "Matched, no differences", counts["matched"], "card_pass"),
-            ("G6:H6", "G7:H7", "Exact agreement rate", agreement_rate, rate_format),
+            ("E6:F6", "E7:F7", "Verified match groups" if date_amount_mode else "Matched, no differences", counts["matched"], "card_pass"),
+            ("G6:H6", "G7:H7", "Source rows verified" if date_amount_mode else "Exact agreement rate", agreement_rate, rate_format),
         ]
         for label_range, _value_range, label, _value, _value_format in cards:
             label_start, label_end = label_range.split(":")
@@ -502,6 +574,11 @@ class UniversalReporter:
             f"{self.sheet_names['matched']}: records that agree on every compared field.",
             f"{self.sheet_names['checks']}: confirms every record is accounted for.",
         ]
+        if (self.data.get("metadata") or {}).get("date_amount"):
+            guide.extend([
+                f"{self.sheet_names['monthly']}: calendar month/year debit and credit totals; balanced totals do not prove individual transactions match.",
+                f"{self.sheet_names['daily']}: daily debit and credit totals, alongside transaction verification status.",
+            ])
         if counts["resolved"]:
             guide.append(f"{self.sheet_names['resolved']}: exceptions your auto-resolution rules explained, and which rule did it.")
         for line in guide:
@@ -509,21 +586,22 @@ class UniversalReporter:
             ws.set_row(row, 18)
             row += 1
 
-        chart = workbook.add_chart({"type": "bar"})
-        colors = [self.colors[item[4]] for item in results]
-        chart.add_series({
-            "name": "Records",
-            "categories": [self.sheet_names["summary"], first_result_row, 1, last_result_row, 1],
-            "values": [self.sheet_names["summary"], first_result_row, 2, last_result_row, 2],
-            "points": [{"fill": {"color": color}, "border": {"color": color}} for color in colors],
-            "data_labels": {"value": True},
-        })
-        chart.set_title({"name": "Records by result"})
-        chart.set_legend({"none": True})
-        chart.set_size({"width": 560, "height": 300})
-        chart.set_y_axis({"reverse": True})
-        chart.set_x_axis({"major_gridlines": {"visible": False}})
-        ws.insert_chart("J6", chart)
+        if not date_amount_mode:
+            chart = workbook.add_chart({"type": "bar"})
+            colors = [self.colors[item[4]] for item in results]
+            chart.add_series({
+                "name": "Records",
+                "categories": [self.sheet_names["summary"], first_result_row, 1, last_result_row, 1],
+                "values": [self.sheet_names["summary"], first_result_row, 2, last_result_row, 2],
+                "points": [{"fill": {"color": color}, "border": {"color": color}} for color in colors],
+                "data_labels": {"value": True},
+            })
+            chart.set_title({"name": "Records by result"})
+            chart.set_legend({"none": True})
+            chart.set_size({"width": 560, "height": 300})
+            chart.set_y_axis({"reverse": True})
+            chart.set_x_axis({"major_gridlines": {"visible": False}})
+            ws.insert_chart("J6", chart)
         ws.activate()
 
     def _summary_section(self, worksheet, row: int, title: str) -> int:
@@ -626,6 +704,7 @@ class UniversalReporter:
 
         matched = self.data.get("matched_records") or []
         if self.config.include_matched:
+            date_amount = bool((self.data.get("metadata") or {}).get("date_amount"))
             has_secondary = any(row.get("SECONDARY KEY") for row in matched)
             has_groups = any(row.get("GROUPED ROWS") for row in matched)
             has_normalization = any(row.get("NORMALIZATION APPLIED") for row in matched)
@@ -636,6 +715,11 @@ class UniversalReporter:
             matched_headers += ["Normalization applied"] if has_normalization else []
             matched_headers += ["Combined rows"] if has_groups else []
             matched_headers += ["Comment"] if has_tolerance else []
+            if date_amount:
+                matched_headers += [
+                    "File 1 transaction details", "File 2 transaction details",
+                    "Amount difference", "Date difference (days)",
+                ]
             matched_headers += [f"Row in {self.file1}", f"Row in {self.file2}"]
 
             def matched_rows():
@@ -659,22 +743,63 @@ class UniversalReporter:
                     if has_tolerance:
                         note = record.get("WITHIN TOLERANCE")
                         values.append(f"Matched within tolerance: {note}" if note else None)
+                    if date_amount:
+                        values += [
+                            record.get("File 1 transaction details"),
+                            record.get("File 2 transaction details"),
+                            record.get("Amount difference"),
+                            record.get("Date difference (days)"),
+                        ]
                     values += [_row_number(record, 1), _row_number(record, 2)]
                     yield values
 
-            matched_subtitle = "No action needed. Listed so every record can be traced back to its row in each file."
+            matched_title = "Verified transaction matches" if date_amount else "Matched — records that agree on every compared field"
+            matched_subtitle = (
+                "Verified transaction groups. Original selected values, normalized values, row references and any accepted differences are shown."
+                if date_amount else "No action needed. Listed so every record can be traced back to its row in each file."
+            )
             if has_tolerance:
                 matched_subtitle += " Records whose only differences are within your tolerance are included; the Comment column says which and why."
-            yield ("matched", self.sheet_names["matched"], "Matched — records that agree on every compared field", matched_subtitle, matched_headers, matched_rows, len(matched), MATCHED_WORKBOOK_ROW_CAP, "No record matched on every compared field.")
+            yield ("matched", self.sheet_names["matched"], matched_title, matched_subtitle, matched_headers, matched_rows, len(matched), MATCHED_WORKBOOK_ROW_CAP, "No verified transaction matches.")
+
+        for category, key, title, subtitle in (
+            ("monthly_summary", "monthly", "Monthly debit and credit reconciliation", "Calendar month and year are compared separately. Aggregate balance is not proof that each transaction matched."),
+            ("daily_summary", "daily", "Daily debit and credit reconciliation", "Daily totals identify where differences concentrate; transaction verification remains a separate result."),
+        ):
+            aggregates = self.data.get(category) or []
+            if not aggregates:
+                continue
+            aggregate_headers = ( ["Sheet"] if self.multi_rule else [] ) + [
+                "Period", "Year-month/date", "Currency", "Required matching text",
+                f"{self.file1} debit", f"{self.file2} debit", "Debit difference",
+                f"{self.file1} credit", f"{self.file2} credit", "Credit difference",
+                f"{self.file1} net", f"{self.file2} net",
+                f"{self.file1} transactions", f"{self.file2} transactions",
+                "Aggregate status", "Transaction verification",
+            ]
+            def aggregate_rows(rows=aggregates):
+                for record in rows:
+                    values = [str(record.get("Sheet Pair", "")).strip("[]")] if self.multi_rule else []
+                    values += [
+                        record.get("Period label"), record.get("Period"), record.get("Currency"), record.get("Matching text"),
+                        record.get("Source debit"), record.get("Comparison debit"), record.get("Debit difference"),
+                        record.get("Source credit"), record.get("Comparison credit"), record.get("Credit difference"),
+                        record.get("Source net"), record.get("Comparison net"),
+                        record.get("Source transactions"), record.get("Comparison transactions"),
+                        record.get("Aggregate status"), record.get("Transaction verification"),
+                    ]
+                    yield values
+            yield (key, self.sheet_names[key], title, subtitle, aggregate_headers, aggregate_rows, len(aggregates), EXCEL_MAX_DATA_ROWS, "No aggregate periods were available.")
 
         if self.config.include_controls:
             checks = self._checks()
             yield ("checks", self.sheet_names["checks"], "Checks — is every record accounted for?", "Each record ends up in exactly one result, so the totals must balance.", ["Check", self.file1, self.file2, "Result"], lambda: iter(checks), len(checks), EXCEL_MAX_DATA_ROWS, "No checks are available.")
 
         rules = self.data.get("sheet_rules") or []
-        if rules and (len(rules) > 1 or any(rule.get("status") != "completed" or rule.get("secondary_conditions") or rule.get("date_only_override") or rule.get("transformations") or rule.get("matching_passes") or rule.get("tolerances") for rule in rules)):
+        if rules and (len(rules) > 1 or any(rule.get("status") != "completed" or rule.get("reconciliation_method") == "date_amount" or rule.get("secondary_conditions") or rule.get("date_only_override") or rule.get("transformations") or rule.get("matching_passes") or rule.get("tolerances") for rule in rules)):
+            has_date_amount_rules = any(rule.get("reconciliation_method") == "date_amount" for rule in rules)
             rule_headers = [
-                "Rule", "Report label", "Source", "Destination", "Primary key", "Compared fields", "Transformations",
+                "Rule", "Report label", "Source", "Destination", *( ["Method"] if has_date_amount_rules else [] ), "Primary key", "Compared fields", "Transformations",
                 "Matching passes", "Status", "Records in source", "Records in destination", "Exact matches",
                 "Matches to confirm", "Of these, matched in later passes", "Several possible matches", "Not found",
                 "Values differ", "Only source", "Only destination",
@@ -688,6 +813,7 @@ class UniversalReporter:
                     summary = rule.get("summary") or {}
                     yield [
                         index, rule.get("report_label"), rule.get("source_file"), rule.get("destination_file"),
+                        *(["Date & Amount" if rule.get("reconciliation_method") == "date_amount" else "Standard"] if has_date_amount_rules else []),
                         " + ".join(rule.get("primary_key_source") or []), rule.get("mapping_count", 0),
                         "; ".join(transformations), pass_details, rule.get("status"),
                         summary.get("source_records", 0), summary.get("destination_records", 0),
@@ -719,6 +845,41 @@ class UniversalReporter:
 
     def _checks(self) -> list[list[Any]]:
         counts = self._counts()
+        metadata = self.data.get("metadata") or {}
+        date_amount = metadata.get("date_amount") or {}
+        methods = metadata.get("reconciliation_methods") or {}
+        if len(methods) > 1:
+            return [
+                ["Standard matching rules", methods.get("standard", 0), "—", "See Sheet Rules"],
+                ["Date & Amount rules", methods.get("date_amount", 0), "—", "See monthly/daily summaries"],
+                ["Monthly aggregate groups", len(self.data.get("monthly_summary") or []), "—", "Review differences"],
+                ["Daily aggregate groups", len(self.data.get("daily_summary") or []), "—", "Review differences"],
+                ["Transaction verification", "Varies by rule", "Varies by rule", "See Sheet Rules"],
+            ]
+        if date_amount:
+            if date_amount.get("summary_only"):
+                return [
+                    ["Rows uploaded", counts["total_1"], counts["total_2"], ""],
+                    ["Calendar months compared", date_amount.get("aggregate_periods", 0), "—", ""],
+                    ["Monthly groups with matching debit and credit totals", date_amount.get("aggregate_balanced_months", 0), "—", "Aggregate only"],
+                    ["Transaction verification", "Not performed", "Not performed", "Not verified"],
+                    ["Rows with invalid required values", date_amount.get("source_invalid_rows", 0), date_amount.get("comparison_invalid_rows", 0), "Review" if date_amount.get("source_invalid_rows", 0) or date_amount.get("comparison_invalid_rows", 0) else "Pass"],
+                ]
+            matched_source = int(date_amount.get("verified_matched_source_rows", 0) or 0)
+            matched_destination = int(date_amount.get("verified_matched_destination_rows", 0) or 0)
+            source_unverified = int(date_amount.get("source_unverified_rows", 0) or 0)
+            destination_unverified = int(date_amount.get("comparison_unverified_rows", 0) or 0)
+            accounted_source = matched_source + counts["only_1"] + source_unverified + self._resolved_counts()["only_in_source"]
+            accounted_destination = matched_destination + counts["only_2"] + destination_unverified + self._resolved_counts()["only_in_destination"]
+            return [
+                ["Rows uploaded", counts["total_1"], counts["total_2"], ""],
+                ["Verified transaction groups", counts["matched"], "—", ""],
+                ["Rows in verified groups", matched_source, matched_destination, ""],
+                *([["Rows not transaction-verified", source_unverified, destination_unverified, "Aggregate-only rules"]] if date_amount.get("summary_only_partial") else []),
+                ["Unmatched rows", counts["only_1"], counts["only_2"], "Review" if counts["only_1"] + counts["only_2"] else "Pass"],
+                ["Rows accounted for", accounted_source, accounted_destination,
+                 "Pass" if accounted_source == counts["total_1"] and accounted_destination == counts["total_2"] else "Check"],
+            ]
         accounted_1 = counts["matched"] + counts["differ"] + counts["only_1"] + counts["resolved_1"]
         accounted_2 = counts["matched"] + counts["differ"] + counts["only_2"] + counts["resolved_2"]
         resolved_check = [[
@@ -851,8 +1012,12 @@ class UniversalReporter:
         for row_index, values in enumerate(rows_factory(), start=4):
             ws.set_row(row_index, 20)
             ws.write(row_index, 0, values[0], check_format)
-            ws.write_number(row_index, 1, values[1], number_format)
-            ws.write_number(row_index, 2, values[2], number_format)
+            for column in (1, 2):
+                value = values[column]
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    ws.write_number(row_index, column, value, number_format)
+                else:
+                    ws.write(row_index, column, value, check_format)
             result = values[3] or "—"
             ws.write(row_index, 3, result, status_formats.get(result, check_format))
 

@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     # Job execution. "redis" runs jobs in durable RQ workers; "local" runs them
     # in an in-process thread pool (development and tests only).
     job_queue_backend: str = "local"
+    # Keep the row engine as default until Phase 3 parity and performance gates pass.
+    engine: str = "rows"
     redis_url: str = "redis://localhost:6379/0"
     job_queue_name: str = "recliq-reconciliation"
     job_timeout_seconds: int = 3600
@@ -97,6 +99,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_deployment_security(self) -> "Settings":
+        self.engine = self.engine.strip().lower()
+        if self.engine not in {"rows", "columns"}:
+            raise ValueError("ENGINE must be either 'rows' or 'columns'.")
         if self.max_upload_mb < 1 or self.max_rows_per_sheet < 1:
             raise ValueError("Upload size and row limits must be positive integers.")
         if self.guest_retention_hours < 1:

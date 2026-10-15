@@ -21,6 +21,17 @@ describe("record values on screen", () => {
     expect(formatRecordValue(null, "Comment")).toBe("—");
   });
 
+  it("shows date-column timestamps as dates without shifting the calendar day", () => {
+    const expected = new Intl.DateTimeFormat(undefined, {
+      day: "2-digit", month: "short", year: "numeric", timeZone: "UTC",
+    }).format(new Date(Date.UTC(2026, 7, 5)));
+
+    expect(formatRecordValue("2026-08-05T00:00:00", "Books_Date")).toBe(expected);
+    expect(formatRecordValue("2026-08-05T18:30:00Z", "Transaction date (normalized)")).toBe(expected);
+    expect(formatRecordValue("2026-08-05T00:00:00", "Reference")).toBe("2026-08-05T00:00:00");
+    expect(formatRecordValue("not-a-date", "Transaction date")).toBe("not-a-date");
+  });
+
   it("show every number of a column with decimals the same way", () => {
     const rows = [{ KEY: 1, AMOUNT: 100 }, { KEY: 2, AMOUNT: 125.678 }];
     const decimals = decimalColumns(rows);
