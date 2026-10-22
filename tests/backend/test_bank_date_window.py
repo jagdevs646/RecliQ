@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from app.reconciliation_engine.engine import run_generic_reconciliation
+from app.reconciliation_engine.explanations import match_explanation
 from app.reconciliation_engine.matching import compare_values
 from app.reconciliation_engine.preprocessing import prepare_dataframe
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
@@ -47,6 +48,10 @@ def _identity(result: dict, key: str) -> dict:
     return next(item for item in result["universal_data"]["identity_resolution"] if item["MATCH KEY"] == key)
 
 
+def _explanation(result: dict, record: dict) -> str:
+    return match_explanation(record, result["universal_data"]["metadata"]) or ""
+
+
 # ── Date window ────────────────────────────────────────────────────────────
 def test_same_reference_amount_and_date_is_an_exact_key_match(tmp_path: Path):
     result = _reco(tmp_path, [_bank("UTR26000001", "2026-08-10", 5000)], [_books("UTR26000001", "2026-08-10", 5000)])
@@ -61,7 +66,8 @@ def test_same_reference_and_amount_within_the_date_window_matches_in_pass_2(tmp_
     identity = _identity(result, "UTR26000844")
     assert identity["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"  # Dates differ: a person confirms.
     assert identity["MATCH PASS"].startswith("Pass 2")
-    assert f"dates {gap} day" in identity["MATCH EXPLANATION"] and "reference 100% similar" in identity["MATCH EXPLANATION"]
+    explanation = _explanation(result, identity)
+    assert f"dates {gap} day" in explanation and "reference 100% similar" in explanation
     summary = result["summary"]
     assert summary["keyless_matches"] == 1 and summary["only_in_file_1"] == 0 and summary["only_in_file_2"] == 0
 
@@ -70,7 +76,7 @@ def test_a_date_gap_beyond_the_window_stays_unmatched_on_both_sides(tmp_path: Pa
     result = _reco(tmp_path, [_bank("UTR26000846", "2026-08-20", 128425.17)], [_books("UTR26000846", "2026-08-16", 128425.17)])
     identity = _identity(result, "UTR26000846")
     assert identity["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "BANK_DATE differs" in identity["MATCH EXPLANATION"]
+    assert "BANK_DATE differs" in _explanation(result, identity)
     assert result["summary"]["only_in_file_1"] == 1 and result["summary"]["only_in_file_2"] == 1
 
 
@@ -106,7 +112,7 @@ def test_the_window_replaces_the_exact_date_key_for_records_without_a_key_partne
         matching_passes=[PLAIN_WINDOW_PASS],
     )
     identity = _identity(result, "NEFT-A1")
-    assert identity["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH" and "dates 2 days apart" in identity["MATCH EXPLANATION"]
+    assert identity["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH" and "dates 2 days apart" in _explanation(result, identity)
 
 
 def test_two_qualifying_records_in_the_window_are_never_chosen_between(tmp_path: Path):

@@ -26,6 +26,26 @@ def test_record_order_and_generated_timestamp_do_not_affect_comparison() -> None
     assert compare_result_sets(expected, actual) == []
 
 
+def test_eager_and_deferred_match_explanations_compare_equal() -> None:
+    expected = {
+        "metadata": {"__MATCH_EXPLANATION_METADATA__": {"secondary_names": "Vendor"}},
+        "identity_resolution": [{
+            "ROW (FILE 1)": 2,
+            "IDENTITY CLASSIFICATION": "EXACT_MATCH",
+            "MATCH EXPLANATION": "Key matched.",
+        }],
+    }
+    actual = {
+        "metadata": {},
+        "identity_resolution": [{
+            "ROW (FILE 1)": 2,
+            "IDENTITY CLASSIFICATION": "EXACT_MATCH",
+        }],
+    }
+
+    assert compare_result_sets(expected, actual) == []
+
+
 def test_reports_field_differences_on_the_matching_record_not_list_position() -> None:
     expected = {"matched_records": [
         {"ROW (FILE 1)": 2, "ROW (FILE 2)": 4, "Amount": 10},

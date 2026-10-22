@@ -30,6 +30,19 @@ UNORDERED_RECORD_KEYS = {
     "control_checks": ("Control",),
 }
 
+# Phase 3.9 stores the facts needed for a human-readable explanation and
+# generates its wording only when a page or workbook needs it.  The wording is
+# presentation, not a reconciliation decision, so parity keeps checking all
+# matching facts while allowing old eager reports and new compact reports to
+# compare equal.
+_PRESENTATION_ONLY_RECORD_FIELDS = {
+    "MATCH EXPLANATION",
+    "__MATCH_EXPLANATION_CONTEXT__",
+}
+_PRESENTATION_ONLY_METADATA_FIELDS = {
+    "__MATCH_EXPLANATION_METADATA__",
+}
+
 
 @dataclass(frozen=True)
 class Difference:
@@ -39,8 +52,20 @@ class Difference:
     actual: Any = None
 
 
+def _without_presentation_fields(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_presentation_fields(child)
+            for key, child in value.items()
+            if key not in _PRESENTATION_ONLY_RECORD_FIELDS
+        }
+    if isinstance(value, list):
+        return [_without_presentation_fields(child) for child in value]
+    return value
+
+
 def _canonical(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(_without_presentation_fields(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _fingerprint(value: Any) -> bytes:
@@ -134,7 +159,11 @@ def _compare_values(
     if isinstance(expected, dict) and isinstance(actual, dict):
         differences: list[Difference] = []
         for key in sorted(set(expected) | set(actual), key=str):
-            if path_parts == ("metadata",) and key in {"generated_at", "engine", "engine_version"}:
+            if key in _PRESENTATION_ONLY_RECORD_FIELDS:
+                continue
+            if path_parts == ("metadata",) and key in {
+                "generated_at", "engine", "engine_version", *_PRESENTATION_ONLY_METADATA_FIELDS,
+            }:
                 continue
             child_path = f"{path}.{key}" if path else str(key)
             if key not in expected:

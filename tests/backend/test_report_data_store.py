@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(ROOT))
 
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
+from app.reconciliation_engine.explanations import EXPLANATION_METADATA_KEY
 from app.services.report_data_store import ParquetRecordRows, query_report_category, read_report_tables, write_report_tables
 
 
@@ -94,6 +95,43 @@ def test_parquet_results_page_by_scope_and_rebuild_report_without_materializing(
     generated = generate_enterprise_report(scoped, {}, output)
     assert output.is_file()
     assert generated.sheet_counts["06 Matched"] == 2
+
+
+def test_compact_match_explanations_are_materialized_for_preview_and_export(tmp_path: Path):
+    source = _universal_data()
+    source["metadata"][EXPLANATION_METADATA_KEY] = {"secondary_names": ""}
+    source["identity_resolution"] = [{
+        "ROW (FILE 1)": 2,
+        "IDENTITY CLASSIFICATION": "AMBIGUOUS_MATCH",
+        "MATCH TYPE": "identifier",
+        "MATCH CONFIDENCE": "0%",
+        "MATCH THRESHOLD": "",
+        "MATCH KEY": "INV-404",
+        "CANDIDATE KEY": "",
+        "File Pair ID": "north",
+        "Sheet Rule ID": "north-rule",
+    }]
+    data_dir = tmp_path / "compact-result-data"
+    write_report_tables(source, data_dir)
+
+    stored = list(read_report_tables(data_dir)["identity_resolution"])
+    assert "MATCH EXPLANATION" not in stored[0]
+
+    page = query_report_category(data_dir, "identity_resolution", limit=25)
+    assert "MATCH EXPLANATION" in page["columns"]
+    assert page["rows"][0]["MATCH EXPLANATION"] == "Several records in the other file have this key, so none was chosen."
+
+    output = tmp_path / "deferred-explanation.xlsx"
+    generate_enterprise_report(read_report_tables(data_dir), {}, output)
+    import openpyxl
+
+    values = [
+        str(cell.value)
+        for row in openpyxl.load_workbook(output)["05 Match Review"].iter_rows()
+        for cell in row
+        if cell.value is not None
+    ]
+    assert "Several records in the other file have this key, so none was chosen." in values
 
 
 def test_legacy_json_report_preview_custom_download_and_delete():

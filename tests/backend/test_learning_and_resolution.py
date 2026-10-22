@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from _helpers import preview, single_rule_plan, upload, wait_for_job
 from app.main import app
 from app.reconciliation_engine.engine import run_generic_reconciliation
+from app.reconciliation_engine.explanations import match_explanation
 from app.reconciliation_engine.learning import build_context, wilson_lower_bound
 from app.reconciliation_engine.preprocessing import prepare_dataframe
 from app.reconciliation_engine.resolution import Evaluator, compile_rule, describe_rule, text_signature
@@ -41,6 +42,10 @@ def _identity(result: dict) -> list[dict]:
     return result["universal_data"]["identity_resolution"]
 
 
+def _explanation(result: dict, record: dict) -> str:
+    return match_explanation(record, result["universal_data"]["metadata"]) or ""
+
+
 # ── Learning in the engine ─────────────────────────────────────────────────
 SIMILAR_SOURCE = [{"Vendor": "Globex Trading Company", "Invoice": "A1", "Amount": 100}]
 SIMILAR_DESTINATION = [{"Vendor": "Globex Tradng Company", "Invoice": "A1", "Amount": 100}]
@@ -58,7 +63,7 @@ def test_a_rejected_pairing_is_not_proposed_again(tmp_path: Path):
     result = _run(tmp_path, SIMILAR_SOURCE, SIMILAR_DESTINATION, learning=learning, **VENDOR_KEYED)
     identity = _identity(result)[0]
     assert identity["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "rejected pairing this record with 'Globex Tradng Company' before on 2026-09-01" in identity["MATCH EXPLANATION"]
+    assert "rejected pairing this record with 'Globex Tradng Company' before on 2026-09-01" in _explanation(result, identity)
     assert result["summary"]["only_in_file_1"] == 1 and result["summary"]["only_in_file_2"] == 1
 
 
@@ -79,10 +84,11 @@ def test_rejecting_one_of_two_candidates_lets_the_other_be_proposed(tmp_path: Pa
     without = _identity(_run(tmp_path, SIMILAR_SOURCE, destination, **VENDOR_KEYED))[0]
     assert without["IDENTITY CLASSIFICATION"] == "AMBIGUOUS_MATCH"  # Never picks between two.
     learning = build_context([_decision("Globex Trading Company", "Globex Tradng Company", "reject")])
-    identity = _identity(_run(tmp_path, SIMILAR_SOURCE, destination, learning=learning, **VENDOR_KEYED))[0]
+    result = _run(tmp_path, SIMILAR_SOURCE, destination, learning=learning, **VENDOR_KEYED)
+    identity = _identity(result)[0]
     assert identity["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"  # Still for a person to confirm.
     assert identity["CANDIDATE KEY"] == "Globex Trading Compny"
-    assert "rejected pairing" in identity["MATCH EXPLANATION"]
+    assert "rejected pairing" in _explanation(result, identity)
 
 
 def test_review_history_and_learned_confidence_are_explained(tmp_path: Path):
@@ -107,7 +113,7 @@ def test_rejected_keyless_pairing_is_skipped(tmp_path: Path):
     learning = build_context([_decision("R2", "BANK-77", "reject", "Pass 2: Amount + date ±3 days")])
     result = _run(tmp_path, source, destination, learning=learning, **options)
     assert result["summary"]["keyless_matches"] == 0
-    assert "Pass 2: Amount + date ±3 days: a reviewer rejected" in _identity(result)[0]["MATCH EXPLANATION"]
+    assert "Pass 2: Amount + date ±3 days: a reviewer rejected" in _explanation(result, _identity(result)[0])
 
 
 def test_wilson_lower_bound_is_conservative():
@@ -246,7 +252,7 @@ def test_confirmation_rule_needs_earlier_reviewer_confirmation(tmp_path: Path):
     identity = _identity(result)[0]
     assert result["summary"]["auto_confirmed_matches"] == 1 and result["summary"]["exception_matches"] == 0
     assert identity["AUTO-RESOLVED BY"] == "Reviewed before (v1)"
-    assert "Confirmed automatically by rule 'Reviewed before (v1)'" in identity["MATCH EXPLANATION"]
+    assert "Confirmed automatically by rule 'Reviewed before (v1)'" in _explanation(result, identity)
     assert result["summary"]["fully_matched_records"] == 1
 
     rejected = build_context([*[_decision("Globex Trading Company", "Globex Tradng Company", "accept", minutes=m) for m in (0, 1)],

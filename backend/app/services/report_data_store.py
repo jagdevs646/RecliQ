@@ -9,6 +9,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from app.reconciliation_engine.explanations import has_match_explanation, materialize_match_explanation
 from app.storage.base import REPORT_DATA_CATEGORIES
 from app.utils.json_encoder import safe_json_dumps, safe_json_dump
 
@@ -47,6 +48,7 @@ def write_report_tables(universal_data: dict[str, Any], directory: Path) -> dict
         path = directory / f"{category}.parquet"
         columns: dict[str, None] = {}
         scope_counts: dict[str, int] = {}
+        has_explanations = False
         writer = pq.ParquetWriter(path, schema, compression="zstd", use_dictionary=True)
         try:
             for start in range(0, len(records), _BATCH_SIZE):
@@ -54,6 +56,7 @@ def write_report_tables(universal_data: dict[str, Any], directory: Path) -> dict
                 values: dict[str, list[Any]] = {name: [] for name in schema.names}
                 for row_index, record in enumerate(batch, start=start):
                     columns.update((str(column), None) for column in record)
+                    has_explanations = has_explanations or has_match_explanation(record)
                     pair_id = str(record.get("File Pair ID") or "")
                     rule_id = str(record.get("Sheet Rule ID") or "")
                     scope_key = f"{pair_id}\u001f{rule_id}"
@@ -66,10 +69,13 @@ def write_report_tables(universal_data: dict[str, Any], directory: Path) -> dict
                 writer.write_table(pa.Table.from_pydict(values, schema=schema), row_group_size=_BATCH_SIZE)
         finally:
             writer.close()
+        visible_columns = [column for column in columns if _visible(column)]
+        if has_explanations and "MATCH EXPLANATION" not in visible_columns:
+            visible_columns.append("MATCH EXPLANATION")
         category_facts[category] = {
             "file": path.name,
             "row_count": len(records),
-            "columns": [column for column in columns if _visible(column)],
+            "columns": visible_columns,
             "scope_counts": scope_counts,
         }
 
@@ -164,6 +170,7 @@ def query_report_category(
     """Filter and page one Parquet category without materializing its rows."""
     with (directory / "summary.json").open(encoding="utf-8") as handle:
         manifest = json.load(handle)
+    metadata = (manifest.get("universal_data") or {}).get("metadata") or {}
     facts = manifest["record_categories"].get(category)
     if facts is None:
         raise FileNotFoundError(category)
@@ -201,6 +208,8 @@ def query_report_category(
     columns = facts.get("columns", [])
     if sort_by and sort_by not in columns:
         raise ValueError("The selected sort column is not available in this result.")
+    if sort_by == "MATCH EXPLANATION":
+        raise ValueError("Match explanations are generated when viewed and cannot be sorted.")
     order_sql = "row_order ASC"
     if sort_by:
         json_path = '$."' + sort_by.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -219,6 +228,6 @@ def query_report_category(
         rows = connection.execute(query, query_params).fetchall()
     return {
         "columns": columns,
-        "rows": [json.loads(row[0]) for row in rows],
+        "rows": [materialize_match_explanation(json.loads(row[0]), metadata) for row in rows],
         "total_rows": total,
     }

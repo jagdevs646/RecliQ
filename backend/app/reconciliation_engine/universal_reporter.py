@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 import xlsxwriter
 
+from app.reconciliation_engine.explanations import has_match_explanation, match_explanation
 from app.reconciliation_engine.matching.pass_matcher import pass_label
 from app.reconciliation_engine.transformations import describe as describe_transformation
 
@@ -146,6 +147,9 @@ class UniversalReporter:
         self.capped = False
         self._resolved_counts_cache: dict[str, int] | None = None
         self.included: dict[str, bool] = {}
+
+    def _match_explanation(self, record: dict[str, Any]) -> str | None:
+        return match_explanation(record, self.data.get("metadata"))
 
     def _sheet_names(self) -> dict[str, str]:
         only1 = f"03 Only in {_clean_file_label(self.file1)}"[:31]
@@ -664,7 +668,7 @@ class UniversalReporter:
             this_file, other_file = (self.file1, self.file2) if file_number == 1 else (self.file2, self.file1)
             data_columns = list(dict.fromkeys(str(key) for record in missing for key in record if _visible(str(key))))
             has_result = any(record.get("IDENTITY CLASSIFICATION") for record in missing)
-            has_reason = any(record.get("MATCH EXPLANATION") for record in missing)
+            has_reason = any(has_match_explanation(record) for record in missing)
             has_groups = any(record.get("GROUPED ROWS") for record in missing)
             missing_headers = (["Sheet"] if self.multi_rule else []) + data_columns
             missing_headers += ["Result"] if has_result else []
@@ -679,7 +683,7 @@ class UniversalReporter:
                     if result:
                         values.append(_RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION"), record.get("IDENTITY CLASSIFICATION")))
                     if reason:
-                        values.append(record.get("MATCH EXPLANATION"))
+                        values.append(self._match_explanation(record))
                     if groups:
                         values.append(record.get("GROUPED ROWS"))
                     values.append(_row_number(record, side))
@@ -697,7 +701,7 @@ class UniversalReporter:
                     keyless = record.get("MATCH PASS") and record.get("MATCH PASS") != "Primary key"
                     result = f"Matched by {record['MATCH PASS'].split(': ', 1)[-1].lower()}" if keyless and exception else _RESULT_LABELS.get(record.get("IDENTITY CLASSIFICATION"))
                     values = [str(record.get("Sheet Pair", "")).strip("[]")] if self.multi_rule else []
-                    values += [result, record.get("MATCH KEY"), record.get("CANDIDATE KEY") or None, record.get("MATCH EXPLANATION"), record.get("MATCH CONFIDENCE") if exception else None, _row_number(record, 1)]
+                    values += [result, record.get("MATCH KEY"), record.get("CANDIDATE KEY") or None, self._match_explanation(record), record.get("MATCH CONFIDENCE") if exception else None, _row_number(record, 1)]
                     yield values
 
             yield ("review", self.sheet_names["review"], "Match Review — please confirm these", "'Matched by secondary keys': the primary key differed slightly, but every secondary key matched one record. 'Several possible matches': more than one record qualified, so none was chosen automatically.", review_headers, review_rows, len(review), EXCEL_MAX_DATA_ROWS, "Nothing needs review.")

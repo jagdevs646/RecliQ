@@ -10,6 +10,11 @@ import pandas as pd
 import pytest
 
 from app.reconciliation.generic import run_generic_reconciliation
+from app.reconciliation_engine.explanations import match_explanation
+
+
+def _explanation(result: dict, record: dict) -> str:
+    return match_explanation(record, result["universal_data"]["metadata"]) or ""
 
 
 def test_generic_reconciliation_throttles_row_cancellation_checks(monkeypatch, tmp_path: Path):
@@ -32,6 +37,24 @@ def test_generic_reconciliation_throttles_row_cancellation_checks(monkeypatch, t
 
     assert result["matched_records"] == rows
     assert len(checks) <= 5
+
+
+def test_exact_match_explanations_are_deferred_until_a_consumer_needs_them(tmp_path: Path):
+    from app.reconciliation_engine.engine import run_generic_reconciliation as run_engine
+
+    result = run_engine(
+        pd.DataFrame({"ID": ["A", "B"], "AMOUNT": [10, 20]}),
+        pd.DataFrame({"ID": ["A", "B"], "AMOUNT": [10, 20]}),
+        tmp_path / "unused.xlsx",
+        key_file_1=["ID"],
+        key_file_2=["ID"],
+        rules=[{"file_1_fields": ["AMOUNT"], "file_2_fields": ["AMOUNT"]}],
+        write_report=False,
+    )
+
+    identity = result["universal_data"]["identity_resolution"]
+    assert all("MATCH EXPLANATION" not in record for record in identity)
+    assert _explanation(result, identity[0]) == "Key matched."
 
 
 @pytest.mark.parametrize("keyless", [False, True])
@@ -294,7 +317,7 @@ def test_secondary_conditions_create_exception_identity_match(tmp_path: Path):
     assert result["matched_records"] == 1
     audit = result["universal_data"]["identity_resolution"][0]
     assert audit["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"
-    assert "every secondary key matched" in audit["MATCH EXPLANATION"]
+    assert "every secondary key matched" in _explanation(result, audit)
 
 
 def test_secondary_condition_mismatch_is_not_found(tmp_path: Path):
@@ -306,7 +329,7 @@ def test_secondary_condition_mismatch_is_not_found(tmp_path: Path):
     assert result["not_found_matches"] == 1
     missing = result["universal_data"]["missing_in_file_2"][0]
     assert missing["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "No record in the other file has this key" in missing["MATCH EXPLANATION"]
+    assert "No record in the other file has this key" in _explanation(result, missing)
 
 
 def test_multiple_secondary_candidates_are_ambiguous(tmp_path: Path):
@@ -322,7 +345,7 @@ def test_multiple_secondary_candidates_are_ambiguous(tmp_path: Path):
     assert result["matched_records"] == 0
     missing = result["universal_data"]["missing_in_file_2"][0]
     assert missing["IDENTITY CLASSIFICATION"] == "AMBIGUOUS_MATCH"
-    assert "Several records in the other file" in missing["MATCH EXPLANATION"]
+    assert "Several records in the other file" in _explanation(result, missing)
 
 
 def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Path):
@@ -334,7 +357,7 @@ def test_secondary_candidate_requires_primary_similarity_threshold(tmp_path: Pat
     assert result["not_found_matches"] == 1
     audit = result["universal_data"]["identity_resolution"][0]
     assert audit["IDENTITY CLASSIFICATION"] == "NOT_FOUND"
-    assert "75% required" in audit["MATCH EXPLANATION"]
+    assert "75% required" in _explanation(result, audit)
 
 
 def test_date_only_primary_key_requires_explicit_override(tmp_path: Path):
@@ -393,7 +416,7 @@ def test_report_sheets_show_raw_keys_and_hide_engine_columns(tmp_path: Path):
     assert audit[0]["CANDIDATE KEY"] == "INV1"
     # Without secondary conditions the explanation must not mention them.
     not_found = next(row for row in audit if row["IDENTITY CLASSIFICATION"] == "NOT_FOUND")
-    assert not_found["MATCH EXPLANATION"] == "No record in the other file has this key."
+    assert _explanation(result, not_found) == "No record in the other file has this key."
 
     workbook = openpyxl.load_workbook(output)
     matched = workbook["06 Matched"]
@@ -443,7 +466,7 @@ def test_secondary_key_is_mandatory_and_duplicate_keys_are_combined(tmp_path: Pa
     # INV008 exists in both files, but the vendor differs: never paired.
     rejected = result["universal_data"]["missing_in_file_2"][0]
     assert rejected["ID"] == "INV008"
-    assert "NAME differs ('Vendor C' vs 'Vendor D')" in rejected["MATCH EXPLANATION"]
+    assert "NAME differs ('Vendor C' vs 'Vendor D')" in _explanation(result, rejected)
     assert [row["ID"] for row in result["universal_data"]["missing_in_file_1"]] == ["INV-008"]
 
 

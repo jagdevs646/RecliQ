@@ -50,6 +50,11 @@ from app.reconciliation_engine.column_engine import (
     compare_text_pairs,
     unique_exact_pairs,
 )
+from app.reconciliation_engine.explanations import (
+    EXPLANATION_CONTEXT_KEY,
+    EXPLANATION_METADATA_KEY,
+    explanation_metadata,
+)
 from app.reconciliation_engine.matching.pass_matcher import pass_label, run_column_pass, run_pass, validate_pass
 from app.reconciliation_engine.preprocessing import (
     aggregate_by_key,
@@ -587,40 +592,6 @@ def _primary_similarity_result(
 
 
 _TEXT_LIKE_TYPES = {"text", "company_name", "person_name"}
-
-
-def _identity_explanation(
-    classification: MatchClassification,
-    result: MatchResult | None = None,
-    threshold: int | None = None,
-    secondary_names: str | None = None,
-    secondary_mismatch: list[str] | None = None,
-    normalization: list[str] | None = None,
-) -> str:
-    """Plain-language reason shown in the report and the dashboard.
-
-    ``secondary_names`` lists the configured secondary keys, or is None when
-    none are configured. ``normalization`` names the rules (e.g. "Pvt →
-    Private") that made the key or secondary values equal.
-    """
-    if secondary_mismatch:
-        return f"The key exists in the other file, but {'; '.join(secondary_mismatch)}."
-    if classification is MatchClassification.EXACT_MATCH:
-        base = "Key and secondary keys matched" if secondary_names else "Key matched"
-        return f"{base} after normalization ({', '.join(normalization)})." if normalization else f"{base}."
-    if classification is MatchClassification.AMBIGUOUS_MATCH:
-        if secondary_names is None:
-            return "Several records in the other file have this key, so none was chosen."
-        return f"Several records in the other file have a similar key and the same {secondary_names}, so none was chosen."
-    if classification is MatchClassification.NOT_FOUND and result is None:
-        if secondary_names is None:
-            return "No record in the other file has this key."
-        return f"No record in the other file has this key (or a close variant) with the same {secondary_names}."
-    assert result is not None
-    closeness = f"{result.confidence}% similar, {threshold}% required"
-    if classification is MatchClassification.EXCEPTION_MATCH:
-        return f"Key differs slightly ({result.status.lower()}, {closeness}), but every secondary key matched. Please confirm."
-    return f"The closest record with the same {secondary_names or 'secondary keys'} has a different key ({closeness})."
 
 
 def _prepare_passes(matching_passes: list[dict] | None) -> list[dict]:
@@ -1601,45 +1572,51 @@ def _build_generic_results(
             if file_2_row is not None and outcome["pass_label"] == "Primary key"
             else []
         )
+        original_classification = classification
         unmatched_note = outcome["learned_note"] if file_2_row is None and classification is MatchClassification.NOT_FOUND else ""
-        explanation = outcome["explanation"] or unmatched_note or _identity_explanation(
-            classification,
-            key_result,
-            outcome["threshold"],
-            secondary_names if normalized_secondary_conditions else None,
-            outcome["secondary_mismatch"],
-            normalization_applied if classification is MatchClassification.EXACT_MATCH else None,
-        )
-        if outcome["learned_note"] and not unmatched_note and file_2_row is not None:
-            explanation = f"{explanation} ({outcome['learned_note']})"
+        deferred_explanation: dict[str, Any] = {}
+        if key_result is not None and original_classification in {
+            MatchClassification.EXCEPTION_MATCH,
+            MatchClassification.NOT_FOUND,
+        }:
+            deferred_explanation["has_key_result"] = True
+            deferred_explanation["match_status"] = key_result.status
+        if outcome["explanation"]:
+            deferred_explanation["explicit"] = outcome["explanation"]
+        if outcome["secondary_mismatch"]:
+            deferred_explanation["secondary_mismatch"] = outcome["secondary_mismatch"]
+        if outcome["learned_note"]:
+            deferred_explanation["learned_note"] = outcome["learned_note"]
+        if unmatched_note:
+            deferred_explanation["unmatched_note_only"] = True
 
         # What earlier decisions say, and whether a rule confirms the match.
         method = outcome["method"]
         review_history = learned_confidence = ""
         confirmed_by = None
+        append_learning = False
         if classification is MatchClassification.EXCEPTION_MATCH and file_2_row is not None and key_result is not None:
             key_1, key_2 = file_1_display_key, file_2_display_key or ""
             if learning is not None:
                 review_history, learned_confidence = learning.describe(key_1, key_2, method, key_result.confidence)
-                if review_history:
-                    explanation = f"{explanation} {review_history}."
-                if learned_confidence:
-                    explanation = f"{explanation} Learned confidence for this kind of match: {learned_confidence}."
+                append_learning = bool(review_history or learned_confidence)
             if evaluator is not None:
                 confirmed_by = evaluator.confirmation(file_1_row, key_1, key_2, key_result.confidence, method)
             if confirmed_by is not None:
                 classification = MatchClassification.EXACT_MATCH
-                explanation = f"{explanation} Confirmed automatically by rule '{confirmed_by.label()}'."
+                deferred_explanation["classification"] = original_classification.value
+                deferred_explanation["auto_confirmed_by"] = confirmed_by.label()
                 auto_resolved.append({
                     **resolution_fields(confirmed_by, "Match to confirm", "to_confirm"),
                     "Record": key_1, "Matched With": key_2, "How Matched": method,
                     "Match Confidence": f"{key_result.confidence}%", "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
                 })
+        if append_learning:
+            deferred_explanation["append_learning"] = True
 
         identity_record = {
             "ROW (FILE 1)": file_1_row.get("_ROW_NO", row_idx + 2),
             "IDENTITY CLASSIFICATION": classification.value,
-            "MATCH EXPLANATION": explanation,
             "MATCH TYPE": key_result.matcher_type if key_result else "",
             "MATCH CONFIDENCE": f"{key_result.confidence}%" if key_result else "0%",
             "MATCH THRESHOLD": f"{outcome['threshold']}%" if outcome["threshold"] is not None else "",
@@ -1647,6 +1624,8 @@ def _build_generic_results(
             "MATCH KEY": file_1_display_key,
             "CANDIDATE KEY": candidate_display_key,
         }
+        if deferred_explanation:
+            identity_record[EXPLANATION_CONTEXT_KEY] = deferred_explanation
         if passes and outcome["pass_label"]:
             identity_record["MATCH PASS"] = outcome["pass_label"]
         if normalization_applied:
@@ -1676,7 +1655,8 @@ def _build_generic_results(
                 })
                 continue
             clean_f1_row["IDENTITY CLASSIFICATION"] = classification.value
-            clean_f1_row["MATCH EXPLANATION"] = explanation
+            if deferred_explanation:
+                clean_f1_row[EXPLANATION_CONTEXT_KEY] = dict(deferred_explanation)
             if note := grouped_rows_note(file_1_row):
                 clean_f1_row["GROUPED ROWS"] = note
             file_1_not_found.append(clean_f1_row)
@@ -1699,7 +1679,6 @@ def _build_generic_results(
             "MATCH CONFIDENCE": f"{key_result.confidence}%",
             "MATCH STATUS": key_result.status,
             "IDENTITY CLASSIFICATION": classification.value,
-            "MATCH EXPLANATION": explanation,
             "GROUP CLASSIFICATION": group_status,
         }
         if passes:
@@ -1964,6 +1943,9 @@ def _build_generic_results(
             "resolution_rules_used": dict(evaluator.counts) if evaluator else {},
             "tolerance_bands": [band.describe() for band in tolerance_bands],
             "tolerance_counts": {"fields": tolerance.accepted_fields, "records": tolerance.moved_to_matched},
+            EXPLANATION_METADATA_KEY: explanation_metadata(
+                secondary_names=secondary_names if normalized_secondary_conditions else None,
+            ),
         },
     )
     universal_data["auto_resolved"] = auto_resolved

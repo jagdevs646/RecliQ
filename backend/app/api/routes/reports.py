@@ -28,6 +28,7 @@ from app.storage import get_storage
 from app.storage.base import report_data_manifest_path, report_data_path
 from app.services.report_data_store import query_report_category, read_report_tables
 from pydantic import BaseModel
+from app.reconciliation_engine.explanations import materialize_match_explanation
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 
@@ -609,6 +610,7 @@ def job_report_preview(
     section = _PREVIEW_SECTIONS.get(category)
     if section is None:
         raise HTTPException(status_code=422, detail="Unknown preview category")
+    preview_metadata: dict[str, Any] = {}
     table_directory = _report_data_directory(report)
     if table_directory is not None:
         try:
@@ -628,6 +630,7 @@ def job_report_preview(
         total_rows = queried["total_rows"]
     else:
         data = _report_preview_data(report)
+        preview_metadata = data.get("metadata") or {}
         records = data.get(section, [])
         if file_pair_id:
             records = [record for record in records if record.get("File Pair ID") == file_pair_id]
@@ -652,7 +655,11 @@ def job_report_preview(
         "sheet_name": section,
         "columns": columns,
         "rows": [
-            {str(column): _json_value(value) for column, value in record.items() if _preview_column_visible(str(column))}
+            {
+                str(column): _json_value(value)
+                for column, value in materialize_match_explanation(record, preview_metadata).items()
+                if _preview_column_visible(str(column))
+            }
             for record in page
         ],
         "total_rows": total_rows,

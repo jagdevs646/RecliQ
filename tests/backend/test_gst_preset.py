@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from _helpers import upload
 from app.main import app
 from app.reconciliation_engine.engine import run_generic_reconciliation, run_gst_reconciliation
+from app.reconciliation_engine.explanations import match_explanation
 from app.reconciliation_engine.ingestion.finance_formats import GSTR2B_COLUMNS
 from app.reconciliation_engine.presets import _GSTIN_CHARS, gst_preset, gstin_is_valid
 from app.reconciliation_engine.preprocessing import prepare_dataframe
@@ -197,8 +198,11 @@ def test_serial_numbers_and_blank_numbers_are_proposed_for_review():
     summary = result["summary"]
     # Nothing is accepted on its own: both pairs wait on Match Review.
     assert (summary["exact_matches"], summary["exception_matches"], summary["ambiguous_matches"]) == (0, 2, 1)
-    explanations = sorted(record["MATCH EXPLANATION"] for record in result["universal_data"]["identity_resolution"]
-                          if record["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH")
+    explanations = sorted(
+        match_explanation(record, result["universal_data"]["metadata"])
+        for record in result["universal_data"]["identity_resolution"]
+        if record["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"
+    )
     assert explanations == [
         "Matched in same supplier and taxable value: amounts differ by 0.20 (tolerance 1.00). Please confirm.",
         "Matched in same supplier, similar invoice number and taxable value: amount 5,000.00 = 5,000.00; "

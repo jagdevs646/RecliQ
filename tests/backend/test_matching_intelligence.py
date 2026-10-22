@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from app.reconciliation_engine.engine import run_generic_reconciliation
+from app.reconciliation_engine.explanations import match_explanation
 from app.reconciliation_engine.matching import compare_values
 from app.reconciliation_engine.normalization.entities import EntityNormalizer, NormalizerConfig
 from app.reconciliation_engine.preprocessing import prepare_dataframe
@@ -23,6 +24,10 @@ def _run(tmp_path: Path, source: list[dict], destination: list[dict], **options)
 
 def _identity(result: dict) -> list[dict]:
     return result["universal_data"]["identity_resolution"]
+
+
+def _explanation(result: dict, record: dict) -> str:
+    return match_explanation(record, result["universal_data"]["metadata"]) or ""
 
 
 # ── Deterministic normalization ─────────────────────────────────────────────
@@ -239,7 +244,7 @@ def test_name_secondary_key_matches_after_normalization_with_explanation(tmp_pat
     )
     assert result["summary"]["exact_matches"] == 1 and result["summary"]["only_in_file_1"] == 0
     identity = _identity(result)[0]
-    assert "after normalization" in identity["MATCH EXPLANATION"]
+    assert "after normalization" in _explanation(result, identity)
     assert "Pvt → Private" in identity["NORMALIZATION APPLIED"]
     matched = result["universal_data"]["matched_records"][0]
     assert "Ltd → Limited" in matched["NORMALIZATION APPLIED"]
@@ -322,7 +327,7 @@ def test_genuinely_ambiguous_entities_are_never_auto_matched(tmp_path: Path):
         secondary_conditions=[{"source_column": "Name", "destination_column": "Name", "comparison_method": "exact_text"}],
     )
     assert result["summary"]["exact_matches"] == 0
-    assert "NAME differs" in _identity(result)[0]["MATCH EXPLANATION"]
+    assert "NAME differs" in _explanation(result, _identity(result)[0])
 
 
 def test_saved_aliases_extend_normalization_for_one_run_only(tmp_path: Path):
@@ -408,7 +413,7 @@ def test_keyless_pass_matches_only_records_left_by_the_key_pass(tmp_path: Path):
     assert identities[0]["MATCH PASS"] == "Primary key"
     assert identities[1]["MATCH PASS"] == "Pass 2: Amount + date ±3 days"
     assert identities[1]["IDENTITY CLASSIFICATION"] == "EXCEPTION_MATCH"  # Dates differ: confirm.
-    assert "2 days apart" in identities[1]["MATCH EXPLANATION"]
+    assert "2 days apart" in _explanation(result, identities[1])
     assert result["summary"]["keyless_matches"] == 1
     assert result["summary"]["only_in_file_1"] == 0 and result["summary"]["only_in_file_2"] == 0
 
@@ -435,7 +440,7 @@ def test_keyless_only_rule_with_exact_amount_and_date_is_an_exact_match(tmp_path
     )
     identity = _identity(result)[0]
     assert identity["IDENTITY CLASSIFICATION"] == "EXACT_MATCH"
-    assert "reference 100% similar" in identity["MATCH EXPLANATION"]
+    assert "reference 100% similar" in _explanation(result, identity)
 
 
 def test_amount_tolerance_pass_respects_secondary_keys(tmp_path: Path):
