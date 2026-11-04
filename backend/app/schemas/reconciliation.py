@@ -41,6 +41,9 @@ class SecondaryMatchCondition(BaseModel):
 class SimilarityPolicy(BaseModel):
     matcher_type_override: str | None = None
     threshold: int | None = Field(default=None, ge=0, le=100)
+    # How strictly reference numbers (invoice numbers, codes) must agree; see
+    # docs/adr/0002. Omitted means "formatting", the behaviour before levels.
+    reference_matching: Literal["exact", "formatting", "variants", "suggestions"] | None = None
 
 
 TransformationOperation = Literal[

@@ -19,6 +19,7 @@ import type {
   ToleranceBand,
   TransformationStep,
 } from "../types";
+import { NEW_RULE_REFERENCE_LEVEL } from "./matchLevels";
 
 export const DEFAULT_NORMALIZATION: NormalizationSettings = {
   legal_forms: true,
@@ -50,7 +51,7 @@ export function emptyDraft(file1Columns: string[], file2Columns: string[], analy
     primaryKeySource: [],
     primaryKeyDestination: [],
     secondaryConditions: [],
-    similarityPolicy: {},
+    similarityPolicy: { reference_matching: NEW_RULE_REFERENCE_LEVEL },
     dateOnlyOverride: false,
     rules: [],
     includeFile1: [],

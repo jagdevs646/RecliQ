@@ -1360,3 +1360,14 @@ textarea:focus-visible, input:focus-visible, select:focus-visible, button:focus-
 .ready-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
 .ready-setups { margin-bottom: 14px; }
 .ready-setups small { flex-basis: 100%; color: var(--color-text-secondary); }
+
+/* Named match levels (docs/adr/0002): a level picker, with the number boxes under "Custom…". */
+.level-select { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.level-select > select { flex: 1 1 150px; min-width: 0; }
+.level-select > input, .level-select > output { flex: 1 1 80px; min-width: 0; }
+.level-select > input[type="range"] { flex-basis: 160px; }
+.level-warning { flex-basis: 100%; color: var(--color-warning-strong); font-size: var(--font-small); }
+.rule-tolerance > select { flex: 0 0 96px; }
+.reference-level { display: grid; gap: 6px; margin-top: 12px; max-width: 560px; }
+.reference-level label { display: grid; gap: 4px; color: var(--color-text-muted); font-size: var(--font-small); font-weight: 700; }
+.reference-level .field-hint { font-weight: 500; line-height: 1.45; }

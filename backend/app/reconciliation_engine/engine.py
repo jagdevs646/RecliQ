@@ -56,6 +56,18 @@ from app.reconciliation_engine.explanations import (
     explanation_metadata,
 )
 from app.reconciliation_engine.matching.pass_matcher import pass_label, run_column_pass, run_pass, validate_pass
+from app.reconciliation_engine.matching.reference_variants import (
+    DEFAULT_REFERENCE_LEVEL,
+    SUGGESTION_MIN_LEAD,
+    SUGGESTION_MIN_SCORE,
+    VARIANT_KEY_TYPES,
+    VARIANT_RULES,
+    ReferenceSuggester,
+    key_forms,
+    reference_level,
+    suggestion_form,
+    years_compatible,
+)
 from app.reconciliation_engine.preprocessing import (
     aggregate_by_key,
     fields_label,
@@ -67,7 +79,7 @@ from app.reconciliation_engine.preprocessing import (
 )
 from app.reconciliation_engine.normalization import build_normalizer, normalize_dataframe, use_normalizer
 from app.reconciliation_engine.normalization.entities import EntityNormalizer
-from app.reconciliation_engine.tolerance import Band, apply_tolerance_bands, prepare_bands
+from app.reconciliation_engine.tolerance import Band, accepted_reason, apply_tolerance_bands, prepare_bands
 from app.reconciliation_engine.transformations import TransformationResult, apply_transformations, original_values
 from app.reconciliation_engine.learning import LearningContext
 from app.reconciliation_engine.resolution import Evaluator, describe_rule, referenced_values, resolution_fields
@@ -177,6 +189,7 @@ class _PreparedGenericReconciliation:
     display_keys_nonblank_2: bool
     allowed_f1_cols: set[str]
     allowed_f2_cols: set[str]
+    reference_level: str = DEFAULT_REFERENCE_LEVEL
 
     def grouped_rows_note(self, row: dict[str, Any]) -> str:
         count = row.get("__GROUP_COUNT__", 1)
@@ -216,7 +229,7 @@ class _PreparedGenericReconciliation:
             elif kind in _IDENTIFIER_TYPES and _identifier_formatting_matches(
                 file_1_row.get(source), file_2_row.get(destination), source, destination, kind
             ):
-                applied.append("Identifier punctuation, spacing, and case ignored")
+                applied.append(_identifier_rule_note(self.reference_level))
         for condition in self.normalized_secondary_conditions:
             if condition.get("comparison_method") == "exact_text":
                 source = file_1_row.get(condition["source_column"])
@@ -247,6 +260,13 @@ def validate_gst_columns(df: pd.DataFrame) -> list[str]:
 # ("Invoice No" 0 vs blank is a missing identifier, not a zero amount).
 _NON_AMOUNT_NAME_TYPES = {"date", "invoice", "gstin", "pan", "identifier", "company_name", "person_name"}
 _IDENTIFIER_TYPES = {"invoice", "gstin", "pan", "identifier"}
+
+
+def _identifier_rule_note(level: str) -> str:
+    """How identifier keys were normalized at the configured reference level."""
+    if level == "exact":
+        return "Identifier spacing and case ignored"
+    return "Identifier punctuation, spacing, and case ignored"
 
 
 def _identifier_formatting_matches(
@@ -901,6 +921,16 @@ def _prepare_generic_reconciliation(
     ]
     text_keys_1 = {column for column, kind in zip(file_1_id_col, raw_key_types) if kind in _TEXT_LIKE_TYPES}
     text_keys_2 = {column for column, kind in zip(file_2_id_col, raw_key_types) if kind in _TEXT_LIKE_TYPES}
+    # How strictly reference numbers must agree (docs/adr/0002). At "exact",
+    # identifier keys keep their raw values and ignore only case and spaces,
+    # so INV-005 and INV/005 no longer pair.
+    reference_level_name = reference_level(request.similarity_policy)
+    exact_reference_positions = {
+        position for position, kind in enumerate(raw_key_types)
+        if reference_level_name == "exact" and kind in _IDENTIFIER_TYPES
+    }
+    raw_keys_1 = text_keys_1 | {file_1_id_col[position] for position in exact_reference_positions}
+    raw_keys_2 = text_keys_2 | {file_2_id_col[position] for position in exact_reference_positions}
 
     # 1. Normalize data
     date_cols = list(dict.fromkeys(
@@ -911,7 +941,7 @@ def _prepare_generic_reconciliation(
     num_cols = [rule[0][0] for rule in normalized_rules if 'amount' in rule[0][0].lower() or 'value' in rule[0][0].lower() or 'tax' in rule[0][0].lower()]
 
     f1_norm_config = {"date_columns": date_cols, "text_columns": text_cols, "number_columns": num_cols,
-                      "id_columns": [key for key in file_1_id_col if key not in text_keys_1]}
+                      "id_columns": [key for key in file_1_id_col if key not in raw_keys_1]}
     f2_date_cols = list(dict.fromkeys(
         [r[1][0] for r in normalized_rules if r[0][0] in date_cols]
         + [key for key in file_2_id_col if 'date' in key.lower()]
@@ -919,17 +949,17 @@ def _prepare_generic_reconciliation(
     f2_norm_config = {"date_columns": f2_date_cols,
                       "text_columns": [r[1][0] for r in normalized_rules if r[0][0] in text_cols],
                       "number_columns": [r[1][0] for r in normalized_rules if r[0][0] in num_cols],
-                      "id_columns": [key for key in file_2_id_col if key not in text_keys_2]}
+                      "id_columns": [key for key in file_2_id_col if key not in raw_keys_2]}
 
     file_1_df = normalize_dataframe(file_1_df, f1_norm_config)
     file_2_df = normalize_dataframe(file_2_df, f2_norm_config)
 
     # Use normalized keys for matching (raw values for name/text keys).
     file_1_match_keys = [
-        k if k in text_keys_1 else (f"NORM_{k}" if f"NORM_{k}" in file_1_df.columns else k) for k in file_1_id_col
+        k if k in raw_keys_1 else (f"NORM_{k}" if f"NORM_{k}" in file_1_df.columns else k) for k in file_1_id_col
     ]
     file_2_match_keys = [
-        k if k in text_keys_2 else (f"NORM_{k}" if f"NORM_{k}" in file_2_df.columns else k) for k in file_2_id_col
+        k if k in raw_keys_2 else (f"NORM_{k}" if f"NORM_{k}" in file_2_df.columns else k) for k in file_2_id_col
     ]
 
     key_matcher_types = [
@@ -944,6 +974,10 @@ def _prepare_generic_reconciliation(
             file_1_id_col,
             file_2_id_col,
         )
+    ]
+    key_matcher_types = [
+        "exact_reference" if position in exact_reference_positions else kind
+        for position, kind in enumerate(key_matcher_types)
     ]
 
     # Consolidate rows sharing the full identity (primary key + deterministic
@@ -1053,6 +1087,7 @@ def _prepare_generic_reconciliation(
         display_keys_nonblank_2=display_keys_nonblank_2,
         allowed_f1_cols=allowed_f1_cols,
         allowed_f2_cols=allowed_f2_cols,
+        reference_level=reference_level_name,
     )
 
 
@@ -1219,6 +1254,9 @@ def _run_key_pass(prepared: _PreparedGenericReconciliation) -> _GenericMatchStat
             pass_label="Primary key" if file_2_row is not None else "",
         )
 
+    # ── Pass 1a: the same reference written differently (docs/adr/0002) ──
+    _run_reference_variant_passes(prepared, outcomes, matched_file_2_indices)
+
     # ── Pass 1b: similar primary keys after all exact matches are reserved ──
     if has_keys and normalized_secondary_conditions:
         for row_idx in sorted(fallback_positions):
@@ -1295,7 +1333,266 @@ def _run_key_pass(prepared: _PreparedGenericReconciliation) -> _GenericMatchStat
                 file_2_row=file_2_row, candidate_row=candidate_row, method=method,
             )
 
+    # ── Pass 1c: review-only suggestions for similar references ──────────
+    _run_reference_suggestions(prepared, outcomes, matched_file_2_indices)
+
     return _GenericMatchState(outcomes, matched_file_2_indices)
+
+
+def _open_key_outcomes(outcomes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records the key pass left unmatched without a decision for a person.
+
+    Ambiguous records and same-key, different-secondary-key records are never
+    re-paired by a weaker rule.
+    """
+    return [
+        outcome for outcome in outcomes
+        if outcome["file_2_row"] is None
+        and outcome["classification"] is MatchClassification.NOT_FOUND
+        and not outcome["secondary_mismatch"]
+    ]
+
+
+def _run_reference_variant_passes(
+    prepared: _PreparedGenericReconciliation,
+    outcomes: list[dict[str, Any]],
+    matched_file_2_indices: set[object],
+) -> None:
+    """Pair reference numbers written differently (docs/adr/0002).
+
+    Rules run in order on records the exact key did not match: leading zeros
+    (a match), then look-alike characters and a document prefix or financial
+    year (both for review). A rule pairs a record only with the one remaining
+    candidate that also passes every "must also match" column, and only when
+    no other open record qualifies for that candidate.
+    """
+    if prepared.reference_level not in {"variants", "suggestions"} or not prepared.has_keys:
+        return
+    variant_components = [kind in VARIANT_KEY_TYPES for kind in prepared.raw_key_types]
+    if not any(variant_components):
+        return
+    destination_rows = prepared.file_2_records
+    destination_indices = list(prepared.file_2_df.index)
+    key_count = len(prepared.file_1_id_col)
+    conditions = prepared.normalized_secondary_conditions
+    learning = prepared.request.learning
+    result_type = "composite" if prepared.is_composite_key else prepared.key_matcher_types[0]
+
+    def form(rule, row: dict[str, Any], columns: list[str]):
+        return key_forms(
+            rule,
+            [row.get(column) for column in columns],
+            variant_components,
+            [row.get(f"__KEY_{position}__") for position in range(key_count)],
+        )
+
+    for rule in VARIANT_RULES:
+        sources = _open_key_outcomes(outcomes)
+        if not sources:
+            return
+        destinations_by_key: dict[tuple, list[tuple[object, dict[str, Any], tuple]]] = {}
+        for index, row in zip(destination_indices, destination_rows):
+            if index in matched_file_2_indices:
+                continue
+            destination_form = form(rule, row, prepared.file_2_id_col)
+            if destination_form is not None:
+                destinations_by_key.setdefault(destination_form[0], []).append((index, row, destination_form))
+        if not destinations_by_key:
+            return
+        sources_by_key: dict[tuple, list[tuple[dict[str, Any], tuple]]] = {}
+        for outcome in sources:
+            source_form = form(rule, outcome["row"], prepared.file_1_id_col)
+            if source_form is not None and source_form[0] in destinations_by_key:
+                sources_by_key.setdefault(source_form[0], []).append((outcome, source_form))
+
+        for key, source_entries in sources_by_key.items():
+            def qualifies(source_row: dict[str, Any], source_form: tuple, destination_row: dict[str, Any], destination_form: tuple) -> bool:
+                # The rule must have changed a value, or the exact key would
+                # already have paired the two; a financial year present on
+                # both sides must be the same year.
+                return (
+                    (source_form[1] or destination_form[1])
+                    and years_compatible(source_form[2], destination_form[2])
+                    and not _failed_secondary_conditions(source_row, destination_row, conditions)
+                )
+
+            for outcome, source_form in source_entries:
+                if outcome["file_2_row"] is not None or outcome["classification"] is not MatchClassification.NOT_FOUND:
+                    continue
+                source_row = outcome["row"]
+                candidates = [
+                    (index, row, destination_form)
+                    for index, row, destination_form in destinations_by_key[key]
+                    if index not in matched_file_2_indices and qualifies(source_row, source_form, row, destination_form)
+                ]
+                if not candidates:
+                    continue
+                rivals = [
+                    other for other, other_form in source_entries
+                    if other is not outcome
+                    and other["file_2_row"] is None
+                    and other["classification"] is MatchClassification.NOT_FOUND
+                    and any(qualifies(other["row"], other_form, row, destination_form) for _, row, destination_form in candidates)
+                ]
+                if len(candidates) > 1 or rivals:
+                    count = len(candidates) + len(rivals)
+                    outcome.update(
+                        classification=MatchClassification.AMBIGUOUS_MATCH,
+                        method=rule.label,
+                        explanation=(
+                            f"{count} records share this key once {rule.explanation} are ignored, so none was chosen."
+                        ),
+                    )
+                    continue
+                index, destination_row, _ = candidates[0]
+                key_1, key_2 = prepared.decision_keys(source_row, destination_row)
+                if rule.needs_review and learning is not None and learning.is_rejected(key_1, key_2):
+                    outcome["learned_note"] = prepared.rejected_note(source_row, [destination_row])
+                    continue
+                matched_file_2_indices.add(index)
+                if rule.needs_review:
+                    classification = MatchClassification.EXCEPTION_MATCH
+                    key_result = MatchResult(True, 99, result_type, f"Key differs only by {rule.explanation}")
+                    explanation = f"Key differs only by {rule.explanation} ({key_1} ↔ {key_2}). Please confirm."
+                else:
+                    classification = MatchClassification.EXACT_MATCH
+                    key_result = MatchResult(True, 100, result_type, f"Key matched after removing {rule.explanation}")
+                    explanation = f"Key matched after removing {rule.explanation} ({key_1} = {key_2})."
+                outcome.update(
+                    classification=classification,
+                    key_result=key_result,
+                    best_idx=index,
+                    file_2_row=destination_row,
+                    candidate_row=destination_row,
+                    pass_label="Primary key",
+                    method=rule.label,
+                    explanation=explanation,
+                )
+
+
+_SUGGESTION_FIELD_TYPES = {"numeric", "date", "company_name", "person_name"}
+
+
+def _suggestion_agreement(
+    prepared: _PreparedGenericReconciliation,
+    source_row: dict[str, Any],
+    destination_row: dict[str, Any],
+) -> list[str] | None:
+    """Mapped amount, date and party fields that confirm a suggestion.
+
+    Returns None when any of them disagrees beyond its tolerance, or when no
+    amount is mapped: a similar reference alone never proposes a pairing.
+    """
+    agreed: list[str] = []
+    has_amount = False
+    for index, ((left, right), kind) in enumerate(zip(prepared.normalized_rules, prepared.comparison_types)):
+        if kind not in _SUGGESTION_FIELD_TYPES:
+            continue
+        combination_1, combination_2 = prepared.combination_types[index]
+        differences = compare_rule_values(
+            source_row,
+            destination_row,
+            left,
+            right,
+            matcher_type_override=kind,
+            decimal_precision=prepared.comparison_precisions[index],
+            number_format_file_1=prepared.number_formats_1[index],
+            number_format_file_2=prepared.number_formats_2[index],
+            combination_type_file_1=combination_1,
+            combination_type_file_2=combination_2,
+        )
+        label = fields_label(left)
+        if differences and accepted_reason(
+            label,
+            differences.get(f"{label} (FILE 1)"),
+            differences.get(f"{label} (FILE 2)"),
+            differences.get(f"{label} DIFF"),
+            prepared.tolerance_bands,
+            fields_label(right),
+            differences.get(f"{label} CONFIDENCE"),
+        ) is None:
+            return None
+        has_amount = has_amount or kind == "numeric"
+        agreed.append(label)
+    return agreed if has_amount else None
+
+
+def _run_reference_suggestions(
+    prepared: _PreparedGenericReconciliation,
+    outcomes: list[dict[str, Any]],
+    matched_file_2_indices: set[object],
+) -> None:
+    """Propose similar references for review, never as matches.
+
+    Only at the "Variants + suggestions" level, for a single reference key.
+    A proposal needs a similarity of at least ``SUGGESTION_MIN_SCORE``, every
+    mapped amount (and date or party, when mapped) in agreement, a lead of
+    ``SUGGESTION_MIN_LEAD`` points over the next candidate, and to be the
+    best proposal for its destination record too.
+    """
+    if prepared.reference_level != "suggestions" or not prepared.has_keys:
+        return
+    if len(prepared.file_1_id_col) != 1 or prepared.raw_key_types[0] not in VARIANT_KEY_TYPES:
+        return
+    if "numeric" not in prepared.comparison_types:
+        return
+    sources = _open_key_outcomes(outcomes)
+    if not sources:
+        return
+    source_column, destination_column = prepared.file_1_id_col[0], prepared.file_2_id_col[0]
+    destination_rows = {
+        index: row
+        for index, row in zip(prepared.file_2_df.index, prepared.file_2_records)
+        if index not in matched_file_2_indices
+    }
+    suggester = ReferenceSuggester(
+        (index, suggestion_form(row.get(destination_column))) for index, row in destination_rows.items()
+    )
+    conditions = prepared.normalized_secondary_conditions
+    learning = prepared.request.learning
+
+    proposals: dict[object, list[tuple[int, dict[str, Any], list[str]]]] = {}
+    for outcome in sources:
+        source_row = outcome["row"]
+        confirmed = []
+        for index, score in suggester.candidates(suggestion_form(source_row.get(source_column))):
+            destination_row = destination_rows[index]
+            if _failed_secondary_conditions(source_row, destination_row, conditions):
+                continue
+            if learning is not None and learning.is_rejected(*prepared.decision_keys(source_row, destination_row)):
+                continue
+            agreed = _suggestion_agreement(prepared, source_row, destination_row)
+            if agreed is not None:
+                confirmed.append((index, score, agreed))
+        if not confirmed:
+            continue
+        if len(confirmed) > 1 and confirmed[0][1] - confirmed[1][1] < SUGGESTION_MIN_LEAD:
+            continue
+        index, score, agreed = confirmed[0]
+        proposals.setdefault(index, []).append((score, outcome, agreed))
+
+    for index, entries in proposals.items():
+        entries.sort(key=lambda entry: -entry[0])
+        if len(entries) > 1 and entries[0][0] - entries[1][0] < SUGGESTION_MIN_LEAD:
+            continue  # Two records want this one equally: a person decides.
+        score, outcome, agreed = entries[0]
+        destination_row = destination_rows[index]
+        key_1, key_2 = prepared.decision_keys(outcome["row"], destination_row)
+        matched_file_2_indices.add(index)
+        outcome.update(
+            classification=MatchClassification.EXCEPTION_MATCH,
+            key_result=MatchResult(True, score, prepared.key_matcher_types[0], "Similar reference"),
+            threshold=SUGGESTION_MIN_SCORE,
+            best_idx=index,
+            file_2_row=destination_row,
+            candidate_row=destination_row,
+            pass_label="Primary key",
+            method="Similar reference (suggestion)",
+            explanation=(
+                f"Suggested pairing: {key_1} and {key_2} are {score}% similar, and "
+                f"{', '.join(agreed)} agree{'s' if len(agreed) == 1 else ''}. Please confirm."
+            ),
+        )
 
 
 def _run_keyless_passes(

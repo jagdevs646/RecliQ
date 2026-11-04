@@ -108,7 +108,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
       { category: "daily_summary" as const, title: "Daily debit and credit totals", label: "Daily groups show where totals differ; they do not confirm transaction-level matches", count: summary.daily_summary_groups ?? summary.daily_periods ?? 0, icon: SlidersHorizontal, tone: "green" },
     ] : []),
     ...(hasIdentityBreakdown ? [
-      { category: "exception_matches" as const, title: "Matches to confirm", label: "Please confirm: similar key with matching secondary keys, or an amount/date pass", count: summary.exception_matches ?? 0, icon: Split, tone: "violet" },
+      { category: "exception_matches" as const, title: "Matches to confirm", label: "Please confirm: a reference variant or suggestion, a similar key with matching secondary keys, or an amount/date pass", count: summary.exception_matches ?? 0, icon: Split, tone: "violet" },
       { category: "ambiguous_matches" as const, title: "Ambiguous matches", label: "Several candidates qualified, so none was selected", count: summary.ambiguous_matches ?? 0, icon: HelpCircle, tone: "amber" },
       { category: "not_found" as const, title: "Not found", label: "No destination record qualified for this primary key", count: summary.not_found_matches ?? 0, icon: XCircle, tone: "slate" },
     ] : [

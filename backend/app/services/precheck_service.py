@@ -32,6 +32,7 @@ from app.reconciliation_engine.matching.indexed_matcher import (
 from app.reconciliation_engine.normalization.entities import build_normalizer, use_normalizer
 from app.reconciliation_engine.transformations import apply_transformations
 from app.reconciliation_engine.date_amount import inspect_date_amount_inputs
+from app.reconciliation_engine.matching.reference_variants import VARIANT_KEY_TYPES, VARIANT_RULES, key_forms, reference_level
 from app.schemas.reconciliation import ReconciliationPlan
 
 _NUMERIC_DATE = re.compile(r"^\s*(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\s*$")
@@ -142,6 +143,47 @@ def _numeric_share(series: pd.Series) -> tuple[float, pd.Series]:
     return 1 - non_numeric.mean(), non_numeric
 
 
+def _variant_key_matches(
+    frames: dict[str, pd.DataFrame],
+    keys: dict[str, list[str]],
+    key_types: list[str],
+    identities: dict[str, pd.Series],
+    level: str,
+) -> dict[str, int]:
+    """Source keys the reference-variant rules would pair, by rule (docs/adr/0002).
+
+    An estimate for the check, not the run: it ignores "must also match"
+    columns and whether a variant is unique, which the run then decides.
+    """
+    variant_components = [kind in VARIANT_KEY_TYPES for kind in key_types]
+    if level not in {"variants", "suggestions"} or not any(variant_components):
+        return {}
+    exact = set(identities["source"]) & set(identities["destination"])
+
+    def open_rows(side: str):
+        identity = identities[side]
+        values = frames[side].loc[identity.index, keys[side]].itertuples(index=False, name=None)
+        return [(key, list(row)) for key, row in zip(identity, values) if key not in exact]
+
+    sources, destinations = open_rows("source"), open_rows("destination")
+    paired: set[tuple] = set()
+    counts: dict[str, int] = {}
+    for rule in VARIANT_RULES:
+        destination_forms = {
+            form[0] for key, values in destinations
+            if (form := key_forms(rule, values, variant_components, list(key))) is not None
+        }
+        hits = {
+            key for key, values in sources
+            if key not in paired
+            and (form := key_forms(rule, values, variant_components, list(key))) is not None
+            and form[0] in destination_forms
+        }
+        paired |= hits
+        counts[rule.name] = len(hits)
+    return counts
+
+
 def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
     if rule.get("reconciliation_method") == "date_amount":
         return inspect_date_amount_inputs(df1, df2, rule.get("date_amount") or {})
@@ -228,17 +270,32 @@ def _check_rule(df1: pd.DataFrame, df2: pd.DataFrame, rule: dict) -> list[dict]:
                 ))
         source_keys, destination_keys = set(identities["source"]), set(identities["destination"])
         if source_keys:
-            overlap = len(source_keys & destination_keys) / len(source_keys)
+            exact = len(source_keys & destination_keys)
+            variants = _variant_key_matches(
+                frames, keys, key_types, identities, reference_level(rule.get("similarity_policy"))
+            )
+            matched_by_variant = variants.get("leading_zeros", 0)
+            reviewed_by_variant = sum(variants.values()) - matched_by_variant
+            overlap = (exact + matched_by_variant + reviewed_by_variant) / len(source_keys)
+            exact_text = f"{exact / len(source_keys):.0%} of source keys exist in the destination sheet"
+            variant_text = ""
+            if matched_by_variant or reviewed_by_variant:
+                parts = []
+                if matched_by_variant:
+                    parts.append(f"{matched_by_variant:,} more pair after removing leading zeros")
+                if reviewed_by_variant:
+                    parts.append(f"{reviewed_by_variant:,} more differ only by a prefix, year or look-alike character and go to Match Review")
+                variant_text = f"; about {' and '.join(parts)} ({overlap:.0%} in all)"
             if overlap < LOW_OVERLAP:
                 issues.append(_issue(
                     "warning", "key_overlap",
-                    f"Only {overlap:.0%} of source keys exist in the destination sheet. Check that the key columns hold the same "
-                    "identifier in both files (a prefix or format difference may need a transformation).",
-                    count=len(source_keys & destination_keys),
+                    f"Only {exact_text}{variant_text}. Check that the key columns hold the same "
+                    "identifier in both files (a prefix or format difference may need a transformation, "
+                    "or the reference numbers level can be raised to Variants).",
+                    count=exact,
                 ))
             else:
-                issues.append(_issue("info", "key_overlap", f"{overlap:.0%} of source keys exist in the destination sheet.",
-                                     count=len(source_keys & destination_keys)))
+                issues.append(_issue("info", "key_overlap", f"{exact_text[0].upper()}{exact_text[1:]}{variant_text}.", count=exact))
 
     # ── Compared fields ──────────────────────────────────────────────────
     date_columns: dict[str, set[str]] = {"source": set(), "destination": set()}

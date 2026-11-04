@@ -1,6 +1,8 @@
 import { ArrowRight, Info, Plus, X } from "lucide-react";
 import type { DateAmountSettings, DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
 import { ALL_FIELDS, availableColumns, describeTolerance, limitsFromPasses, newPass } from "../lib/plan";
+import { ABSOLUTE_AMOUNT_LEVELS, AMOUNT_LEVELS, DATE_LEVELS, TEXT_LEVELS, amountLevelId, dateLevelId, textLevelId } from "../lib/matchLevels";
+import { LevelSelect } from "./LevelSelect";
 
 interface EditorProps {
   config: SheetRuleDraft;
@@ -99,8 +101,10 @@ export function DateAmountReportOptions({ config, onChange }: Omit<EditorProps, 
     </div>
     {!settings.verifyTransactions && <p className="date-amount-warning" role="note">Aggregate balances do not prove individual transactions match. The report will label transactions as not verified.</p>}
     <div className="date-amount-report-grid">
-      <label><span>Amount tolerance</span><input type="number" min="0" step="0.01" value={settings.amountTolerance} onChange={(event) => update({ amountTolerance: event.target.value })} aria-label="Amount tolerance" /><small>Non-negative; up to 6 decimal places. Group totals always match exactly.</small></label>
-      <label><span>Date tolerance (days)</span><input type="number" min="0" max="366" step="1" value={settings.dateToleranceDays} onChange={(event) => update({ dateToleranceDays: Math.max(0, Math.min(366, Math.round(Number(event.target.value) || 0))) })} aria-label="Date tolerance in days" /><small>Applied only to unique one-to-one candidates.</small></label>
+      <label><span>Amount tolerance</span><LevelSelect options={ABSOLUTE_AMOUNT_LEVELS} currentId={amountLevelId(Number(settings.amountTolerance) || 0, 0, ABSOLUTE_AMOUNT_LEVELS)} ariaLabel="Amount tolerance" onSelect={(limits) => update({ amountTolerance: String(limits?.amount ?? 0) })}
+        customEditor={<input type="number" min="0" step="0.01" value={settings.amountTolerance} onChange={(event) => update({ amountTolerance: event.target.value })} aria-label="Custom amount tolerance" />} /><small>Non-negative; up to 6 decimal places. Group totals always match exactly.</small></label>
+      <label><span>Date tolerance</span><LevelSelect options={DATE_LEVELS} currentId={dateLevelId(settings.dateToleranceDays)} ariaLabel="Date tolerance" onSelect={(days) => update({ dateToleranceDays: days ?? 0 })}
+        customEditor={<input type="number" min="0" max="366" step="1" value={settings.dateToleranceDays} onChange={(event) => update({ dateToleranceDays: Math.max(0, Math.min(366, Math.round(Number(event.target.value) || 0))) })} aria-label="Custom date tolerance in days" />} /><small>Applied only to unique one-to-one candidates.</small></label>
     </div>
     <label className="checkbox-line"><input type="checkbox" checked={settings.allowGroupMatches} onChange={(event) => update({ allowGroupMatches: event.target.checked })} disabled={!settings.verifyTransactions} />Allow exact one-to-many or many-to-one groups</label>
     {settings.allowGroupMatches && settings.verifyTransactions && <label className="date-amount-group-size"><span>Maximum records in one group</span><input type="number" min="2" max="8" step="1" value={settings.maxGroupSize} onChange={(event) => update({ maxGroupSize: Math.max(2, Math.min(8, Math.round(Number(event.target.value) || 2))) })} /><small>Search is bounded; ambiguous or capped candidates remain for review.</small></label>}
@@ -154,10 +158,15 @@ export function MatchingPassesEditor({ config, onChange, sourceLabel, destinatio
         <span className="field-hint">Reference</span>
       </div>
       <div className="advanced-grid">
-        {item.date_source && <label><span>Date window (± days)</span><input type="number" min={0} max={366} value={item.date_window_days} onChange={(event) => update(index, { date_window_days: Math.max(0, Number(event.target.value)) })} /></label>}
-        {item.type === "amount_tolerance" && <label><span>Amount range (±)</span><input type="number" min={0} step="0.01" value={item.amount_tolerance} onChange={(event) => update(index, { amount_tolerance: Math.max(0, Number(event.target.value)) })} /></label>}
-        {item.type === "amount_tolerance" && <label><span>or range (± %)</span><input type="number" min={0} max={100} step="0.1" value={item.amount_tolerance_percent} onChange={(event) => update(index, { amount_tolerance_percent: Math.max(0, Number(event.target.value)) })} /></label>}
-        {item.narrative_source && <label><span>Reference similarity (%)</span><input type="number" min={50} max={100} value={item.narrative_threshold} onChange={(event) => update(index, { narrative_threshold: Math.min(100, Math.max(50, Number(event.target.value))) })} /></label>}
+        {item.date_source && <label><span>Date window</span><LevelSelect options={DATE_LEVELS} currentId={dateLevelId(item.date_window_days)} ariaLabel="Date window" onSelect={(days) => update(index, { date_window_days: days ?? 0 })}
+          customEditor={<input type="number" min={0} max={366} value={item.date_window_days} aria-label="Custom date window in days" onChange={(event) => update(index, { date_window_days: Math.max(0, Number(event.target.value)) })} />} /></label>}
+        {item.type === "amount_tolerance" && <label><span>Amount range</span><LevelSelect options={AMOUNT_LEVELS} currentId={amountLevelId(item.amount_tolerance, item.amount_tolerance_percent)} ariaLabel="Amount range" onSelect={(limits) => update(index, { amount_tolerance: limits?.amount ?? 0, amount_tolerance_percent: limits?.percent ?? 0 })}
+          customEditor={<>
+            <input type="number" min={0} step="0.01" value={item.amount_tolerance} aria-label="Custom amount range (±)" title="± amount" onChange={(event) => update(index, { amount_tolerance: Math.max(0, Number(event.target.value)) })} />
+            <input type="number" min={0} max={100} step="0.1" value={item.amount_tolerance_percent} aria-label="Custom amount range (± %)" title="or ± %" onChange={(event) => update(index, { amount_tolerance_percent: Math.max(0, Number(event.target.value)) })} />
+          </>} /></label>}
+        {item.narrative_source && <label><span>Reference similarity</span><LevelSelect options={TEXT_LEVELS} currentId={textLevelId(item.narrative_threshold)} ariaLabel="Reference similarity" onSelect={(similarity) => update(index, { narrative_threshold: similarity ?? 80 })}
+          customEditor={<input type="number" min={50} max={100} value={item.narrative_threshold} aria-label="Custom reference similarity (%)" onChange={(event) => update(index, { narrative_threshold: Math.min(100, Math.max(50, Number(event.target.value))) })} />} /></label>}
       </div>
       {config.secondaryConditions.length > 0 && <label className="checkbox-line"><input type="checkbox" checked={item.respect_secondary_keys} onChange={(event) => update(index, { respect_secondary_keys: event.target.checked })} />The "must also match" columns must still agree in this pass</label>}
       {item.date_source && config.secondaryConditions.some((condition) => condition.comparison_method === "normalized_date" && condition.source_column === item.date_source && condition.destination_column === item.date_destination) && <p className="field-hint">This pass's date window replaces the exact-date "must also match" check on {item.date_source}. Records whose key matched but whose date differed are re-checked here, only against the record with the same key.</p>}

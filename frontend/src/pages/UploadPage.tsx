@@ -12,6 +12,8 @@ import type { SheetPairing } from "../components/SheetPairingStep";
 import { FilePairingStep } from "../components/FilePairingStep";
 import type { FilePairing, WorkbookWithSheets } from "../components/FilePairingStep";
 import { PrecheckPanel } from "../components/PrecheckPanel";
+import { LevelSelect } from "../components/LevelSelect";
+import { ABSOLUTE_AMOUNT_LEVELS, REFERENCE_LEVELS, TEXT_LEVELS, amountLevelId, describeTextLevel, pickLevels, referenceLevelOf, textLevelId } from "../lib/matchLevels";
 import { DateAmountMappingEditor, DateAmountReportOptions, DatesAndNamesSettings, MatchingPassesEditor, ToleranceNotices, TransformationsEditor } from "../components/RuleExtras";
 import { applyReadyMadeSetup, readyMadeSetupApplied, readyMadeSetupRelevant, availableColumns, copyRuleSettings, dateFormatLabel, describePass, describeTolerance, draftToSheetRule, emptyDraft, hasKeys, isDateOnlyKey, mappingIsReady, mappingSetupStatus, matchingSetupStatus, precheckBlocked, precheckNeedsAcknowledgement, precheckSummary, pruneTolerances, ruleIsReady, ruleStatus, sheetRuleToDraft, shouldSuggestDateAmount, suggestSheetPair } from "../lib/plan";
 import { UPLOAD_ACCEPT, formatServerTime } from "../lib/formats";
@@ -914,7 +916,8 @@ export function UploadPage({ onJobCreated, rerunFrom = null, onStartFresh, initi
         </> : <>
         <dt>Primary key</dt><dd>{hasKeys(config) ? `${config.primaryKeySource.join(" + ")} → ${config.primaryKeyDestination.join(" + ")}` : "None — matched on amount and date"}</dd>
         <dt>Must also match</dt><dd>{config.secondaryConditions.length ? config.secondaryConditions.map(describeCondition).join("; ") : "Nothing else (key only)"}</dd>
-        <dt>Key comparison</dt><dd>{config.similarityPolicy.matcher_type_override ?? "Automatic by data type"} · minimum confidence {config.similarityPolicy.threshold !== undefined ? `${config.similarityPolicy.threshold}%` : "automatic"}</dd>
+        <dt>Reference numbers</dt><dd>{REFERENCE_LEVELS.find((level) => level.value === referenceLevelOf(config.similarityPolicy.reference_matching))?.label}</dd>
+        <dt>Key comparison</dt><dd>{config.similarityPolicy.matcher_type_override ?? "Automatic by data type"} · similar keys: {describeTextLevel(config.similarityPolicy.threshold)}</dd>
         {dateOnly && <><dt>Date-only key</dt><dd className="is-warning">{config.dateOnlyOverride ? "Explicitly allowed — recorded in the report" : "Blocked until another key column is added or the override is enabled"}</dd></>}
         {config.matchingPasses.length > 0 && <><dt>Extra matching passes</dt><dd>{config.matchingPasses.map((item, passIndex) => describePass(item, passIndex + (hasKeys(config) ? 2 : 1))).join("; ")}</dd></>}
         {config.transformations.length > 0 && <><dt>Prepared before matching</dt><dd>{config.transformations.length} step{config.transformations.length === 1 ? "" : "s"}</dd></>}
@@ -1156,6 +1159,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
         <button type="button" className="icon-button" onClick={() => setKeyPairs(keyPairs.filter((_, itemIndex) => itemIndex !== index))} disabled={keyPairs.length === 1 && !source && !destination} title="Remove this key column" aria-label="Remove this key column"><X size={16} /></button>
       </div>)}
       <button type="button" className="text-command" onClick={() => setKeyPairs([...keyPairs, ["", ""]])}><Plus size={15} />Add another key column</button>
+      <ReferenceLevelPicker config={config} onChange={onChange} />
       {dateOnly && <div className="date-only-guard" role="alert">
         <span><AlertTriangle size={16} /> {DATE_ONLY_WARNING}</span>
         <label><input type="checkbox" checked={config.dateOnlyOverride} onChange={(event) => onChange({ ...config, dateOnlyOverride: event.target.checked })} />Allow date-only matching for this rule anyway (recorded as a warning in the report)</label>
@@ -1176,7 +1180,8 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
           <select value={condition.comparison_method} onChange={(event) => updateCondition(index, { comparison_method: event.target.value as SecondaryMatchCondition["comparison_method"] })} aria-label="How to compare">
             {COMPARISON_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
-          {condition.comparison_method === "numeric_tolerance" && <input type="number" min="0" step="0.01" value={condition.numeric_tolerance ?? 0} onChange={(event) => updateCondition(index, { numeric_tolerance: Number(event.target.value) })} aria-label="Tolerance" />}
+          {condition.comparison_method === "numeric_tolerance" && <LevelSelect options={ABSOLUTE_AMOUNT_LEVELS} currentId={amountLevelId(condition.numeric_tolerance ?? 0, 0, ABSOLUTE_AMOUNT_LEVELS)} ariaLabel="Tolerance" onSelect={(limits) => updateCondition(index, { numeric_tolerance: limits?.amount ?? 0 })}
+            customEditor={<input type="number" min="0" step="0.01" value={condition.numeric_tolerance ?? 0} onChange={(event) => updateCondition(index, { numeric_tolerance: Number(event.target.value) })} aria-label="Custom tolerance" />} />}
         </div>
         <button type="button" className="icon-button" onClick={() => onChange({ ...config, secondaryConditions: config.secondaryConditions.filter((_, itemIndex) => itemIndex !== index) })} title="Remove this column" aria-label="Remove this column"><X size={16} /></button>
       </div>)}
@@ -1191,7 +1196,8 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
       <p>When a key is not found exactly, RecliQ looks for a record with a <em>similar</em> key whose "must also match" columns agree, and lists it under Match Review for you to confirm.</p>
       <div className="advanced-grid">
         <label><span>Compare keys as</span><select value={config.similarityPolicy.matcher_type_override ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, matcher_type_override: event.target.value || undefined } })}><option value="">Automatic (from the data)</option><option value="identifier">Codes / reference numbers</option><option value="company_name">Company names</option><option value="person_name">Person names</option><option value="text">Plain text</option></select></label>
-        <label><span>How similar (%)</span><input type="number" min="0" max="100" placeholder="Automatic" value={config.similarityPolicy.threshold ?? ""} onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, threshold: event.target.value === "" ? undefined : Number(event.target.value) } })} /></label>
+        <label><span>How similar</span><LevelSelect options={TEXT_LEVELS} currentId={textLevelId(config.similarityPolicy.threshold)} emptyLabel="Automatic (by data type)" ariaLabel="How similar" onSelect={(threshold) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, threshold: threshold ?? undefined } })}
+          customEditor={<input type="number" min="0" max="100" placeholder="%" value={config.similarityPolicy.threshold ?? ""} aria-label="Custom similarity (%)" onChange={(event) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, threshold: event.target.value === "" ? undefined : Number(event.target.value) } })} />} /></label>
       </div>
     </details>
     </>}
@@ -1204,8 +1210,28 @@ function GstColumnMappingStep({ config, missingFile1, missingFile2, file1Name = 
   return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Review GST field mapping</h2><p>GST uses its documented standard fields. RecliQ maps each required header to the same header in the other file.</p></div><span className="mapping-count">{config?.required_columns.length ?? 0} standard fields</span></div><div className="gst-field-map"><div className="gst-field-map-header"><span>GST field</span><span>{file1Name}</span><span>{file2Name}</span></div>{(config?.required_columns ?? []).map((field) => <div className="gst-field-map-row" key={field}><strong>{field}</strong><span className={missingSource.has(field) ? "is-missing" : "is-present"}>{missingSource.has(field) ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}{missingSource.has(field) ? "Missing" : "Verified"}</span><span className={missingDestination.has(field) ? "is-missing" : "is-present"}>{missingDestination.has(field) ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}{missingDestination.has(field) ? "Missing" : "Verified"}</span></div>)}</div><GstValidationAlert config={config} missingFile1={missingFile1} missingFile2={missingFile2} error="" file1Name={file1Name} file2Name={file2Name} /></section>;
 }
 
+// GST names: 85% is the engine's recommended default (GST_TEXT_REVIEW_THRESHOLD).
+const GST_NAME_LEVELS = [
+  { id: "recommended", label: "Recommended", value: 85, hint: "At least 85% similar" },
+  ...pickLevels(TEXT_LEVELS, ["exact", "very_close", "close", "similar"]),
+];
+
+/** How strictly reference numbers must agree (docs/adr/0002). */
+function ReferenceLevelPicker({ config, onChange }: { config: SheetRuleDraft; onChange: (config: SheetRuleDraft) => void }) {
+  const level = referenceLevelOf(config.similarityPolicy.reference_matching);
+  const current = REFERENCE_LEVELS.find((option) => option.value === level);
+  return <div className="reference-level">
+    <label><span>Reference numbers (invoice no., IDs) must match</span>
+      <LevelSelect options={REFERENCE_LEVELS.map(({ hint: _hint, ...option }) => option)} currentId={level} ariaLabel="How reference numbers must match"
+        onSelect={(value) => onChange({ ...config, similarityPolicy: { ...config.similarityPolicy, reference_matching: value ?? undefined } })} />
+    </label>
+    {current?.hint && <small className="field-hint">{current.hint}</small>}
+  </div>;
+}
+
 function GstReportSetup({ threshold, onThresholdChange }: { threshold: number; onThresholdChange: (value: number) => void }) {
-  return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Configure GST report</h2><p>Choose how cautious the engine should be when supplier names need an intelligent text comparison.</p></div></div><label className="gst-threshold"><span>Supplier name confidence threshold</span><div><input type="range" min="70" max="100" step="1" value={threshold} onChange={(event) => onThresholdChange(Number(event.target.value))} /><output>{threshold}%</output></div><small>Supplier names less similar than this are reported as differences. Names at least this similar, but not identical, go to Match Review for you to confirm.</small></label><div className="gst-report-sheets">{GST_REPORT_SHEETS.map((sheet) => <div key={sheet}><CheckCircle2 size={16} /><span>{sheet}</span><small>Included</small></div>)}</div></section>;
+  return <section className="gst-workflow-step"><div className="section-heading"><div><h2>Configure GST report</h2><p>Choose how cautious the engine should be when supplier names need an intelligent text comparison.</p></div></div><label className="gst-threshold"><span>Supplier name confidence threshold</span><div><LevelSelect options={GST_NAME_LEVELS} currentId={textLevelId(threshold, GST_NAME_LEVELS)} ariaLabel="Supplier name confidence threshold" onSelect={(value) => onThresholdChange(value ?? 85)}
+      customEditor={<><input type="range" min="70" max="100" step="1" value={threshold} aria-label="Custom supplier name threshold" onChange={(event) => onThresholdChange(Number(event.target.value))} /><output>{threshold}%</output></>} /></div><small>Supplier names less similar than this are reported as differences. Names at least this similar, but not identical, go to Match Review for you to confirm.</small></label><div className="gst-report-sheets">{GST_REPORT_SHEETS.map((sheet) => <div key={sheet}><CheckCircle2 size={16} /><span>{sheet}</span><small>Included</small></div>)}</div></section>;
 }
 
 function GstValidationAlert({ config, missingFile1, missingFile2, error, file1Name = "File 1", file2Name = "File 2" }: GstStepProps & { error: string }) {

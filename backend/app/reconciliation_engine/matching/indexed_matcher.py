@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
     fuzz = None
 
 from app.reconciliation_engine.normalization.entities import active_normalizer
+from app.reconciliation_engine.matching.reference_variants import exact_reference_identity
 from app.reconciliation_engine.cache import (
     compact_identifier,
     is_blank,
@@ -276,7 +277,7 @@ def detect_primary_key_type(
 
 
 def match_threshold(matcher_type: str) -> int:
-    if matcher_type in {"numeric", "date", "invoice", "gstin", "pan", "identifier"}:
+    if matcher_type in {"numeric", "date", "invoice", "gstin", "pan", "identifier", "exact_reference"}:
         return 95
     return 75
 
@@ -290,6 +291,9 @@ def normalized_identity_value(value: object, matcher_type: str) -> str | None:
     """
     if is_blank(value):
         return None
+    if matcher_type == "exact_reference":
+        # Reference level "Exact": only letter case and extra spaces are ignored.
+        return exact_reference_identity(value)
     if matcher_type in {"invoice", "gstin", "pan", "identifier"}:
         normalized = compact_identifier(value)
     elif matcher_type == "date":
@@ -482,6 +486,15 @@ def compare_values(
 
     if matcher_type in {"invoice", "gstin", "pan", "identifier"}:
         return _compare_identifier(value1, value2, matcher_type)
+
+    if matcher_type == "exact_reference":
+        identity1, identity2 = exact_reference_identity(value1), exact_reference_identity(value2)
+        if identity1 is not None and identity1 == identity2:
+            return MatchResult(True, 100, matcher_type, "Exact reference match", value1_normalized=identity1, value2_normalized=identity2)
+        return MatchResult(
+            False, 0, matcher_type, "Reference mismatch", f"File1: {value1} | File2: {value2}",
+            identity1 or "", identity2 or "",
+        )
 
     if matcher_type in {"person_name", "company_name"}:
         return _compare_text(value1, value2, matcher_type, prefer_name=True)

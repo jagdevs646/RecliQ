@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.reconciliation_engine.cache import normalize_header, parse_date_value, to_number
+from app.reconciliation_engine.match_levels import amount_level_name, text_level_name
 
 ALL_FIELDS = "*"
 # Differences are rounded to cents by the engine; allow for float noise.
@@ -40,14 +41,21 @@ class Band:
 
     def describe(self) -> str:
         limits = []
-        if self.amount:
-            limits.append(f"±{self.amount:g}")
-        if self.percent:
-            limits.append(f"±{self.percent:g}%")
+        if self.amount or self.percent:
+            amount_limits = []
+            if self.amount:
+                amount_limits.append(f"±{self.amount:g}")
+            if self.percent:
+                amount_limits.append(f"±{self.percent:g}%")
+            text = " or ".join(amount_limits)
+            # Named level, unless the name is the limit itself ("±1").
+            name = amount_level_name(self.amount, self.percent)
+            limits.append(f"{text} ({name})" if name and name != text else text)
         if self.days:
             limits.append(f"±{self.days} day{'s' if self.days != 1 else ''}")
         if self.similarity:
-            limits.append(f"text at least {self.similarity}% similar")
+            name = text_level_name(self.similarity)
+            limits.append(f"text at least {self.similarity}% similar" + (f" ({name})" if name else ""))
         target = "Every compared field" if self.field == ALL_FIELDS else self.field
         return f"{target}: {' or '.join(limits)}"
 

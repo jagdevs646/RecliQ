@@ -2,7 +2,9 @@ import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Spa
 import { useMemo, useState, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { filterColumns, matchRanges, searchTerms } from "../lib/columnSearch";
 import { TOLERANCE_KINDS, TOLERANCE_LIMITS, clearTolerance, comparedFieldLabel, guessToleranceKind, setToleranceLimit, toleranceFor, toleranceIsComplete, toleranceKind, toleranceLimit, type ToleranceKind } from "../lib/plan";
+import { TOLERANCE_AMOUNT_LEVELS, TOLERANCE_DATE_LEVELS, TOLERANCE_TEXT_LEVELS, amountLevelId, dateLevelId, textLevelId } from "../lib/matchLevels";
 import type { AnalysisResponse, RuleMapping, ToleranceBand } from "../types";
+import { LevelSelect } from "./LevelSelect";
 import { ComparisonTypeHelp, ToleranceHelp } from "./RuleExtras";
 
 interface Props {
@@ -313,11 +315,31 @@ function RuleTolerance({ field, kind, guessed, tolerances, onKind, onChange }: {
     <select value={kind} aria-label={`Type of data in ${field}`} title={kind === guessed ? "Detected from the column. Change it if it is wrong." : "Type of data in this field"} onChange={(event) => { onKind(event.target.value as ToleranceKind); if (band) onChange(clearTolerance(tolerances, field)); }}>
       {TOLERANCE_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
     </select>
-    {limits.map((limit) => {
+    <ToleranceLevel key={kind} field={field} kind={kind} band={band} tolerances={tolerances} onChange={onChange} customEditor={limits.map((limit) => {
       const settings = TOLERANCE_LIMITS[limit];
       return <input key={limit} type="number" min={0} max={settings.max} step={settings.step} inputMode={settings.whole ? "numeric" : "decimal"} value={band?.[limit] ?? ""} placeholder={settings.placeholder} title={settings.label} aria-label={`${settings.label} for ${field}`} onChange={(event) => onChange(setToleranceLimit(tolerances, field, kind, limit, toleranceLimit(limit, event.target.value)))} />;
-    })}
+    })} />
   </div>;
+}
+
+/** The named level of one field's tolerance ("Rounding", "±3 days", "Close"); Custom shows the boxes. */
+function ToleranceLevel({ field, kind, band, tolerances, onChange, customEditor }: { field: string; kind: ToleranceKind; band: ToleranceBand | undefined; tolerances: ToleranceBand[]; onChange: (tolerances: ToleranceBand[]) => void; customEditor: ReactNode }) {
+  const label = `Tolerance for ${field}`;
+  if (kind === "amount") {
+    return <LevelSelect options={TOLERANCE_AMOUNT_LEVELS} currentId={amountLevelId(band?.amount, band?.percent, TOLERANCE_AMOUNT_LEVELS)} emptyLabel="Exact (no tolerance)" ariaLabel={label} customEditor={customEditor}
+      onSelect={(limits) => {
+        const cleared = clearTolerance(tolerances, field);
+        if (!limits) return onChange(cleared);
+        const withAmount = setToleranceLimit(cleared, field, "amount", "amount", limits.amount || null);
+        onChange(setToleranceLimit(withAmount, field, "amount", "percent", limits.percent || null));
+      }} />;
+  }
+  if (kind === "date") {
+    return <LevelSelect options={TOLERANCE_DATE_LEVELS} currentId={dateLevelId(band?.days, TOLERANCE_DATE_LEVELS)} emptyLabel="Same day (no tolerance)" ariaLabel={label} customEditor={customEditor}
+      onSelect={(days) => onChange(days ? setToleranceLimit(tolerances, field, "date", "days", days) : clearTolerance(tolerances, field))} />;
+  }
+  return <LevelSelect options={TOLERANCE_TEXT_LEVELS} currentId={textLevelId(band?.similarity, TOLERANCE_TEXT_LEVELS)} emptyLabel="Exact (no tolerance)" ariaLabel={label} customEditor={customEditor}
+    onSelect={(similarity) => onChange(similarity ? setToleranceLimit(tolerances, field, "text", "similarity", similarity) : clearTolerance(tolerances, field))} />;
 }
 
 interface BoardProps {

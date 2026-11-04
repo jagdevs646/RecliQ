@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from app.reconciliation_engine.match_levels import text_level_name
+
 
 EXPLANATION_CONTEXT_KEY = "__MATCH_EXPLANATION_CONTEXT__"
 EXPLANATION_METADATA_KEY = "__MATCH_EXPLANATION_METADATA__"
@@ -86,7 +88,8 @@ def match_explanation(
         confidence = str(record.get("MATCH CONFIDENCE") or "0%").removesuffix("%")
         threshold = str(record.get("MATCH THRESHOLD") or "None%").removesuffix("%")
         status = str(context.get("match_status") or record.get("MATCH STATUS") or "match")
-        closeness = f"{confidence}% similar, {threshold}% required"
+        level = text_level_name(int(threshold)) if threshold.isdigit() else None
+        closeness = f"{confidence}% similar, {threshold}% required" + (f" ({level})" if level else "")
         if classification == "EXCEPTION_MATCH":
             explanation = (
                 f"Key differs slightly ({status.lower()}, {closeness}), but every secondary key matched. "

@@ -85,7 +85,7 @@ def generate(rows: int, seed: int = 7) -> tuple[pd.DataFrame, pd.DataFrame]:
             bank_narr = f"NEFT {party.upper()} SETTLEMENT"
         elif roll < 0.27:        # Reference written differently (the same key once normalized).
             bank_ref = f"UTR-{26000000 + i}"
-        elif roll < 0.28:        # Mistyped reference (only found by similarity).
+        elif roll < 0.28:        # Mistyped reference: the swap usually spells another row's reference.
             digits = list(str(26000000 + i))
             digits[-2], digits[-1] = digits[-1], digits[-2]
             bank_ref = "UTR" + "".join(digits)
@@ -158,6 +158,20 @@ SCENARIOS = {
         key_file_1=["REFERENCE"], key_file_2=["CHEQUE_UTR"],
         rules=[_RULES[0], {"file_1_fields": ["BOOKS_DATE"], "file_2_fields": ["VALUE_DATE"]}, _RULES[1]],
         tolerances=[{"field": "DEBIT", "amount": 5}, {"field": "NARRATION", "similarity": 75}],
+    ),
+    # The keyed case at the reference levels of docs/adr/0002: leading zeros,
+    # prefixes and look-alikes, then review-only suggestions for the rest.
+    "keyed_variants": dict(
+        key_file_1=["REFERENCE"], key_file_2=["CHEQUE_UTR"],
+        rules=[_RULES[0], {"file_1_fields": ["BOOKS_DATE"], "file_2_fields": ["VALUE_DATE"]}, _RULES[1]],
+        tolerances=[{"field": "DEBIT", "amount": 5}, {"field": "NARRATION", "similarity": 75}],
+        similarity_policy={"reference_matching": "variants"},
+    ),
+    "keyed_suggestions": dict(
+        key_file_1=["REFERENCE"], key_file_2=["CHEQUE_UTR"],
+        rules=[_RULES[0], {"file_1_fields": ["BOOKS_DATE"], "file_2_fields": ["VALUE_DATE"]}, _RULES[1]],
+        tolerances=[{"field": "DEBIT", "amount": 5}, {"field": "NARRATION", "similarity": 75}],
+        similarity_policy={"reference_matching": "suggestions"},
     ),
     # The same key, and the party name "must also match" (similar text).
     "secondary": dict(

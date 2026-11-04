@@ -167,6 +167,8 @@ export interface SecondaryMatchCondition {
 export interface SimilarityPolicy {
   matcher_type_override?: string;
   threshold?: number;
+  /** How strictly reference numbers must agree; omitted means "formatting" (docs/adr/0002). */
+  reference_matching?: "exact" | "formatting" | "variants" | "suggestions";
 }
 
 export type TransformationOperation =
