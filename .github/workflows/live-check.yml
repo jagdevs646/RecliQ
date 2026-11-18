@@ -1,0 +1,57 @@
+name: Live site check
+
+# Calls the live backend's /health/ready, which also checks that the database
+# answers, and the website. A failed run makes GitHub email the repository owner.
+# Added after the free Render database expired and the backend failed every
+# start for days (November 2026) without anyone being told.
+#
+# Render's free plan puts the backend to sleep after 15 minutes without
+# traffic, so the first call can take a minute; each attempt waits up to
+# 150 seconds and a down result is retried before the run fails.
+#
+# GitHub turns off scheduled workflows in a public repository after 60 days
+# without commits; re-enable it on the Actions tab if that happens.
+
+on:
+  schedule:
+    - cron: "23 */6 * * *" # Every 6 hours.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-check
+  cancel-in-progress: false
+
+env:
+  BACKEND_URL: https://recliq-backend-yryq.onrender.com
+  WEBSITE_URL: https://recli-q.vercel.app/
+
+jobs:
+  live:
+    name: Backend, database and website
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Backend and database
+        run: |
+          for attempt in 1 2 3; do
+            code=$(curl -s -o ready.json -w '%{http_code}' --max-time 150 "$BACKEND_URL/health/ready" || true)
+            if [ "$code" = "200" ]; then
+              echo "Backend ready: $(cat ready.json)"
+              exit 0
+            fi
+            echo "Attempt $attempt: HTTP ${code:-none} $(cat ready.json 2>/dev/null)"
+            sleep 30
+          done
+          echo "::error title=RecliQ backend is down::$BACKEND_URL/health/ready did not answer 200 after 3 attempts. Check the Render events and logs, and that the database in RENDER_DB_URL still exists."
+          exit 1
+
+      - name: Website
+        run: |
+          if ! curl -fsS -o /dev/null --max-time 60 "$WEBSITE_URL"; then
+            echo "::error title=RecliQ website is down::$WEBSITE_URL did not load."
+            exit 1
+          fi
+          echo "Website loads."

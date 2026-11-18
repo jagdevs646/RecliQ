@@ -173,6 +173,26 @@ git push --force --all origin && git push --force --tags origin
   keeps using the local backend. Use a paid worker and Azure Blob Storage for
   durable production processing.
 
+## Database hosting
+
+The live backend (`recliq-backend-yryq` on Render) reads its PostgreSQL
+connection string from `RENDER_DB_URL`.
+
+- Do not use Render's free Postgres plan for the live site. It expires 30
+  days after creation and Render then deletes it with all its data. That
+  happened in November 2026: the backend failed every start with
+  `Name or service not known` for several days.
+- The database is on Neon's free plan, which does not expire. Use the direct
+  connection string (not the pooled one), with `sslmode=require`; pick the
+  AWS US West 2 (Oregon) region, next to the Render backend. An idle Neon
+  database pauses and wakes on the next connection; the backend's
+  `pool_pre_ping` replaces connections dropped while it was paused.
+- The `Live site check` workflow calls `/health/ready` (which runs `SELECT 1`
+  on the database) and the website every 6 hours; a failed run makes GitHub
+  email the repository owner. GitHub turns off scheduled workflows in a
+  public repository after 60 days without commits; re-enable it on the
+  Actions tab if that happens.
+
 ## Saved reconciliations
 
 Save a setup from the review step ("Save for reuse") or from a finished

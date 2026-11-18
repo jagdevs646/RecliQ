@@ -1,8 +1,8 @@
-databases:
-  - name: recliq-db
-    databaseName: recliq
-    user: recliq
-    plan: free
+# The database is not created here. Render's free Postgres plan expires 30
+# days after creation and is then deleted (that took the site down in
+# November 2026), so the database is hosted on Neon's free plan, which does
+# not expire. Paste its connection string into RENDER_DB_URL in the Render
+# dashboard. docs/operations-and-security.md ("Database hosting") has the steps.
 
 services:
   - type: web
@@ -22,12 +22,11 @@ services:
       - key: PYTHON_VERSION
         value: "3.12.10"
 
-      # Render injects the PostgreSQL connection string (postgresql://...).
-      # start.sh converts it to the psycopg3 scheme (postgresql+psycopg://).
+      # The PostgreSQL connection string (postgresql://...), entered in the
+      # dashboard. start.sh converts it to the psycopg3 scheme
+      # (postgresql+psycopg://).
       - key: RENDER_DB_URL
-        fromDatabase:
-          name: recliq-db
-          property: connectionString
+        sync: false
 
       - key: LOCAL_STORAGE_PATH
         value: /tmp/storage
