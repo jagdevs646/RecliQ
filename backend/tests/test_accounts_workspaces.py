@@ -1107,6 +1107,28 @@ def test_user_feature_override_cannot_reenable_globally_disabled_feature(client:
         db.close()
 
 
+def test_report_email_can_be_pre_enabled_before_transport_is_configured(client: TestClient, monkeypatch):
+    from app.api.routes import admin as admin_routes
+    from app.services import policy_service
+
+    admin = create_user(username="emailpolicyadmin", role="super_admin", mfa=True)
+    login(client, admin, totp=True)
+    unavailable_transport = lambda _db: {"ready": False, "smtp_ready": False}
+    monkeypatch.setattr(admin_routes, "email_transport_status", unavailable_transport)
+    monkeypatch.setattr(policy_service, "email_transport_status", unavailable_transport)
+
+    csrf = client.get("/api/auth/me").headers["x-csrf-token"]
+    response = client.put("/api/admin/policy", json={"features": {"report_email": True}}, headers={"X-CSRF-Token": csrf})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["features"]["report_email"] is True
+    assert response.json()["email_ready"] is False
+    identity = client.get("/api/auth/me")
+    assert identity.status_code == 200
+    assert identity.json()["features"]["report_email"] is False
+    assert identity.json()["capabilities"]["report_email"] is False
+
+
 def test_account_limit_overrides_can_exceed_defaults_but_respect_hard_caps(client: TestClient):
     from app.models.account import UserPolicyOverride
     from app.services.policy_service import effective_limits
