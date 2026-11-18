@@ -644,6 +644,19 @@ export class ApiClient {
     saveBlob(await response.blob(), responseFilename(response, isZip ? "RecliQ_Reconciliation_Reports.zip" : "RecliQ_Reconciliation_Report.xlsx"));
   }
 
+  async downloadExceptionPdfReport(jobId: string, filePairId?: string): Promise<void> {
+    const query = filePairId ? `?file_pair_id=${encodeURIComponent(filePairId)}` : "";
+    const response = await fetch(`${API_BASE}/reports/job/${jobId}/download_exception_pdf${query}`, {
+      credentials: "include",
+      headers: sessionHeaders(),
+    });
+    rememberSession(response);
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+    saveBlob(await response.blob(), responseFilename(response, "RecliQ_Exception_Report.pdf"));
+  }
+
   async downloadCustomReport(jobId: string, config: import("../types").ReportCustomConfig, filePairId?: string): Promise<void> {
     const query = filePairId ? `?file_pair_id=${encodeURIComponent(filePairId)}` : "";
     const response = await fetch(`${API_BASE}/reports/job/${jobId}/download_custom${query}`, {

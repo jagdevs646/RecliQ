@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     # Upload limits. Files are checked by content (magic bytes), not by name.
     max_upload_mb: int = 50
     max_rows_per_sheet: int = 500_000
+    # Printable exception reports are intentionally bounded. The complete
+    # reconciliation remains available in the Excel report.
+    pdf_exception_report_max_rows: int = 10_000
 
     # Guest workspaces are temporary: their uploads, runs, reports, saved
     # setups and learning are deleted this many hours after they were created.
@@ -129,8 +132,8 @@ class Settings(BaseSettings):
                 raise ValueError("Enable the engine shadow rollout only with ENGINE_SHADOW_MAX_JOBS or ENGINE_SHADOW_UNTIL.")
             if self.engine_shadow_max_jobs and self.engine_shadow_started_at is None:
                 raise ValueError("ENGINE_SHADOW_STARTED_AT is required when ENGINE_SHADOW_MAX_JOBS is set.")
-        if self.max_upload_mb < 1 or self.max_rows_per_sheet < 1:
-            raise ValueError("Upload size and row limits must be positive integers.")
+        if self.max_upload_mb < 1 or self.max_rows_per_sheet < 1 or self.pdf_exception_report_max_rows < 1:
+            raise ValueError("Upload and report row limits must be positive integers.")
         if self.guest_retention_hours < 1:
             raise ValueError("GUEST_RETENTION_HOURS must be a positive integer.")
         if self.auth_max_attempts < 1 or self.auth_attempt_window_minutes < 1 or self.auth_session_days < 1:

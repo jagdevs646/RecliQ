@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookmarkPlus, CheckCircle2, Download, Eye, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ArrowUpDown, BookmarkPlus, CheckCircle2, Download, Eye, FileText, FileWarning, HelpCircle, Mail, Percent, RotateCcw, Search, SlidersHorizontal, Wand2, ShieldCheck, Settings2, Split, ThumbsDown, ThumbsUp, WrapText, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { decimalColumns, formatMatchRate, formatRecordValue, formatServerTime, isDateColumn } from "../lib/formats";
 import { api } from "../services/api";
@@ -162,8 +162,9 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
   }
 
   async function download(pairId?: string) { if (!job) return; try { await api.downloadJobReport(job.id, pairId); } catch (error) { setMessage(error instanceof Error ? error.message : "Download failed"); } }
+  async function downloadExceptionPdf(pairId?: string) { if (!job) return; try { await api.downloadExceptionPdfReport(job.id, pairId); } catch (error) { setMessage(error instanceof Error ? error.message : "Exception PDF download failed"); } }
   const downloadLabel = isMultiPair ? `Download all reports (ZIP, ${filePairs.filter((pair) => pair.report_filename).length})` : "Download report";
-  const pairDownload = isMultiPair && (activeRule ? filePairs.find((pair) => pair.file_pair_id === activeRule.file_pair_id) : activePair);
+  const pairDownload = isMultiPair ? (activeRule ? filePairs.find((pair) => pair.file_pair_id === activeRule.file_pair_id) : activePair) : undefined;
   // A workbook can be customized when there is one: the job's, or the selected pair's.
   const canCustomize = !isMultiPair || Boolean(pairDownload && pairDownload.report_filename);
 
@@ -234,6 +235,7 @@ export function ResultsPage({ job, onNewReconciliation, onChangeRules, canEmail 
         {job.job_type === "generic" && canReconcile && onChangeRules && <button type="button" className="secondary" onClick={onChangeRules} title="Open these files with the same rules, change them, and run again"><SlidersHorizontal size={18} />Change rules and run again</button>}
         {job.job_type === "generic" && canSaveSetup && <button type="button" className="secondary" onClick={saveSetup}><BookmarkPlus size={18} />Save for reuse</button>}
         {canEmail && <button type="button" className="secondary" onClick={() => setEmailOpen(true)}><Mail size={18} />Email report</button>}
+        <button type="button" className="secondary" onClick={() => downloadExceptionPdf(pairDownload?.file_pair_id)} disabled={isMultiPair && !pairDownload} title={isMultiPair && !pairDownload ? "Choose a file pair to create its exception PDF" : "Download a compact PDF with field differences and unmatched records"}><FileText size={18} />Exception PDF</button>
         <button type="button" className="primary" onClick={() => download()}><Download size={18} />{downloadLabel}</button>
       </div>
     </div>

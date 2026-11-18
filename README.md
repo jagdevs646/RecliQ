@@ -172,6 +172,7 @@ Settings come from environment variables; see [backend/.env.example](backend/.en
 | `STORAGE_BACKEND`, `LOCAL_STORAGE_PATH`, `AZURE_STORAGE_*` | where uploads and reports are kept |
 | `JOB_QUEUE_BACKEND`, `REDIS_URL` | `local` or `redis` job queue |
 | `MAX_UPLOAD_MB`, `MAX_ROWS_PER_SHEET` | upload limits (50 MB by default) |
+| `PDF_EXCEPTION_REPORT_MAX_ROWS` | maximum records per section in the printable exception PDF (10,000 by default; the Excel report remains complete) |
 | `GUEST_RETENTION_HOURS` | hours guest data is kept before it is deleted (24 by default) |
 | `FRONTEND_ORIGIN` | allowed browser origin |
 | `AUTH_CSRF_SECRET`, `AUTH_SESSION_DAYS`, `SESSION_COOKIE_SECURE` | CSRF signing, account-session duration and HTTPS-only cookies |

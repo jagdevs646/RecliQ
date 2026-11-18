@@ -29,6 +29,7 @@ from app.storage.base import report_data_manifest_path, report_data_path
 from app.services.report_data_store import query_report_category, read_report_tables
 from pydantic import BaseModel
 from app.reconciliation_engine.explanations import materialize_match_explanation
+from app.reconciliation_engine.exception_pdf_reporter import generate_exception_pdf_report
 from app.reconciliation_engine.universal_reporter import generate_enterprise_report
 
 
@@ -573,6 +574,99 @@ def download_custom_report(
         filename=f"Custom_{Path(download_name).stem}{'.zip' if temp_path.suffix == '.zip' else '.xlsx'}",
         media_type="application/zip" if temp_path.suffix == ".zip" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         background=BackgroundTask(lambda: temp_path.unlink(missing_ok=True) if temp_path.exists() else None)
+    )
+
+
+@router.get("/job/{job_id}/download_exception_pdf")
+def download_exception_pdf_report(
+    job_id: str,
+    file_pair_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    session_id: str = Depends(get_session_id),
+    actor: AuditActor = Depends(get_actor),
+) -> FileResponse:
+    """Download the compact three-table PDF for one reconciliation result."""
+    _, report = _job_report(db, job_id, session_id)
+    try:
+        file_pairs = json.loads(report.summary_json or "{}").get("file_pairs", [])
+    except json.JSONDecodeError:
+        file_pairs = []
+
+    selected_pair = None
+    if file_pair_id:
+        selected_pair = next((item for item in file_pairs if item.get("file_pair_id") == file_pair_id), None)
+        if selected_pair is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job")
+    elif len(file_pairs) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Choose a file pair before downloading its exception PDF.",
+        )
+
+    storage = get_storage()
+    report_path = storage.resolve_path(report.storage_path)
+    table_directory = _report_data_directory(report)
+    is_archive = report_path.suffix.lower() == ".zip"
+    if table_directory is not None:
+        try:
+            universal_data = read_report_tables(
+                table_directory,
+                file_pair_id=file_pair_id if len(file_pairs) > 1 else None,
+            )
+        except (OSError, ValueError, KeyError) as exc:
+            if isinstance(exc, KeyError):
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File pair not found in this job") from exc
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Report table data is invalid") from exc
+    else:
+        raw_path = _report_data_file(report) or report_path.with_name(f"{report_path.stem}_data.json")
+        if not raw_path.exists():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report data is unavailable for the exception PDF")
+        try:
+            with raw_path.open(encoding="utf-8") as handle:
+                universal_data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Report data is invalid") from exc
+        if is_archive and len(file_pairs) > 1 and file_pair_id:
+            universal_data = _file_pair_universal_data(universal_data, file_pair_id)
+
+    import os
+    import tempfile
+
+    descriptor, temp_name = tempfile.mkstemp(suffix=".pdf", prefix="recliq_exception_report_")
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        generated = generate_exception_pdf_report(
+            universal_data,
+            temp_path,
+            max_rows_per_section=get_settings().pdf_exception_report_max_rows,
+        )
+    except Exception as exc:
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Could not generate the exception PDF") from exc
+
+    record_event(
+        scope_id=session_id,
+        actor=actor,
+        action="report.exception_pdf_downloaded",
+        entity_type="job",
+        entity_id=job_id,
+        summary="Downloaded an exception review PDF",
+        metadata={
+            "file_pair_id": file_pair_id,
+            "report_id": report.id,
+            "rows": generated.displayed_rows,
+            "totals": generated.section_totals,
+        },
+    )
+    from starlette.background import BackgroundTask
+
+    label = Path((selected_pair or {}).get("report_filename") or report.filename).stem
+    return FileResponse(
+        temp_path,
+        filename=f"{label}_Exceptions.pdf",
+        media_type="application/pdf",
+        background=BackgroundTask(lambda: temp_path.unlink(missing_ok=True)),
     )
 
 
