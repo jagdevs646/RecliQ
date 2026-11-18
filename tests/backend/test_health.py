@@ -39,3 +39,14 @@ def test_sample_template_endpoints():
     assert resp_gst.status_code == 200
     assert "spreadsheetml" in resp_gst.headers["content-type"]
     assert "RecliQ_GST_Sample_Template.xlsx" in resp_gst.headers["content-disposition"]
+    import io
+
+    import openpyxl
+
+    from app.reconciliation_engine.engine import REQUIRED_GST_COLUMNS
+    from app.reconciliation_engine.presets import GST_TEMPLATE_COLUMNS
+
+    headers = [cell.value for cell in openpyxl.load_workbook(io.BytesIO(resp_gst.content)).active[1]]
+    assert headers == GST_TEMPLATE_COLUMNS
+    # Until the GST engine is retired, its template and its required columns agree.
+    assert GST_TEMPLATE_COLUMNS == REQUIRED_GST_COLUMNS

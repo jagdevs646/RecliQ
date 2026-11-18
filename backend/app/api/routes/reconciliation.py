@@ -8,8 +8,8 @@ from app.api.deps import get_actor, get_session_id
 from app.database.session import get_db
 from app.models.job import ReconciliationJob
 from app.reconciliation.gst import AMOUNT_COLUMNS, MERGE_KEY_COLUMNS, REQUIRED_COLUMNS
-from app.reconciliation.gst import generate_sample_format as generate_gst_sample
-from app.reconciliation_engine.report_generator import generate_generic_sample_format
+from app.reconciliation_engine.presets import GST_TEMPLATE_COLUMNS
+from app.reconciliation_engine.report_generator import generate_generic_sample_format, generate_sample_format
 from app.schemas.job import ReconciliationJobOut
 from app.schemas.reconciliation import GenericReconciliationRequest, GSTReconciliationRequest
 from app.services.audit_service import AuditActor
@@ -39,7 +39,8 @@ def download_sample_template(type: str = Query("generic")) -> FileResponse:
     sample_path = temp_dir / filename
 
     if is_gst:
-        generate_gst_sample(sample_path)
+        # Independent of the GST engine, so the template survives its retirement.
+        generate_sample_format(sample_path, GST_TEMPLATE_COLUMNS)
     else:
         generate_generic_sample_format(sample_path)
 

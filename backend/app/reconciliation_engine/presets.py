@@ -22,6 +22,22 @@ from app.reconciliation_engine.cache import normalize_text
 from app.reconciliation_engine.ingestion.finance_formats import GSTR2B_COLUMNS
 from app.reconciliation_engine.matching.indexed_matcher import compact_identifier, non_empty_values
 
+# The columns of the GST sample template (Upload step, "Download GST sample
+# template"). They are the old GST engine's REQUIRED_GST_COLUMNS too; the
+# template stays when that engine is retired (ADR-0001, action item 6).
+GST_TEMPLATE_COLUMNS = [
+    "GSTR",
+    "NAME OF TRADER/FIRM/COMPANY",
+    "INVOICE NO.",
+    "INVOICE DATE",
+    "TAXABLE VALUE",
+    "IGST",
+    "CGST",
+    "SGST",
+    "CESS",
+    "INVOICE VALUE",
+]
+
 GST_PRESET_ID = "gst"
 GST_PRESET_LABEL = "GST: purchase register vs GSTR-2B"
 GST_NAME_SIMILARITY = 85      # Supplier names at least this similar count as matched, with a note.
