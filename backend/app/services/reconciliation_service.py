@@ -47,6 +47,7 @@ from app.storage.base import (
     report_data_manifest_path,
 )
 from app.services.report_data_store import write_report_tables
+from app.reconciliation_engine.record_collections import add_static_fields, concatenate_record_rows
 
 logger = logging.getLogger("recliq.jobs")
 
@@ -97,7 +98,9 @@ def _merge_rule_universal_data(rule_results: list[dict]) -> dict:
         if universal_data.get("overall_status") != "PASSED":
             merged["overall_status"] = universal_data["overall_status"]
         for category in _UNIVERSAL_RECORD_CATEGORIES:
-            merged.setdefault(category, []).extend(universal_data.get(category, []))
+            merged[category] = concatenate_record_rows(
+                merged.get(category, []), universal_data.get(category, [])
+            )
         for existing, incoming in zip(merged.get("control_checks", []), universal_data.get("control_checks", [])):
             for file_key in ("File 1", "File 2"):
                 if isinstance(existing.get(file_key), (int, float)) and isinstance(incoming.get(file_key), (int, float)):
@@ -722,8 +725,10 @@ def _process_claimed_job(job_id: str) -> None:
                     overall_summary[k] = overall_summary.get(k, 0) + v
                 ud = res["universal_data"]
                 for category in _UNIVERSAL_RECORD_CATEGORIES:
-                    for record in ud.get(category, []):
-                        record["Sheet Pair"], record["File Pair ID"], record["Sheet Rule ID"] = pair_label, file_pair_id, sheet_rule_id
+                    add_static_fields(
+                        ud.get(category, []),
+                        {"Sheet Pair": pair_label, "File Pair ID": file_pair_id, "Sheet Rule ID": sheet_rule_id},
+                    )
                 manifest_entry.update(status="completed", summary=res["summary"])
                 rule_results.append({**manifest_entry, "universal_data": ud})
             except InterruptedError:

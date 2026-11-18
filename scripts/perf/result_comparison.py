@@ -14,6 +14,7 @@ import json
 import sqlite3
 import tempfile
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -174,18 +175,25 @@ def _compare_values(
                 differences.extend(_compare_values(expected[key], actual[key], child_path, (*path_parts, str(key))))
         return differences
 
-    if isinstance(expected, list) and isinstance(actual, list):
+    if (
+        isinstance(expected, Sequence)
+        and not isinstance(expected, (str, bytes, bytearray))
+        and isinstance(actual, Sequence)
+        and not isinstance(actual, (str, bytes, bytearray))
+    ):
+        expected_records = expected if isinstance(expected, list) else list(expected)
+        actual_records = actual if isinstance(actual, list) else list(actual)
         collection = path_parts[-1] if path_parts else ""
         identity_fields = UNORDERED_RECORD_KEYS.get(collection)
-        if identity_fields and all(isinstance(item, dict) for item in expected) and all(
-            isinstance(item, dict) for item in actual
+        if identity_fields and all(isinstance(item, dict) for item in expected_records) and all(
+            isinstance(item, dict) for item in actual_records
         ):
-            return _compare_record_lists(expected, actual, path, identity_fields)
+            return _compare_record_lists(expected_records, actual_records, path, identity_fields)
 
         differences = []
-        if len(expected) != len(actual):
-            differences.append(Difference(path, "list_length_mismatch", len(expected), len(actual)))
-        for index, (left, right) in enumerate(zip(expected, actual)):
+        if len(expected_records) != len(actual_records):
+            differences.append(Difference(path, "list_length_mismatch", len(expected_records), len(actual_records)))
+        for index, (left, right) in enumerate(zip(expected_records, actual_records)):
             differences.extend(_compare_values(left, right, f"{path}[{index}]", (*path_parts, str(index))))
         return differences
 

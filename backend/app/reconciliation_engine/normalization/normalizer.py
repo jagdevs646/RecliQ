@@ -16,6 +16,30 @@ def normalize_text_series(series: pd.Series) -> pd.Series:
 
 def normalize_identifier_series(series: pd.Series) -> pd.Series:
     """Retain only identifier letters and digits, as in the matcher identity."""
+    inferred_dtype = pd.api.types.infer_dtype(series, skipna=True)
+    if inferred_dtype in {"string", "unicode", "empty"}:
+        # Spreadsheet identifier columns are overwhelmingly strings.  Using the
+        # vectorized string operations avoids one Python/cache call per cell,
+        # while retaining the compact_identifier normalization semantics.
+        text = series.astype("string")
+        if isinstance(series.dtype, pd.StringDtype):
+            # compact_identifier(pd.NA) has historically produced "na". Keep
+            # that observable behavior for nullable string columns.
+            text = text.fillna("<NA>")
+            blank = text.str.strip().str.lower().isin(("", "nan", "none", "nat"))
+        else:
+            blank = text.isna() | text.str.strip().str.lower().isin(("", "nan", "none", "nat"))
+            text = text.fillna("")
+
+        return (
+            text.str.normalize("NFKC")
+            .str.lower()
+            .str.replace(r"[^a-z0-9]", "", regex=True)
+            .str.upper()
+            .mask(blank, "")
+            .astype(object)
+        )
+
     return series.map(lambda value: compact_identifier(value).upper())
 
 

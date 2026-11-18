@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 
 from app.reconciliation_engine.cache import to_number
+from app.reconciliation_engine.record_collections import count_field_values
 
 
 def _number_or_none(value: object) -> float | None:
@@ -180,13 +181,11 @@ def build_universal_data_model(
     ]
 
     identity_resolution = identity_resolution or []
-    identity_counts = {
-        classification: sum(
-            record.get("IDENTITY CLASSIFICATION") == classification
-            for record in identity_resolution
-        )
-        for classification in ("EXACT_MATCH", "EXCEPTION_MATCH", "AMBIGUOUS_MATCH", "NOT_FOUND")
-    }
+    identity_counts = count_field_values(
+        identity_resolution,
+        "IDENTITY CLASSIFICATION",
+        ("EXACT_MATCH", "EXCEPTION_MATCH", "AMBIGUOUS_MATCH", "NOT_FOUND"),
+    )
 
     return {
         "metadata": {

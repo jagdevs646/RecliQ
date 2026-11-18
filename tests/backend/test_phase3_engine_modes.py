@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "scripts" / "perf"))
 
+import app.reconciliation_engine.engine as engine_module
 from app.reconciliation_engine.engine import run_generic_reconciliation
 from result_comparison import compare_result_sets
 
@@ -47,6 +48,42 @@ def test_column_engine_exact_fast_path_preserves_universal_results(tmp_path: Pat
     assert compare_result_sets(row_result["universal_data"], column_result["universal_data"]) == []
     assert column_result["universal_data"]["metadata"]["engine"] == "columns"
     assert column_result["universal_data"]["metadata"]["engine_version"] == "columns-v1"
+
+
+def test_column_exact_fast_path_preserves_grouped_records_without_row_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    file_1 = pd.DataFrame({
+        "ID": ["A", "A", "B"],
+        "AMOUNT": [100, 50, 20],
+    })
+    file_2 = pd.DataFrame({
+        "ID": ["A", "B", "C"],
+        "VALUE": [150, 20, 30],
+    })
+    options = {
+        "key_file_1": ["ID"],
+        "key_file_2": ["ID"],
+        "rules": [{"file_1_fields": ["AMOUNT"], "file_2_fields": ["VALUE"]}],
+        "write_report": False,
+    }
+    row_result = run_generic_reconciliation(
+        file_1.copy(), file_2.copy(), tmp_path / "grouped-rows.xlsx", engine_mode="rows", **options,
+    )
+
+    def fail_if_row_path_is_used(*_args, **_kwargs):
+        raise AssertionError("the exact column fast path should not materialize destination row dictionaries")
+
+    monkeypatch.setattr(engine_module, "_destination_records", fail_if_row_path_is_used)
+    column_result = run_generic_reconciliation(
+        file_1.copy(), file_2.copy(), tmp_path / "grouped-columns.xlsx", engine_mode="columns", **options,
+    )
+
+    assert compare_result_sets(row_result["universal_data"], column_result["universal_data"]) == []
+    grouped = next(record for record in column_result["universal_data"]["matched_records"] if record["MATCH KEY"] == "A")
+    assert grouped["GROUP CLASSIFICATION"] == "Many-to-One Match"
+    assert grouped["GROUPED ROWS"].startswith("File 1: 2 rows combined")
 
 
 def test_column_text_batch_preserves_normalization_and_fuzzy_result_details(tmp_path: Path) -> None:

@@ -320,8 +320,47 @@ def unique_exact_pairs(
     identity_columns_2: list[str],
 ) -> list[tuple[int, int]]:
     """Return positional pairs whose complete normalized keys are unique on both sides."""
+    source_positions, destination_positions = unique_exact_pair_positions(
+        file_1, file_2, identity_columns_1, identity_columns_2
+    )
+    return list(zip(source_positions.tolist(), destination_positions.tolist()))
+
+
+def unique_exact_pair_positions(
+    file_1: pd.DataFrame,
+    file_2: pd.DataFrame,
+    identity_columns_1: list[str],
+    identity_columns_2: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return unique exact pair positions without creating a Python tuple per row.
+
+    The single-key form is the common reconciliation case. It avoids copying
+    two whole frames and a merge result just to learn that a key is unique on
+    each side. Composite keys retain the proven merge implementation, but
+    still return compact integer arrays to column-engine callers.
+    """
     if not identity_columns_1 or len(identity_columns_1) != len(identity_columns_2):
-        return []
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
+
+    if len(identity_columns_1) == 1:
+        source = file_1[identity_columns_1[0]]
+        destination = file_2[identity_columns_2[0]]
+        source_unique = source.notna() & ~source.duplicated(keep=False)
+        destination_unique = destination.notna() & ~destination.duplicated(keep=False)
+        if not source_unique.any() or not destination_unique.any():
+            empty = np.empty(0, dtype=np.int64)
+            return empty, empty
+
+        source_positions = np.flatnonzero(source_unique.to_numpy())
+        destination_positions = np.flatnonzero(destination_unique.to_numpy())
+        destination_index = pd.Index(destination.iloc[destination_positions])
+        destination_lookup = destination_index.get_indexer(source.iloc[source_positions])
+        matched = destination_lookup >= 0
+        return (
+            source_positions[matched].astype(np.int64, copy=False),
+            destination_positions[destination_lookup[matched]].astype(np.int64, copy=False),
+        )
 
     key_names = [f"__column_key_{index}" for index in range(len(identity_columns_1))]
     left = file_1[identity_columns_1].copy()
@@ -336,7 +375,8 @@ def unique_exact_pairs(
     left = left.loc[~left.duplicated(subset=key_names, keep=False)]
     right = right.loc[~right.duplicated(subset=key_names, keep=False)]
     if left.empty or right.empty:
-        return []
+        empty = np.empty(0, dtype=np.int64)
+        return empty, empty
 
     pairs = left.merge(
         right,
@@ -346,9 +386,5 @@ def unique_exact_pairs(
         validate="one_to_one",
     )
     pairs.sort_values("__source_position", kind="stable", inplace=True)
-    return [
-        (int(source_position), int(destination_position))
-        for source_position, destination_position in pairs[
-            ["__source_position", "__destination_position"]
-        ].itertuples(index=False, name=None)
-    ]
+    positions = pairs[["__source_position", "__destination_position"]].to_numpy(dtype=np.int64, copy=False)
+    return positions[:, 0], positions[:, 1]

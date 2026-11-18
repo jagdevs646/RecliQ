@@ -11,7 +11,7 @@ import pytest
 
 from app.reconciliation.matchers import IndexedCandidateMatcher, compare_values, parse_date_value, prepare_dataframe
 from app.reconciliation_engine.matching.indexed_matcher import IndexedCandidateMatcher as EngineCandidateMatcher
-from app.reconciliation_engine.normalization import normalize_date_series
+from app.reconciliation_engine.normalization import normalize_date_series, normalize_identifier_series
 
 
 def test_invoice_formatting_difference_scores_high():
@@ -155,6 +155,22 @@ def test_date_series_and_row_comparison_share_canonical_normalization():
     result = compare_values("07/09/2026", "2026-09-07", "Transaction Date", "Posting Date")
     assert result.matched
     assert result.confidence == 100
+
+
+@pytest.mark.parametrize(
+    "series",
+    [
+        pd.Series(["INV-005", "inv/005", "１２３-A", "", " nan ", "None", "NaT", None, float("nan")]),
+        pd.Series(["INV-005", None, "１２３-A", " nan "], dtype="string"),
+        pd.Series(["INV-005", 1001, 1001.0, True, None, pd.Timestamp("2026-01-02")]),
+    ],
+)
+def test_identifier_series_normalization_preserves_scalar_compact_identifier_semantics(series):
+    from app.reconciliation_engine.cache import compact_identifier
+
+    expected = [compact_identifier(value).upper() for value in series.tolist()]
+
+    assert normalize_identifier_series(series).tolist() == expected
 
 
 def test_identifiers_and_dates_are_never_parsed_as_numbers():

@@ -24,6 +24,8 @@ def default_json_serializer(obj: Any) -> Any:
         return obj.to_dict(orient="records")
     if isinstance(obj, pd.Series):
         return obj.tolist()
+    if hasattr(obj, "to_records"):
+        return obj.to_records()
     if isinstance(obj, (set, frozenset)):
         return list(obj)
 
@@ -84,6 +86,8 @@ def clean_for_json(obj: Any) -> Any:
         return clean_for_json(obj.to_dict(orient="records"))
     if isinstance(obj, pd.Series):
         return clean_for_json(obj.tolist())
+    if hasattr(obj, "to_records"):
+        return clean_for_json(obj.to_records())
 
     if isinstance(obj, (pd.Timestamp, datetime)):
         if pd.isna(obj):
