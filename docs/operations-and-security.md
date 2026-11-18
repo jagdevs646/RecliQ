@@ -220,10 +220,14 @@ pruned. Guests keep at most their latest 20 runs, and only for one day
 ### Guest data is kept for one day
 
 Guest workspaces are temporary. Once a guest's upload, run, report, saved
-setup, alias, review decision, auto-resolution rule or recurring pattern is
-older than `GUEST_RETENTION_HOURS` (default 24), it is deleted, together with
-its stored files and parsed-sheet caches; a run still queued or processing
-waits, and an upload a newer run uses stays with that run. A workspace left
+setup, data check, alias, review decision, auto-resolution rule or recurring
+pattern is older than `GUEST_RETENTION_HOURS` (default 24), it is deleted,
+together with its stored files and parsed-sheet caches; a run still queued or
+processing waits, and an upload a newer run uses stays with that run. Data
+checks go whatever their status: their results quote example rows (names,
+amounts) from the files. `GUEST_DATA_TABLES` in `guest_retention.py` says how
+every table that holds workspace data is handled, and a test fails when a new
+table is not listed there. A workspace left
 with nothing loses its usage counters too. The API checks a minute after
 start-up and then every hour; each workspace cleaned gets one
 `workspace.guest_data_expired` audit event with the counts.

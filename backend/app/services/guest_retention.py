@@ -1,13 +1,15 @@
 """Guest workspaces are temporary.
 
-A guest's uploads, runs, reports, saved setups and learning (aliases, review
-decisions, auto-resolution rules and recurring patterns) are deleted once they
-are older than ``GUEST_RETENTION_HOURS`` (24 by default). Registered accounts
+A guest's uploads, runs, reports, saved setups, data checks and learning
+(aliases, review decisions, auto-resolution rules and recurring patterns) are
+deleted once they are older than ``GUEST_RETENTION_HOURS`` (24 by default). Registered accounts
 (scope ``user-<id>``) are never touched. A guest who registers and imports the
 workspace in time keeps it, because the import moves it to the account.
 
 Kept on purpose: the append-only audit log (it cannot be changed) and support
-tickets (the administrator needs them).
+tickets (the administrator needs them). ``GUEST_DATA_TABLES`` lists how every
+table that holds workspace data is handled; a test checks it against the models,
+so a new table cannot be missed.
 
 The cleanup runs in the web API only (``app.main``), never in the job sweeper:
 the desktop app starts the sweeper and keeps all its data under one UUID scope.
@@ -28,6 +30,7 @@ from app.models.account import ReportAccessToken, ReportEmailDelivery, Workspace
 from app.models.alias import EntityAlias, MatchDecision
 from app.models.file import UploadedFile
 from app.models.job import ReconciliationJob
+from app.models.precheck import ReconciliationPrecheck
 from app.models.report import Report
 from app.models.resolution import ExceptionPattern, ResolutionRule
 from app.models.template import ReconciliationTemplate, ReconciliationTemplateVersion
@@ -39,6 +42,29 @@ from app.storage.base import report_data_storage_paths
 
 logger = logging.getLogger("recliq.retention")
 ACTIVE_STATUSES = ("queued", "processing")
+
+# Every table with a session_id or scope_id column, and how guest data in it is
+# removed. backend/tests/test_guest_retention.py fails when a model adds such a
+# table without an entry here.
+GUEST_DATA_TABLES = {
+    "reconciliation_jobs": "purged",
+    "uploaded_files": "purged",
+    "reports": "purged",
+    "reconciliation_templates": "purged",
+    "reconciliation_prechecks": "purged",
+    "entity_aliases": "purged",
+    "match_decisions": "purged",
+    "resolution_rules": "purged",
+    "exception_patterns": "purged",
+    "workspace_quotas": "purged",
+    # Removed by delete_job together with their run.
+    "reconciliation_history": "with_run",
+    "report_email_deliveries": "with_run",
+    "engine_shadow_comparisons": "with_run",
+    # Kept on purpose (see the module docstring).
+    "audit_events": "kept",
+    "support_tickets": "kept",
+}
 
 _cleanup_thread: threading.Thread | None = None
 _cleanup_stop = threading.Event()
@@ -135,7 +161,16 @@ def purge_expired_guest_data(db: Session | None = None, storage=None, *, now: da
             db.query(model).filter(_guest(model.scope_id), model.created_at < cutoff).delete(synchronize_session=False)
         db.commit()
 
-        # 5. Usage counters of guest workspaces that are now empty.
+        # 5. Data checks. Their results quote example rows (names, amounts), so
+        #    they go too. Any status: a check takes seconds, so one this old is
+        #    finished or stuck, and the runner stops if its row is gone.
+        expired_checks = (_guest(ReconciliationPrecheck.session_id), ReconciliationPrecheck.created_at < cutoff)
+        for scope, in db.query(ReconciliationPrecheck.session_id).filter(*expired_checks).all():
+            per_scope[scope]["data_checks"] += 1
+        db.query(ReconciliationPrecheck).filter(*expired_checks).delete(synchronize_session=False)
+        db.commit()
+
+        # 6. Usage counters of guest workspaces that are now empty.
         workspaces_removed = 0
         for quota in db.query(WorkspaceQuota).filter(_guest(WorkspaceQuota.scope_id), WorkspaceQuota.active_jobs == 0).all():
             scope = quota.scope_id
@@ -166,7 +201,7 @@ def purge_expired_guest_data(db: Session | None = None, storage=None, *, now: da
             before=dict(removed),
         )
     totals = sum(per_scope.values(), Counter())
-    result = {name: totals[name] for name in ("runs", "files", "reports", "saved_setups", "aliases", "decisions", "rules", "patterns")}
+    result = {name: totals[name] for name in ("runs", "files", "reports", "saved_setups", "data_checks", "aliases", "decisions", "rules", "patterns")}
     result["workspaces"] = workspaces_removed
     if any(result.values()):
         logger.info("Expired guest data removed", extra=result)

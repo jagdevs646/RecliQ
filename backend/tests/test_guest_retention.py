@@ -8,10 +8,12 @@ from app.models.account import ReportAccessToken, ReportEmailDelivery, Workspace
 from app.models.alias import EntityAlias
 from app.models.file import UploadedFile
 from app.models.job import ReconciliationJob
+from app.models.precheck import ReconciliationPrecheck
 from app.models.report import Report
 from app.models.review import ReviewOutcome
 from app.models.template import ReconciliationTemplate, ReconciliationTemplateVersion
-from app.services.guest_retention import purge_expired_guest_data
+from app.models.base import Base
+from app.services.guest_retention import GUEST_DATA_TABLES, purge_expired_guest_data
 from app.storage import get_storage
 
 NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
@@ -145,3 +147,52 @@ def test_expired_guest_data_is_deleted_and_accounts_are_kept(client, tmp_path):
         assert not (storage.base_path / path).exists()
 
     assert not any(purge_expired_guest_data(now=NOW).values())  # nothing left to remove
+
+
+def _data_check(db, scope: str, created_at: datetime, status: str = "completed") -> str:
+    # A data check's result quotes rows of the user's files.
+    check = ReconciliationPrecheck(
+        session_id=scope, status=status, plan_json="{}", created_at=created_at,
+        result_json='{"issues": [{"examples": [{"row": 4, "value": "Asha Verma"}, {"row": 9, "value": 1250.0}]}]}',
+    )
+    db.add(check)
+    db.flush()
+    return check.id
+
+
+def test_expired_guest_data_checks_are_deleted_with_their_example_rows(client):
+    guest, account = str(uuid.uuid4()), f"user-{uuid.uuid4()}"
+    db = SessionLocal()
+    try:
+        old_check = _data_check(db, guest, OLD)
+        stuck_check = _data_check(db, guest, OLD, status="processing")  # its runner crashed
+        today_check = _data_check(db, guest, FRESH)
+        account_check = _data_check(db, account, OLD)
+        db.commit()
+    finally:
+        db.close()
+
+    removed = purge_expired_guest_data(now=NOW)
+
+    assert removed["data_checks"] == 2
+    db = SessionLocal()
+    try:
+        assert db.get(ReconciliationPrecheck, old_check) is None
+        assert db.get(ReconciliationPrecheck, stuck_check) is None
+        assert db.get(ReconciliationPrecheck, today_check) is not None
+        assert db.get(ReconciliationPrecheck, account_check) is not None  # accounts are never touched
+    finally:
+        db.close()
+
+
+def test_every_table_with_workspace_data_has_a_retention_rule():
+    """A new table holding a workspace's data must say how guest data in it is removed."""
+    scoped = {
+        name for name, table in Base.metadata.tables.items()
+        if {"session_id", "scope_id"} & {column.name for column in table.columns}
+    }
+    assert scoped == set(GUEST_DATA_TABLES), (
+        f"Add these tables to GUEST_DATA_TABLES in guest_retention.py: {sorted(scoped - set(GUEST_DATA_TABLES))}; "
+        f"remove these: {sorted(set(GUEST_DATA_TABLES) - scoped)}"
+    )
+    assert set(GUEST_DATA_TABLES.values()) <= {"purged", "with_run", "kept"}
