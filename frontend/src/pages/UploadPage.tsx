@@ -1168,7 +1168,7 @@ function SheetRuleConfiguration({ pairing, config, onChange, copyOptions, onCopy
 
     <div className="rule-section">
       <div className="rule-section-heading">
-        <div><h4>Additional matching conditions <span className="optional-tag">optional</span></h4><p>Require extra fields, such as vendor or date, to agree as well.</p></div>
+        <div><h4>Confirm the match with other columns <span className="optional-tag">optional</span></h4><p>Use when a key can repeat or be mistyped. Records pair only when these columns also agree, such as the vendor or the date, and with at least one set RecliQ can suggest similar-looking keys (INV-1002 and INV1002A) for you to confirm.</p></div>
         <button type="button" className="secondary" onClick={addCondition}><Plus size={15} />Add column</button>
       </div>
       {config.secondaryConditions.length === 0 && <p className="rule-empty">No extra columns: records are paired on the key alone.</p>}
