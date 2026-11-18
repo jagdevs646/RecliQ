@@ -37,6 +37,10 @@ AzureCloud*.txt
 # Local notes, images and sample data (not needed to run RecliQ)
 /Errors.txt
 /Updates.txt
+/cmd.md
+/cmd.txt
+/test_restults.txt
+/backend/history.log
 /diagram.png
 /Reckli.png
 /RecliQ.ico

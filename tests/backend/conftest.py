@@ -28,6 +28,7 @@ for _name in (
     "BOOTSTRAP_ADMIN_EMAIL",
     "BOOTSTRAP_ADMIN_PASSWORD",
     "BOOTSTRAP_ADMIN_TOTP_SECRET",
+    "MFA_ENCRYPTION_KEY",
 ):
     os.environ[_name] = ""
 
