@@ -7,6 +7,7 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
 
 from app.models.account import ReportAccessToken, ReportEmailDelivery, User
+from app.models.engine_shadow import EngineShadowComparison
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
@@ -160,6 +161,23 @@ def delete_job(db: Session, job_id: str, session_id: str, storage=None) -> bool:
         from app.services.quota_service import release_job_slot
 
         release_job_slot(db, job.id)
+
+    # Shadow artifacts are internal rollout evidence, but they are still
+    # session-owned data and must disappear with the reconciliation job.
+    shadow_comparisons = (
+        db.query(EngineShadowComparison)
+        .filter(EngineShadowComparison.job_id == job.id, EngineShadowComparison.session_id == session_id)
+        .all()
+    )
+    if storage:
+        for comparison in shadow_comparisons:
+            if comparison.details_storage_path:
+                try:
+                    storage.delete_file(comparison.details_storage_path)
+                except Exception:
+                    pass
+    for comparison in shadow_comparisons:
+        db.delete(comparison)
 
     # Delete history, review outcomes and report emails: they reference the
     # job, and PostgreSQL refuses to delete a job they still point at.

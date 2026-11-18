@@ -2,6 +2,7 @@ from app.models.alias import EntityAlias, MatchDecision
 from app.models.account import AdminAuditEvent, AuthIdentity, AuthRateLimit, AuthToken, PlatformEmailSettings, PlatformPolicy, ReportAccessToken, ReportEmailDelivery, User, UserPolicyOverride, UserPreference, UserSession, WorkspaceImport, WorkspaceQuota
 from app.models.audit import AuditEvent
 from app.models.base import Base
+from app.models.engine_shadow import EngineShadowComparison
 from app.models.file import UploadedFile
 from app.models.history import ReconciliationHistory
 from app.models.job import ReconciliationJob
@@ -19,6 +20,7 @@ __all__ = [
     "AuthRateLimit",
     "AuthToken",
     "AuditEvent",
+    "EngineShadowComparison",
     "EntityAlias",
     "ExceptionPattern",
     "ResolutionRule",

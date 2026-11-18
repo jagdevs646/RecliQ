@@ -1,5 +1,6 @@
 from functools import lru_cache
 import ipaddress
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -78,6 +79,13 @@ class Settings(BaseSettings):
     job_queue_backend: str = "local"
     # Keep the row engine as default until Phase 3 parity and performance gates pass.
     engine: str = "rows"
+    # A deliberately opt-in rollout check. When enabled, users still receive
+    # the row-engine result while the column engine is compared privately.
+    # The owner must bound that period by a job count, an end time, or both.
+    engine_shadow_enabled: bool = False
+    engine_shadow_max_jobs: int = 0
+    engine_shadow_started_at: datetime | None = None
+    engine_shadow_until: datetime | None = None
     redis_url: str = "redis://localhost:6379/0"
     job_queue_name: str = "recliq-reconciliation"
     job_timeout_seconds: int = 3600
@@ -104,6 +112,23 @@ class Settings(BaseSettings):
         self.engine = self.engine.strip().lower()
         if self.engine not in {"rows", "columns"}:
             raise ValueError("ENGINE must be either 'rows' or 'columns'.")
+        if self.engine_shadow_max_jobs < 0:
+            raise ValueError("ENGINE_SHADOW_MAX_JOBS cannot be negative.")
+        for setting_name, value in (
+            ("ENGINE_SHADOW_STARTED_AT", self.engine_shadow_started_at),
+            ("ENGINE_SHADOW_UNTIL", self.engine_shadow_until),
+        ):
+            if value and value.tzinfo is None:
+                raise ValueError(f"{setting_name} must include a UTC offset, for example 2026-11-01T00:00:00+00:00.")
+        if self.engine_shadow_started_at and self.engine_shadow_until and self.engine_shadow_started_at > self.engine_shadow_until:
+            raise ValueError("ENGINE_SHADOW_STARTED_AT must be before ENGINE_SHADOW_UNTIL.")
+        if self.engine_shadow_enabled:
+            if self.engine != "rows":
+                raise ValueError("ENGINE must remain 'rows' while ENGINE_SHADOW_ENABLED is true.")
+            if not self.engine_shadow_max_jobs and self.engine_shadow_until is None:
+                raise ValueError("Enable the engine shadow rollout only with ENGINE_SHADOW_MAX_JOBS or ENGINE_SHADOW_UNTIL.")
+            if self.engine_shadow_max_jobs and self.engine_shadow_started_at is None:
+                raise ValueError("ENGINE_SHADOW_STARTED_AT is required when ENGINE_SHADOW_MAX_JOBS is set.")
         if self.max_upload_mb < 1 or self.max_rows_per_sheet < 1:
             raise ValueError("Upload size and row limits must be positive integers.")
         if self.guest_retention_hours < 1:

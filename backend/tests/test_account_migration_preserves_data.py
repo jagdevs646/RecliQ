@@ -58,6 +58,9 @@ def test_account_migrations_preserve_populated_guest_records(tmp_path, monkeypat
             stored_job = connection.execute(text("SELECT session_id, matched_records_count, exception_count, review_count FROM reconciliation_jobs WHERE id=:id"), {"id": job_id}).one()
             stored_decision = connection.execute(text("SELECT pair_key, decision FROM match_decisions WHERE id=:id"), {"id": decision_id}).one()
             outcome = connection.execute(text("SELECT outcome FROM review_outcomes WHERE job_id=:job_id AND pair_key='vendor:acme'"), {"job_id": job_id}).scalar_one()
+            shadow_table_exists = connection.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_shadow_comparisons'"
+            )).scalar_one()
             version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
 
         assert stored_file == (session_id, 2_000_000_000, 0)
@@ -65,7 +68,8 @@ def test_account_migrations_preserve_populated_guest_records(tmp_path, monkeypat
         assert stored_job == (session_id, 5, 6, 3)
         assert stored_decision == ("vendor:acme", "accepted")
         assert outcome == "accepted"
-        assert version == "20261015_0001"
+        assert shadow_table_exists == 1
+        assert version == "20261022_0001"
         engine.dispose()
     finally:
         get_settings.cache_clear()

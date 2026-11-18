@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 import re
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,11 @@ from app.schemas.reconciliation import (
 )
 from app.services import learning_service, resolution_service
 from app.services.audit_service import AuditActor, record_event
+from app.services.engine_shadow_service import (
+    EngineShadowTracker,
+    record_shadow_audit,
+    shadow_decision,
+)
 from app.services.job_service import append_history
 from app.services.policy_service import effective_features, effective_limits, require_feature
 from app.services.quota_service import release_job_slot, reserve_job, reserve_storage
@@ -472,6 +478,8 @@ def _process_claimed_job(job_id: str) -> None:
     result_data_dir: Path | None = None
     persisted_storage_paths: list[str] = []
     report_committed = False
+    shadow_tracker: EngineShadowTracker | None = None
+    shadow_comparison = None
     try:
         job = db.get(ReconciliationJob, job_id)
         if not job or job.status != "processing":
@@ -537,6 +545,11 @@ def _process_claimed_job(job_id: str) -> None:
 
         work_dir = Path(settings.local_storage_path) / "work"
         work_dir.mkdir(parents=True, exist_ok=True)
+        shadow_rollout = shadow_decision(db, settings, job)
+        if shadow_rollout.enabled:
+            shadow_tracker = EngineShadowTracker.create(job, work_dir)
+            local_artifacts.append(shadow_tracker.details_path)
+            logger.info("Column engine shadow comparison enabled", extra={"job_id": job.id})
         output_name = "GST_Reconciliation.xlsx" if job.job_type == "gst" else "Reconciliation.xlsx"
         output_path = work_dir / f"{job.id}-{output_name}"
         payload = json.loads(job.settings_json or "{}")
@@ -689,6 +702,8 @@ def _process_claimed_job(job_id: str) -> None:
                         write_report=False,
                     )
                 elif pair.get("reconciliation_method") == "date_amount":
+                    if shadow_tracker:
+                        shadow_tracker.skip_rule()
                     res = reconcile_date_amount(
                         df1, df2, pair.get("date_amount") or {},
                         file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
@@ -699,27 +714,59 @@ def _process_claimed_job(job_id: str) -> None:
                         is_cancelled=is_cancelled,
                     )
                 else:
+                    # During the controlled rollout the user-facing run stays
+                    # on rows. Give each engine an isolated frame because the
+                    # reconciliation preparation adds transient columns.
+                    primary_file_1 = df1.copy(deep=True) if shadow_tracker else df1
+                    primary_file_2 = df2.copy(deep=True) if shadow_tracker else df2
+                    generic_options = {
+                        "key_file_1": [key_f1] if isinstance(key_f1, str) else key_f1,
+                        "key_file_2": [key_f2] if isinstance(key_f2, str) else key_f2,
+                        "rules": pair.get("rules", payload.get("rules", [])),
+                        "orientation": orientation,
+                        "include_columns_file_1": pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
+                        "include_columns_file_2": pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
+                        "file_1_name": f"{source_record.original_filename} ({sheet_name_1})",
+                        "file_2_name": f"{destination_record.original_filename} ({sheet_name_2})",
+                        "is_cancelled": is_cancelled,
+                        "write_report": False,
+                        "secondary_conditions": pair.get("secondary_conditions", []),
+                        "similarity_policy": pair.get("similarity_policy", {}),
+                        "date_only_override": bool(pair.get("date_only_override", False)),
+                        "transformations": pair.get("transformations", []),
+                        "matching_passes": pair.get("matching_passes", []),
+                        "normalization": pair.get("normalization", {}),
+                        "date_dayfirst": bool(pair.get("date_dayfirst", True)),
+                        "saved_aliases": saved_aliases,
+                        "resolution_rules": resolution_rules,
+                        "learning": learning,
+                        "tolerances": pair.get("tolerances", []),
+                    }
+                    primary_started = time.perf_counter()
                     res = run_generic_reconciliation(
-                        file_1_df=df1, file_2_df=df2, output_path=output_path,
-                        key_file_1=[key_f1] if isinstance(key_f1, str) else key_f1,
-                        key_file_2=[key_f2] if isinstance(key_f2, str) else key_f2,
-                        rules=pair.get("rules", payload.get("rules", [])), orientation=orientation,
-                        include_columns_file_1=pair.get("include_columns_file_1", payload.get("include_columns_file_1", [])),
-                        include_columns_file_2=pair.get("include_columns_file_2", payload.get("include_columns_file_2", [])),
-                        progress_callback=rule_progress, file_1_name=f"{source_record.original_filename} ({sheet_name_1})",
-                        file_2_name=f"{destination_record.original_filename} ({sheet_name_2})", is_cancelled=is_cancelled,
-                        write_report=False, secondary_conditions=pair.get("secondary_conditions", []),
-                        similarity_policy=pair.get("similarity_policy", {}), date_only_override=bool(pair.get("date_only_override", False)),
-                        transformations=pair.get("transformations", []),
-                        matching_passes=pair.get("matching_passes", []),
-                        normalization=pair.get("normalization", {}),
-                        date_dayfirst=bool(pair.get("date_dayfirst", True)),
-                        saved_aliases=saved_aliases,
-                        resolution_rules=resolution_rules,
-                        learning=learning,
-                        tolerances=pair.get("tolerances", []),
+                        file_1_df=primary_file_1,
+                        file_2_df=primary_file_2,
+                        output_path=output_path,
+                        progress_callback=rule_progress,
                         engine_mode=settings.engine,
+                        **generic_options,
                     )
+                    primary_seconds = time.perf_counter() - primary_started
+                    if shadow_tracker:
+                        shadow_tracker.compare_rule(
+                            file_pair_id=file_pair_id,
+                            sheet_rule_id=sheet_rule_id,
+                            report_label=report_label,
+                            primary_result=res,
+                            primary_seconds=primary_seconds,
+                            run_shadow=lambda: run_generic_reconciliation(
+                                file_1_df=df1.copy(deep=True),
+                                file_2_df=df2.copy(deep=True),
+                                output_path=output_path,
+                                engine_mode="columns",
+                                **generic_options,
+                            ),
+                        )
 
                 for k, v in res["summary"].items():
                     overall_summary[k] = overall_summary.get(k, 0) + v
@@ -736,6 +783,8 @@ def _process_claimed_job(job_id: str) -> None:
             except Exception as exc:
                 if is_transient(exc):
                     raise  # Infrastructure failure: retry the whole job.
+                if shadow_tracker and job.job_type == "generic" and pair.get("reconciliation_method") != "date_amount":
+                    shadow_tracker.mark_primary_failure(sheet_rule_id)
                 logger.warning("Sheet rule failed", extra={"sheet_rule_id": sheet_rule_id, "error": str(exc)})
                 # str(KeyError) wraps its message in quotes; report the message itself.
                 message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
@@ -748,6 +797,11 @@ def _process_claimed_job(job_id: str) -> None:
         if not rule_results:
             details = "; ".join(error["error"] for error in rule_errors) or "No data processed for any sheet pair."
             raise ValueError(details)
+
+        if shadow_tracker:
+            shadow_comparison = shadow_tracker.finalize(db, storage)
+            if shadow_comparison.details_storage_path:
+                persisted_storage_paths.append(shadow_comparison.details_storage_path)
 
         file_pair_manifest = _file_pair_manifest(rule_manifest)
         merged_ud = _merge_rule_universal_data(rule_results)
@@ -908,6 +962,8 @@ def _process_claimed_job(job_id: str) -> None:
         db.commit()
         report_committed = True
         logger.info(completion_message, extra={"failed_rules": len(rule_errors), "report_id": report.id})
+        if shadow_comparison:
+            record_shadow_audit(shadow_comparison)
         record_event(
             scope_id=job.session_id, actor=AuditActor.system(), action="job.completed", entity_type="job",
             entity_id=job.id, summary=completion_message, after={"status": job.status, "report_id": report.id},
@@ -1001,6 +1057,8 @@ def _process_claimed_job(job_id: str) -> None:
                 run_name=job.display_name,
             )
     finally:
+        if shadow_tracker:
+            shadow_tracker.close()
         db.close()
         try:
             # Input paths point at durable session-owned uploads. Only transient
