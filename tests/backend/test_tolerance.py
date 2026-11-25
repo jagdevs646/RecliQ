@@ -179,10 +179,31 @@ def test_a_band_on_a_field_that_is_not_compared_is_rejected(tmp_path: Path):
         _reco(tmp_path, [_bank("U1", 1)], [_books("U1", 1)], [{"field": "CREDIT", "amount": 1}])
 
 
-def test_a_band_needs_a_limit():
+def test_the_general_band_needs_a_limit():
     with pytest.raises(ValueError, match="amount, a percentage, a number of days or a text similarity"):
-        ToleranceBand(field="DEBIT")
+        ToleranceBand(field="*")
+    with pytest.raises(ValueError, match="amount, a percentage, a number of days or a text similarity"):
+        ToleranceBand(field="*", amount=0)
     assert ToleranceBand(field="DEBIT", percent=0.5).percent == 0.5
+    # A field's own band without a limit is "exact for this field".
+    assert ToleranceBand(field="DEBIT").amount is None
+
+
+def test_a_field_kept_exact_is_left_out_of_the_general_band(tmp_path: Path):
+    result = _reco(
+        tmp_path,
+        [_bank("U1", 100.40, "11/08/2026")],
+        [_books("U1", 100, "10/08/2026")],
+        [{"field": "*", "amount": 1, "days": 1}, {"field": "DEBIT"}],
+    )
+    # The date is accepted by the general band; the debit stays a difference.
+    assert list(_differences(result)["U1"]) == ["DEBIT"]
+    assert Band(field="DEBIT").describe() == "DEBIT: exact (no tolerance)"
+
+
+def test_a_general_band_without_a_limit_is_rejected(tmp_path: Path):
+    with pytest.raises(ValueError, match="amount, a percentage, a number of days or a text similarity"):
+        _reco(tmp_path, [_bank("U1", 1)], [_books("U1", 1)], [{"field": "*"}])
 
 
 # ── Text similarity ────────────────────────────────────────────────────────

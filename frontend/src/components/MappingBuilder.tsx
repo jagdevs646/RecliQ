@@ -1,8 +1,7 @@
 import { ArrowRight, Check, CircleHelp, Download, Plus, Redo2, Save, Search, Sparkles, Trash2, Undo2 } from "lucide-react";
 import { useMemo, useState, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { filterColumns, matchRanges, searchTerms } from "../lib/columnSearch";
-import { TOLERANCE_KINDS, TOLERANCE_LIMITS, clearTolerance, comparedFieldLabel, guessToleranceKind, setToleranceLimit, toleranceFor, toleranceIsComplete, toleranceKind, toleranceLimit, type ToleranceKind } from "../lib/plan";
-import { TOLERANCE_AMOUNT_LEVELS, TOLERANCE_DATE_LEVELS, TOLERANCE_TEXT_LEVELS, amountLevelId, dateLevelId, textLevelId } from "../lib/matchLevels";
+import { EXACT_TOLERANCE_LEVEL, TOLERANCE_KINDS, TOLERANCE_LIMITS, acceptsDifferences, clearTolerance, comparedFieldLabel, describeToleranceLevel, exactToleranceLevel, generalTolerance, guessToleranceKind, limitsOfKind, setGeneralLimits, setToleranceLevel, setToleranceLimit, toleranceFor, toleranceKind, toleranceLevelId, toleranceLevels, toleranceLimit, type ToleranceKind, type ToleranceLimits } from "../lib/plan";
 import type { AnalysisResponse, RuleMapping, ToleranceBand } from "../types";
 import { LevelSelect } from "./LevelSelect";
 import { ComparisonTypeHelp, ToleranceHelp } from "./RuleExtras";
@@ -208,6 +207,16 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
   }
 
   const templateNames = Object.keys(JSON.parse(localStorage.getItem(templateKey) ?? "{}") as Record<string, RuleMapping[]>);
+  const general = generalTolerance(tolerances);
+  /** The type of data a mapped field's tolerance is for: picked in its row, its own band's, or guessed. */
+  const kindOf = (rule: RuleMapping): ToleranceKind => {
+    const label = comparedFieldLabel(rule);
+    return pickedKinds[label] ?? toleranceKind(toleranceFor(tolerances, label)) ?? guessToleranceKind(rule, analysis);
+  };
+  const toleranceUsage = Object.fromEntries(TOLERANCE_KINDS.map(({ value }) => {
+    const ofKind = rules.filter((rule) => kindOf(rule) === value);
+    return [value, { total: ofKind.length, inheriting: ofKind.filter((rule) => !toleranceFor(tolerances, comparedFieldLabel(rule))).length }];
+  })) as Record<ToleranceKind, ToleranceUsage>;
   return <section className="mapping-workspace">
     <div className="section-heading">
       <div><h2>Column mapping</h2><p>Map fields for comparison. Your matching key is already excluded.</p></div>
@@ -241,6 +250,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
       onAdd={() => addRule()}
       onClear={() => { setLeft([]); setRight([]); }}
     />}
+    {editTolerances && <GeneralTolerance tolerances={tolerances} usage={toleranceUsage} onChange={editTolerances} />}
     {toleranceNotice}
     {rules.length > 0 && <>
       <div className="mapping-list-toolbar">
@@ -273,7 +283,7 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
           <strong className="mapping-side-value">{rule.file_2_fields.join(" + ")}</strong>
           {manualTypesEnabled && rule.comparison_type === "numeric" && <NumberFormatControl sideLabel={destinationFileLabel} value={rule.number_format_file_2} onChange={(value) => commit(rules.map((item, itemIndex) => itemIndex === index ? { ...item, number_format_file_2: value } : item))} />}
         </div>
-        {editTolerances && <RuleTolerance field={fieldLabel} guessed={guessToleranceKind(rule, analysis)} kind={pickedKinds[fieldLabel] ?? toleranceKind(toleranceFor(tolerances, fieldLabel)) ?? guessToleranceKind(rule, analysis)} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [fieldLabel]: kind }))} onChange={editTolerances} />}
+        {editTolerances && <RuleTolerance field={fieldLabel} guessed={guessToleranceKind(rule, analysis)} kind={kindOf(rule)} general={general} tolerances={tolerances} onKind={(kind) => setPickedKinds((current) => ({ ...current, [fieldLabel]: kind }))} onChange={editTolerances} />}
         <button type="button" className="icon-button" onClick={() => commit(rules.filter((_, itemIndex) => itemIndex !== index))} title="Delete mapping"><Trash2 size={16} /></button>
         {manualTypesEnabled && <div className="mapping-rule-settings">
           <div className="mapping-manual-controls">
@@ -297,7 +307,6 @@ export function MappingBuilder({ file1Columns, file2Columns, rules, onRulesChang
         </div>}
       </div>;
     })}</div>
-    {editTolerances && tolerances.some((band) => !toleranceIsComplete(band, { rules })) && <p className="field-hint is-warning">A tolerance of 0 accepts nothing: enter a value above 0, or clear the box for no tolerance.</p>}
     {autoMatches.length > 0 && <p className="success-text"><Check size={16} />{autoMatches.length} columns mapped automatically: {autoMatches.map((match) => `${match.source} → ${match.destination}`).join(", ")}. Remove any that are wrong.</p>}
     <div className="template-toolbar"><div className="template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder="Template name" /><button type="button" className="secondary" onClick={saveTemplate} disabled={!templateName.trim() || !rules.length}><Save size={16} />Save mapping</button></div><select defaultValue="" onChange={loadTemplate} aria-label="Load mapping template"><option value="">Load a saved mapping</option>{templateNames.map((name) => <option key={name}>{name}</option>)}</select><button type="button" className="secondary" onClick={loadLastMapping} title="Duplicate the most recently changed mapping"><Download size={16} />Duplicate previous</button></div>
   </section>;
@@ -307,39 +316,82 @@ function NumberFormatControl({ sideLabel, value, onChange }: { sideLabel: string
   return <label className="mapping-side-format"><span>Number format</span><select value={value ?? ""} aria-label={`Number format for ${sideLabel}`} onChange={(event) => onChange((event.target.value || undefined) as RuleMapping["number_format_file_1"])}><option value="">Auto-detect</option>{NUMBER_FORMATS.map((format) => <option key={format.value} value={format.value}>{format.label}</option>)}</select></label>;
 }
 
-/** One mapped field's tolerance: the type of data, then the limit boxes that type takes. Empty boxes mean no tolerance. */
-function RuleTolerance({ field, kind, guessed, tolerances, onKind, onChange }: { field: string; kind: ToleranceKind; guessed: ToleranceKind; tolerances: ToleranceBand[]; onKind: (kind: ToleranceKind) => void; onChange: (tolerances: ToleranceBand[]) => void }) {
+interface ToleranceUsage { total: number; inheriting: number }
+
+/** Keeps the limits above 0 of a level, so "±1%" is not saved as "±0 or ±1%". */
+function positiveLimits(limits: ToleranceLimits | null): ToleranceLimits | null {
+  if (!limits) return null;
+  const kept = Object.fromEntries(Object.entries(limits).filter(([, value]) => (value ?? 0) > 0)) as ToleranceLimits;
+  return Object.keys(kept).length ? kept : null;
+}
+
+/**
+ * One tolerance per type of data (amount, date, text) for every mapped field
+ * that has none of its own. The engine applies each to the fields it compares
+ * as that type; a row below can still set its own, or Exact to opt out.
+ */
+function GeneralTolerance({ tolerances, usage, onChange }: { tolerances: ToleranceBand[]; usage: Record<ToleranceKind, ToleranceUsage>; onChange: (tolerances: ToleranceBand[]) => void }) {
+  const general = generalTolerance(tolerances);
+  return <section className="general-tolerance" aria-labelledby="general-tolerance-title">
+    <div className="general-tolerance-heading">
+      <strong id="general-tolerance-title">General tolerance</strong>
+      <p>One rule per type of data, used by every mapped field of that type. To treat a field differently, change it in its row below.</p>
+    </div>
+    <div className="general-tolerance-grid">
+      {TOLERANCE_KINDS.map(({ value: kind, label, limits }) => {
+        const current = limitsOfKind(general, kind);
+        const noun = label.toLowerCase();
+        const { total, inheriting } = usage[kind];
+        const fields = `${total} ${noun} field${total === 1 ? "" : "s"}`;
+        const note = !total ? `No ${noun} fields mapped yet` : acceptsDifferences(current) ? `Used by ${inheriting} of ${fields}` : `${fields} mapped`;
+        return <div className="general-tolerance-item" key={kind}>
+          <span className="general-tolerance-label">{label}</span>
+          <LevelSelect options={toleranceLevels(kind)} currentId={toleranceLevelId(kind, current)} emptyLabel={kind === "date" ? "Same day (no tolerance)" : "Exact (no tolerance)"} ariaLabel={`General tolerance for ${noun} fields`}
+            onSelect={(value) => onChange(setGeneralLimits(tolerances, kind, positiveLimits(value)))}
+            customEditor={limits.map((limit) => {
+              const settings = TOLERANCE_LIMITS[limit];
+              return <input key={limit} type="number" min={0} max={settings.max} step={settings.step} inputMode={settings.whole ? "numeric" : "decimal"} value={current[limit] ?? ""} placeholder={settings.placeholder} title={settings.label} aria-label={`General ${settings.label} for ${noun} fields`}
+                onChange={(event) => onChange(setGeneralLimits(tolerances, kind, { ...current, [limit]: toleranceLimit(limit, event.target.value) ?? undefined }))} />;
+            })} />
+          <small className="general-tolerance-note">{note}</small>
+        </div>;
+      })}
+    </div>
+    {general && !acceptsDifferences(general) && <p className="field-hint is-warning">A general tolerance of 0 accepts nothing: enter a value above 0, or choose no tolerance.</p>}
+  </section>;
+}
+
+/** One mapped field's tolerance: the type of data, then its level. Without one of its own the field uses the general tolerance for its type. */
+function RuleTolerance({ field, kind, guessed, general, tolerances, onKind, onChange }: { field: string; kind: ToleranceKind; guessed: ToleranceKind; general: ToleranceBand | undefined; tolerances: ToleranceBand[]; onKind: (kind: ToleranceKind) => void; onChange: (tolerances: ToleranceBand[]) => void }) {
   const band = toleranceFor(tolerances, field);
   const limits = TOLERANCE_KINDS.find((item) => item.value === kind)?.limits ?? [];
   return <div className="rule-tolerance">
     <select value={kind} aria-label={`Type of data in ${field}`} title={kind === guessed ? "Detected from the column. Change it if it is wrong." : "Type of data in this field"} onChange={(event) => { onKind(event.target.value as ToleranceKind); if (band) onChange(clearTolerance(tolerances, field)); }}>
       {TOLERANCE_KINDS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
     </select>
-    <ToleranceLevel key={kind} field={field} kind={kind} band={band} tolerances={tolerances} onChange={onChange} customEditor={limits.map((limit) => {
+    <ToleranceLevel key={kind} field={field} kind={kind} band={band} general={general} tolerances={tolerances} onChange={onChange} customEditor={limits.map((limit) => {
       const settings = TOLERANCE_LIMITS[limit];
       return <input key={limit} type="number" min={0} max={settings.max} step={settings.step} inputMode={settings.whole ? "numeric" : "decimal"} value={band?.[limit] ?? ""} placeholder={settings.placeholder} title={settings.label} aria-label={`${settings.label} for ${field}`} onChange={(event) => onChange(setToleranceLimit(tolerances, field, kind, limit, toleranceLimit(limit, event.target.value)))} />;
     })} />
   </div>;
 }
 
-/** The named level of one field's tolerance ("Rounding", "±3 days", "Close"); Custom shows the boxes. */
-function ToleranceLevel({ field, kind, band, tolerances, onChange, customEditor }: { field: string; kind: ToleranceKind; band: ToleranceBand | undefined; tolerances: ToleranceBand[]; onChange: (tolerances: ToleranceBand[]) => void; customEditor: ReactNode }) {
-  const label = `Tolerance for ${field}`;
-  if (kind === "amount") {
-    return <LevelSelect options={TOLERANCE_AMOUNT_LEVELS} currentId={amountLevelId(band?.amount, band?.percent, TOLERANCE_AMOUNT_LEVELS)} emptyLabel="Exact (no tolerance)" ariaLabel={label} customEditor={customEditor}
-      onSelect={(limits) => {
-        const cleared = clearTolerance(tolerances, field);
-        if (!limits) return onChange(cleared);
-        const withAmount = setToleranceLimit(cleared, field, "amount", "amount", limits.amount || null);
-        onChange(setToleranceLimit(withAmount, field, "amount", "percent", limits.percent || null));
-      }} />;
-  }
-  if (kind === "date") {
-    return <LevelSelect options={TOLERANCE_DATE_LEVELS} currentId={dateLevelId(band?.days, TOLERANCE_DATE_LEVELS)} emptyLabel="Same day (no tolerance)" ariaLabel={label} customEditor={customEditor}
-      onSelect={(days) => onChange(days ? setToleranceLimit(tolerances, field, "date", "days", days) : clearTolerance(tolerances, field))} />;
-  }
-  return <LevelSelect options={TOLERANCE_TEXT_LEVELS} currentId={textLevelId(band?.similarity, TOLERANCE_TEXT_LEVELS)} emptyLabel="Exact (no tolerance)" ariaLabel={label} customEditor={customEditor}
-    onSelect={(similarity) => onChange(similarity ? setToleranceLimit(tolerances, field, "text", "similarity", similarity) : clearTolerance(tolerances, field))} />;
+/**
+ * The named level of one field's tolerance ("Rounding", "±3 days", "Close");
+ * Custom shows the boxes. With a general tolerance for the field's type the
+ * first choice is that general level, and Exact keeps this field exact.
+ */
+function ToleranceLevel({ field, kind, band, general, tolerances, onChange, customEditor }: { field: string; kind: ToleranceKind; band: ToleranceBand | undefined; general: ToleranceBand | undefined; tolerances: ToleranceBand[]; onChange: (tolerances: ToleranceBand[]) => void; customEditor: ReactNode }) {
+  const inherited = limitsOfKind(general, kind);
+  const hasGeneral = acceptsDifferences(inherited);
+  const own = limitsOfKind(band, kind);
+  const levels = toleranceLevels(kind);
+  const ownIsExact = band !== undefined && !acceptsDifferences(own);
+  const currentId = !band ? "" : ownIsExact ? (hasGeneral ? EXACT_TOLERANCE_LEVEL : "") : toleranceLevelId(kind, own, levels);
+  const noTolerance = kind === "date" ? "Same day (no tolerance)" : "Exact (no tolerance)";
+  return <LevelSelect options={hasGeneral ? [exactToleranceLevel(kind), ...levels] : levels} currentId={currentId}
+    emptyLabel={hasGeneral ? `General (${describeToleranceLevel(kind, inherited, true)})` : noTolerance} ariaLabel={`Tolerance for ${field}`} customEditor={customEditor}
+    onSelect={(limits) => onChange(limits ? setToleranceLevel(tolerances, field, kind, limits) : clearTolerance(tolerances, field))} />;
 }
 
 interface BoardProps {

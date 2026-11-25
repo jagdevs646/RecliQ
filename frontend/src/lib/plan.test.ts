@@ -24,6 +24,11 @@ import {
   dateAmountMappingIsReady,
   shouldSuggestDateAmount,
   guessToleranceKind,
+  describeToleranceLevel,
+  generalTolerance,
+  setGeneralLimits,
+  setToleranceLevel,
+  toleranceLevelId,
   setToleranceLimit,
   toleranceFor,
   toleranceKind,
@@ -45,10 +50,12 @@ describe("tolerance bands", () => {
     rules: [{ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }, { file_1_fields: ["DATE"], file_2_fields: ["DATE"] }],
   });
 
-  it("need a compared field and a limit above 0 before the mapping step is complete", () => {
+  it("need a compared field, and the general one a limit above 0, before the mapping step is complete", () => {
     const config = mapped();
     expect(mappingIsReady(config)).toBe(true);
-    expect(mappingIsReady({ ...config, tolerances: [{ field: "DEBIT", amount: null, percent: null, days: null }] })).toBe(false);
+    // A field's own band without a limit keeps that field exact.
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "DEBIT", amount: null, percent: null, days: null }] })).toBe(true);
+    expect(mappingIsReady({ ...config, tolerances: [{ field: "*", amount: 0, days: null }] })).toBe(false);
     expect(mappingIsReady({ ...config, tolerances: [{ field: "DEBIT", amount: 0.05 }] })).toBe(true);
     expect(mappingIsReady({ ...config, tolerances: [{ field: "*", days: 3 }] })).toBe(true);
     expect(mappingIsReady({ ...config, tolerances: [{ field: "CREDIT", amount: 1 }] })).toBe(false); // Not compared.
@@ -102,6 +109,49 @@ describe("tolerance bands", () => {
     expect(toleranceKind({ field: "X", amount: null, percent: null, days: 2, similarity: null })).toBe("date");
   });
 
+  it("have one general band holding a limit per type of data", () => {
+    const amount = setGeneralLimits([{ field: "DEBIT", amount: 1 }], "amount", { percent: 1 });
+    expect(amount).toEqual([{ field: "DEBIT", amount: 1 }, { field: "*", percent: 1 }]);
+    const both = setGeneralLimits(amount, "date", { days: 3 });
+    expect(generalTolerance(both)).toEqual({ field: "*", percent: 1, days: 3 });
+    // Changing one type's rule keeps the others; clearing the last removes the band.
+    expect(generalTolerance(setGeneralLimits(both, "amount", { amount: 0.05 }))).toEqual({ field: "*", amount: 0.05, days: 3 });
+    expect(setGeneralLimits(setGeneralLimits(both, "amount", null), "date", null)).toEqual([{ field: "DEBIT", amount: 1 }]);
+    // Older setups with several general bands read as one, and are saved as one.
+    const older = [{ field: "*", days: 1 }, { field: "DEBIT", amount: 1 }, { field: "*", similarity: 80 }];
+    expect(generalTolerance(older)).toEqual({ field: "*", days: 1, similarity: 80 });
+    expect(setGeneralLimits(older, "text", { similarity: 90 })).toEqual([{ field: "*", days: 1, similarity: 90 }, { field: "DEBIT", amount: 1 }]);
+  });
+
+  it("name their level, with Exact as a field's own band without a limit", () => {
+    expect(toleranceLevelId("amount", {})).toBe("");
+    expect(toleranceLevelId("amount", { percent: 1 })).toBe("one_percent");
+    expect(toleranceLevelId("amount", { amount: 0.05, percent: 0 })).toBe("rounding");
+    expect(toleranceLevelId("amount", { amount: 2 })).toBe("custom");
+    expect(toleranceLevelId("date", { days: 3 })).toBe("three_days");
+    expect(toleranceLevelId("text", { similarity: 80 })).toBe("close");
+    expect(describeToleranceLevel("amount", { percent: 1 })).toBe("±1% (of the larger amount)");
+    expect(describeToleranceLevel("text", { similarity: 80 }, true)).toBe("Close");
+    expect(describeToleranceLevel("date", { days: 2 })).toBe("±2 days");
+    expect(describeToleranceLevel("amount", { amount: 2, percent: 0.25 })).toBe("±2 or ±0.25%");
+    const exact = setToleranceLevel([{ field: "*", percent: 1 }], "TAX", "amount", { amount: 0 });
+    expect(exact).toEqual([{ field: "*", percent: 1 }, { field: "TAX", amount: 0 }]);
+    expect(toleranceKind(exact[1])).toBe("amount");
+    expect(describeTolerance(exact[1])).toBe("TAX: exact (no tolerance)");
+    // A level's zero limits are not saved next to the one that is set.
+    expect(setToleranceLevel(exact, "TAX", "amount", { amount: 0, percent: 1 })).toEqual([{ field: "*", percent: 1 }, { field: "TAX", percent: 1 }]);
+    expect(setToleranceLevel(exact, "TAX", "amount", null)).toEqual([{ field: "*", percent: 1 }]);
+  });
+
+  it("are sent for a field kept exact, so the general band does not apply to it", () => {
+    const config = { ...mapped(), tolerances: [{ field: "*", amount: 1 }, { field: "DEBIT", amount: 0 }] };
+    const rule = draftToSheetRule(config, { sheetRuleId: "r", sourceSheet: "a", destinationSheet: "b", label: "L" });
+    expect(rule.tolerances).toEqual([
+      { field: "*", amount: 1, percent: null, days: null, similarity: null },
+      { field: "DEBIT", amount: null, percent: null, days: null, similarity: null },
+    ]);
+  });
+
   it("guess the kind of data a mapping compares", () => {
     const analysis = { recommended_keys_1: [], recommended_keys_2: [], key_confidence: 0, is_composite_key: false, recommended_mappings: [], date_columns_1: ["POSTED"], date_columns_2: [] };
     expect(guessToleranceKind({ file_1_fields: ["POSTED"], file_2_fields: ["BOOKED ON"] }, analysis)).toBe("date");
@@ -109,6 +159,15 @@ describe("tolerance bands", () => {
     expect(guessToleranceKind({ file_1_fields: ["DEBIT"], file_2_fields: ["AMOUNT"] }, null)).toBe("amount");
     expect(guessToleranceKind({ file_1_fields: ["BASIC", "HRA"], file_2_fields: ["PAY"] }, null)).toBe("amount");
     expect(guessToleranceKind({ file_1_fields: ["NARRATION"], file_2_fields: ["DESCRIPTION"] }, null)).toBe("text");
+    // With the values known, numbers are amounts whatever their name, and a name alone does not make one.
+    const values = { ...analysis, date_columns_1: [], numeric_columns_1: ["DISCOUNT_%", "UNITS"], numeric_columns_2: ["DISCOUNT_%", "QTY"] };
+    expect(guessToleranceKind({ file_1_fields: ["DISCOUNT_%"], file_2_fields: ["DISCOUNT_%"] }, values)).toBe("amount");
+    expect(guessToleranceKind({ file_1_fields: ["UNITS"], file_2_fields: ["QTY"] }, values)).toBe("amount");
+    expect(guessToleranceKind({ file_1_fields: ["AMOUNT IN WORDS"], file_2_fields: ["AMOUNT IN WORDS"] }, values)).toBe("text");
+    expect(guessToleranceKind({ file_1_fields: ["UNITS"], file_2_fields: ["NOTE"] }, values)).toBe("text");
+    // A comparison type set by hand wins.
+    expect(guessToleranceKind({ file_1_fields: ["NOTE"], file_2_fields: ["NOTE"], comparison_type: "numeric" }, values)).toBe("amount");
+    expect(guessToleranceKind({ file_1_fields: ["UNITS"], file_2_fields: ["QTY"], comparison_type: "identifier" }, values)).toBe("text");
   });
 
   it("read typed limits: whole days and similarity, nothing for an empty box", () => {
@@ -188,7 +247,9 @@ describe("rule readiness", () => {
     const ready = draft({ primaryKeySource: ["INVOICE"], primaryKeyDestination: ["INVOICE NO"], rules: [{ file_1_fields: ["AMOUNT"], file_2_fields: ["AMOUNT"] }] });
     expect(mappingSetupStatus(ready)).toBe("configured");
     expect(mappingSetupStatus({ ...ready, rules: [{ file_1_fields: ["AMOUNT"], file_2_fields: [] }] })).toBe("error");
-    expect(mappingSetupStatus({ ...ready, tolerances: [{ field: "AMOUNT", amount: 0 }] })).toBe("error");
+    // A field at 0 is kept exact; a general tolerance at 0 accepts nothing.
+    expect(mappingSetupStatus({ ...ready, tolerances: [{ field: "AMOUNT", amount: 0 }] })).toBe("configured");
+    expect(mappingSetupStatus({ ...ready, tolerances: [{ field: "*", amount: 0 }] })).toBe("error");
   });
 });
 

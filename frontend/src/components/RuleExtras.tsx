@@ -1,6 +1,6 @@
 import { ArrowRight, Info, Plus, X } from "lucide-react";
-import type { DateAmountSettings, DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, ToleranceBand, TransformationStep } from "../types";
-import { ALL_FIELDS, availableColumns, describeTolerance, limitsFromPasses, newPass } from "../lib/plan";
+import type { DateAmountSettings, DateFormat, MatchingPass, NormalizationSettings, SheetRuleDraft, TransformationStep } from "../types";
+import { availableColumns, describeTolerance, limitsFromPasses, newPass } from "../lib/plan";
 import { ABSOLUTE_AMOUNT_LEVELS, AMOUNT_LEVELS, DATE_LEVELS, TEXT_LEVELS, amountLevelId, dateLevelId, textLevelId } from "../lib/matchLevels";
 import { LevelSelect } from "./LevelSelect";
 
@@ -258,8 +258,9 @@ export function ToleranceHelp({ destinationLabel }: { destinationLabel: string }
         <li>Tolerance never changes which records are paired.</li>
       </ul>
       <ul>
-        <li><b>Type</b>: RecliQ picks Amount, Date or Text from the column; change it if it is wrong. Leave the boxes empty for no tolerance.</li>
-        <li><b>Amount</b>: ± a fixed amount, or ± a percentage of the value in {destinationLabel}. Fill either or both; either one is enough to accept a difference.</li>
+        <li><b>General tolerance</b>: one rule per type of data, used by every mapped field of that type unless its row sets its own. Choose <b>Exact</b> in a row to keep that field exact.</li>
+        <li><b>Type</b>: RecliQ picks Amount, Date or Text from the column's values; change it if it is wrong.</li>
+        <li><b>Amount</b>: ± a fixed amount, or ± a percentage of the larger of the two values. Fill either or both; either one is enough to accept a difference.</li>
         <li><b>Date</b>: ± days apart.</li>
         <li><b>Text</b>: at least this % similar (the Similarity shown in the report).</li>
       </ul>
@@ -278,7 +279,7 @@ export function ComparisonTypeHelp() {
   </span>;
 }
 
-/** Tolerances the mapped-field rows cannot show: step-3 pass limits on offer, and "every compared field" tolerances from older setups. */
+/** Step-3 pass limits on offer as tolerances (the general tolerance has its own section). */
 export function ToleranceNotices({ config, onChange }: Omit<EditorProps, "sourceLabel" | "destinationLabel">) {
   const fromPasses = limitsFromPasses(config);
   const addedFields = fromPasses.rules.slice(config.rules.length).map((rule) => rule.file_1_fields.join(","));
@@ -287,20 +288,12 @@ export function ToleranceNotices({ config, onChange }: Omit<EditorProps, "source
     rules: fromPasses.rules,
     tolerances: [...config.tolerances.filter((band) => !fromPasses.tolerances.some((item) => item.field === band.field)), ...fromPasses.tolerances],
   });
-  const general = config.tolerances.filter((band) => band.field === ALL_FIELDS);
-  const removeGeneral = (band: ToleranceBand) => onChange({ ...config, tolerances: config.tolerances.filter((item) => item !== band) });
 
-  if (!fromPasses.tolerances.length && !general.length) return null;
-  return <>
-    {fromPasses.tolerances.length > 0 && <div className="tolerance-suggestion">
-      <p>Your step-3 matching pass has limits that only pair unmatched records: {fromPasses.tolerances.map(describeTolerance).join("; ")}.{addedFields.length ? ` Using them here also compares ${addedFields.join(" and ")}.` : ""}</p>
-      <button type="button" className="secondary" onClick={usePassLimits}>Accept these differences on matched records too</button>
-    </div>}
-    {general.map((band, index) => <div className="tolerance-general" key={`general-${index}`}>
-      <span>{describeTolerance(band)}. Applies to mapped fields without a tolerance of their own.</span>
-      <button type="button" className="icon-button" onClick={() => removeGeneral(band)} title="Remove this tolerance" aria-label="Remove this tolerance"><X size={16} /></button>
-    </div>)}
-  </>;
+  if (!fromPasses.tolerances.length) return null;
+  return <div className="tolerance-suggestion">
+    <p>Your step-3 matching pass has limits that only pair unmatched records: {fromPasses.tolerances.map(describeTolerance).join("; ")}.{addedFields.length ? ` Using them here also compares ${addedFields.join(" and ")}.` : ""}</p>
+    <button type="button" className="secondary" onClick={usePassLimits}>Accept these differences on matched records too</button>
+  </div>;
 }
 
 // ── Dates and names ─────────────────────────────────────────────────────

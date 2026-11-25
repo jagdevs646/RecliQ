@@ -57,13 +57,15 @@ class Band:
             name = text_level_name(self.similarity)
             limits.append(f"text at least {self.similarity}% similar" + (f" ({name})" if name else ""))
         target = "Every compared field" if self.field == ALL_FIELDS else self.field
-        return f"{target}: {' or '.join(limits)}"
+        return f"{target}: {' or '.join(limits) or 'exact (no tolerance)'}"
 
 
 def prepare_bands(configured: list[dict] | None, compared: list[tuple[str, str]]) -> list[Band]:
     """Validate bands against the compared fields ``(source label, destination
     label)``. A band names a field by either side's column; specific fields are
-    checked before "every field", so a narrower band always wins."""
+    checked before "every field", so a narrower band always wins. A field band
+    with no limit is "exact": it accepts nothing, so the "every field" band
+    does not apply to that field."""
     known = {label: source for source, destination in compared for label in (source, destination)}
     bands = []
     for item in configured or []:
@@ -80,7 +82,7 @@ def prepare_bands(configured: list[dict] | None, compared: list[tuple[str, str]]
             days=int(item["days"]) if item.get("days") else None,
             similarity=int(item["similarity"]) if item.get("similarity") else None,
         )
-        if not (band.amount or band.percent or band.days or band.similarity):
+        if field == ALL_FIELDS and not (band.amount or band.percent or band.days or band.similarity):
             raise ValueError("A tolerance needs an amount, a percentage, a number of days or a text similarity above 0.")
         bands.append(band)
     return sorted(bands, key=lambda band: band.field == ALL_FIELDS)

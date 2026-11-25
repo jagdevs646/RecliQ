@@ -490,6 +490,9 @@ export interface AnalysisResponse {
   /** Columns whose values are dates (drives the date-only key guard). */
   date_columns_1?: string[];
   date_columns_2?: string[];
+  /** Columns the engine compares as numbers (shown as Amount for tolerances). */
+  numeric_columns_1?: string[];
+  numeric_columns_2?: string[];
   recommended_mappings: {
     source: string;
     target: string | null;

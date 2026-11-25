@@ -105,7 +105,7 @@ flowchart LR
 1. **Upload files.** Excel, CSV or text files, tables inside PDF or Word documents, bank statements in MT940, BAI2 or CAMT.053 format, or GSTR-2B downloaded from the GST portal. You can add more than one workbook on each side.
 2. **Pair sheets.** Choose which sheet is compared with which. Each pair is reconciled on its own.
 3. **Matching key.** Choose the column (or columns) that identify the same record in both files, such as an invoice number or a UTR. RecliQ suggests likely keys. You can also require other columns to agree, and add extra passes that pair leftover records by amount and date when there is no common reference.
-4. **Map columns.** Choose the fields to compare (amount, date, narration and so on). A search box helps with long header lists. Here you can also clean values first (remove a prefix, turn debit and credit into one amount, round), and set **tolerances**: differences small enough to accept, such as ₹5, 1%, 3 days, or narration that is 75% similar.
+4. **Map columns.** Choose the fields to compare (amount, date, narration and so on). A search box helps with long header lists. Here you can also clean values first (remove a prefix, turn debit and credit into one amount, round), and set **tolerances**: differences small enough to accept, such as ₹5, 1%, 3 days, or narration that is 75% similar. A **general tolerance** sets one rule each for amounts, dates and text, used by every mapped field of that type; any field can still have its own, or be kept **Exact**.
 5. **Report setup.** Choose which extra columns appear in the report.
 6. **Run.** RecliQ first checks the data (blank keys, text in amount columns, keys that barely overlap) and tells you before anything runs. Then it reconciles and shows progress.
 

@@ -160,6 +160,9 @@ def test_key_suggestion_uses_data_not_just_names():
     assert result["recommended_key_destination"] == ["INVOICE NUMBER"]
     assert result["date_columns_1"] == ["TXN DATE"]
     assert result["date_columns_2"] == ["POSTING DATE"]
+    # Compared as numbers by the engine; the mapping screen shows their tolerance as an amount.
+    assert result["numeric_columns_1"] == ["AMOUNT"]
+    assert result["numeric_columns_2"] == ["NET AMOUNT"]
 
 
 def test_key_suggestion_finds_columns_that_share_values_under_other_headings():

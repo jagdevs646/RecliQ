@@ -19,7 +19,7 @@ import type {
   ToleranceBand,
   TransformationStep,
 } from "../types";
-import { NEW_RULE_REFERENCE_LEVEL } from "./matchLevels";
+import { CUSTOM_LEVEL, NEW_RULE_REFERENCE_LEVEL, TOLERANCE_AMOUNT_LEVELS, TOLERANCE_DATE_LEVELS, TOLERANCE_TEXT_LEVELS, type LevelOption } from "./matchLevels";
 
 export const DEFAULT_NORMALIZATION: NormalizationSettings = {
   legal_forms: true,
@@ -310,10 +310,14 @@ export function comparedFields(config: Pick<SheetRuleDraft, "rules">): string[] 
   return [...new Set(config.rules.filter((rule) => rule.file_1_fields.length && rule.file_2_fields.length).map(comparedFieldLabel))];
 }
 
-/** A band names a compared field (or all of them) and has at least one limit above 0. */
+/**
+ * A band names a compared field (or all of them). The general band needs a
+ * limit above 0; a field's own band may have none, which makes that field
+ * exact whatever the general tolerance says.
+ */
 export function toleranceIsComplete(band: ToleranceBand, config: Pick<SheetRuleDraft, "rules">): boolean {
-  const fieldExists = band.field === ALL_FIELDS || comparedFields(config).includes(band.field);
-  return fieldExists && [band.amount, band.percent, band.days, band.similarity].some((limit) => (limit ?? 0) > 0);
+  if (band.field === ALL_FIELDS) return [band.amount, band.percent, band.days, band.similarity].some((limit) => (limit ?? 0) > 0);
+  return comparedFields(config).includes(band.field);
 }
 
 export type ToleranceKind = "amount" | "date" | "text";
@@ -353,13 +357,20 @@ export function toleranceKind(band: ToleranceBand | undefined): ToleranceKind | 
  * known by their values or name, amounts by name, anything else is text.
  */
 export function guessToleranceKind(rule: RuleMapping, analysis: AnalysisResponse | null | undefined): ToleranceKind {
+  // A comparison type set by hand is the one the engine uses.
+  if (rule.comparison_type) return rule.comparison_type === "numeric" ? "amount" : rule.comparison_type === "date" ? "date" : "text";
   if (rule.file_1_fields.length > 1 || rule.file_2_fields.length > 1) return "amount";
   const dateValued = rule.file_1_fields.some((column) => analysis?.date_columns_1?.includes(column))
     || rule.file_2_fields.some((column) => analysis?.date_columns_2?.includes(column));
   if (dateValued) return "date";
+  // When the analysis knows the values, they decide: the engine compares these columns as numbers.
+  const numbers1 = analysis?.numeric_columns_1;
+  const numbers2 = analysis?.numeric_columns_2;
+  if (numbers1 && numbers2 && rule.file_1_fields.every((column) => numbers1.includes(column)) && rule.file_2_fields.every((column) => numbers2.includes(column))) return "amount";
   const columns = [...rule.file_1_fields, ...rule.file_2_fields];
   // Dates first: "Value date" is a date, not a value.
   if (columns.some((column) => DATE_COLUMN_HINT.test(column))) return "date";
+  if (numbers1 && numbers2) return "text";
   return columns.some((column) => AMOUNT_COLUMN_HINT.test(column)) ? "amount" : "text";
 }
 
@@ -392,6 +403,109 @@ export function setToleranceLimit(tolerances: ToleranceBand[], field: string, ki
 /** Removes one mapped field's tolerance. */
 export function clearTolerance(tolerances: ToleranceBand[], field: string): ToleranceBand[] {
   return tolerances.filter((item) => item.field !== field);
+}
+
+// ── Named levels and the general tolerance ─────────────────────────────
+/** The limits of one kind of data, e.g. { amount: 1 } or { days: 3 }. */
+export type ToleranceLimits = Partial<Record<ToleranceLimit, number>>;
+
+const limitsOf = (kind: ToleranceKind) => TOLERANCE_KINDS.find((item) => item.value === kind)?.limits ?? [];
+
+/** "Exact" for one field: a band with no limit above 0 overrides the general tolerance. */
+export const EXACT_TOLERANCE_LEVEL = "exact";
+
+/** The named levels a kind of data offers ("Rounding", "±3 days", "Close"), as the limits each sets. */
+export function toleranceLevels(kind: ToleranceKind): LevelOption<ToleranceLimits>[] {
+  if (kind === "amount") return TOLERANCE_AMOUNT_LEVELS.map((level) => ({ ...level, value: { amount: level.value.amount, percent: level.value.percent } }));
+  if (kind === "date") return TOLERANCE_DATE_LEVELS.map((level) => ({ ...level, value: { days: level.value } }));
+  return TOLERANCE_TEXT_LEVELS.map((level) => ({ ...level, value: { similarity: level.value } }));
+}
+
+/** The "Exact" choice a field gets when a general tolerance would otherwise apply to it. */
+export function exactToleranceLevel(kind: ToleranceKind): LevelOption<ToleranceLimits> {
+  return { id: EXACT_TOLERANCE_LEVEL, label: "Exact", hint: "No tolerance", value: { [limitsOf(kind)[0]]: 0 } };
+}
+
+/** The limits of one kind a band holds (numbers only). */
+export function limitsOfKind(band: ToleranceBand | undefined, kind: ToleranceKind): ToleranceLimits {
+  const limits: ToleranceLimits = {};
+  for (const limit of limitsOf(kind)) {
+    const value = band?.[limit];
+    if (typeof value === "number") limits[limit] = value;
+  }
+  return limits;
+}
+
+/** Limits (or a whole band) accept a difference when one of them is above 0. */
+export function acceptsDifferences(limits: Partial<Record<ToleranceLimit, number | null>>): boolean {
+  return TOLERANCE_KINDS.some((kind) => kind.limits.some((limit) => (limits[limit] ?? 0) > 0));
+}
+
+/** The level some limits are: "" when none is set, a level id, or "custom". */
+export function toleranceLevelId(kind: ToleranceKind, limits: ToleranceLimits, options: LevelOption<ToleranceLimits>[] = toleranceLevels(kind)): string {
+  const keys = limitsOf(kind);
+  if (!keys.some((key) => typeof limits[key] === "number")) return "";
+  const same = (option: LevelOption<ToleranceLimits>) => keys.every((key) => Math.abs((option.value[key] ?? 0) - (limits[key] ?? 0)) < 1e-9);
+  return options.find(same)?.id ?? CUSTOM_LEVEL;
+}
+
+/** Limits in words: "±1% (of the larger amount)", "±3 days", "Close (at least 80% similar)" (just the level name when short), or the numbers when they are not a level. */
+export function describeToleranceLevel(kind: ToleranceKind, limits: ToleranceLimits, short = false): string {
+  const level = toleranceLevels(kind).find((option) => option.id === toleranceLevelId(kind, limits));
+  if (level) return !short && level.hint && level.hint !== level.label ? `${level.label} (${level.hint.toLowerCase()})` : level.label;
+  if (!acceptsDifferences(limits)) return "Exact";
+  if (kind === "date") return `±${limits.days} day${limits.days === 1 ? "" : "s"}`;
+  if (kind === "text") return `At least ${limits.similarity}% similar`;
+  return [limits.amount ? `±${limits.amount}` : "", limits.percent ? `±${limits.percent}%` : ""].filter(Boolean).join(" or ");
+}
+
+/** Gives one field its own limits of a kind (a 0 is kept only when nothing else is set: that is "Exact"); null removes its band. */
+export function setToleranceLevel(tolerances: ToleranceBand[], field: string, kind: ToleranceKind, limits: ToleranceLimits | null): ToleranceBand[] {
+  if (!limits) return clearTolerance(tolerances, field);
+  const set = limitsOf(kind).filter((key) => typeof limits[key] === "number");
+  const positive = set.filter((key) => (limits[key] ?? 0) > 0);
+  const kept = positive.length ? positive : set;
+  if (!kept.length) return clearTolerance(tolerances, field);
+  const band: ToleranceBand = { field };
+  for (const key of kept) band[key] = limits[key];
+  const at = tolerances.findIndex((item) => item.field === field);
+  const others = tolerances.filter((item) => item.field !== field);
+  return at < 0 ? [...others, band] : [...others.slice(0, at), band, ...others.slice(at)];
+}
+
+/**
+ * The general tolerance: one band for every compared field, holding a limit
+ * per kind of data. The engine applies the amount limits to numbers, the days
+ * to dates and the similarity to text, for fields without a band of their own.
+ * Several such bands (older setups) read as one.
+ */
+export function generalTolerance(tolerances: ToleranceBand[]): ToleranceBand | undefined {
+  const bands = tolerances.filter((band) => band.field === ALL_FIELDS);
+  if (!bands.length) return undefined;
+  const merged: ToleranceBand = { field: ALL_FIELDS };
+  for (const kind of TOLERANCE_KINDS) {
+    for (const limit of kind.limits) {
+      const value = bands.map((band) => band[limit]).find((item) => typeof item === "number");
+      if (typeof value === "number") merged[limit] = value;
+    }
+  }
+  return merged;
+}
+
+/** Replaces one kind's limits in the general tolerance; with no limit left there is no general tolerance. */
+export function setGeneralLimits(tolerances: ToleranceBand[], kind: ToleranceKind, limits: ToleranceLimits | null): ToleranceBand[] {
+  const current = generalTolerance(tolerances);
+  const band: ToleranceBand = { field: ALL_FIELDS };
+  for (const item of TOLERANCE_KINDS) {
+    for (const limit of item.limits) {
+      const value = item.value === kind ? limits?.[limit] : current?.[limit];
+      if (typeof value === "number") band[limit] = value;
+    }
+  }
+  const at = tolerances.findIndex((item) => item.field === ALL_FIELDS);
+  const others = tolerances.filter((item) => item.field !== ALL_FIELDS);
+  if (Object.keys(band).length === 1) return others;
+  return at < 0 ? [...others, band] : [...others.slice(0, at), band, ...others.slice(at)];
 }
 
 /** Drops tolerances whose field is no longer mapped, so removing a mapping removes its tolerance. */
@@ -503,7 +617,7 @@ export function describeTolerance(band: ToleranceBand): string {
     band.days ? `±${band.days} day${band.days === 1 ? "" : "s"}` : "",
     band.similarity ? `text at least ${band.similarity}% similar` : "",
   ].filter(Boolean);
-  return `${band.field === ALL_FIELDS ? "Every compared field" : band.field}: ${limits.join(" or ") || "no limit set"}`;
+  return `${band.field === ALL_FIELDS ? "Every compared field" : band.field}: ${limits.join(" or ") || (band.field === ALL_FIELDS ? "no limit set" : "exact (no tolerance)")}`;
 }
 
 /** One sheet rule of the canonical plan sent to the API. */

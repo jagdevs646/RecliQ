@@ -13,6 +13,7 @@ import pandas as pd
 
 from app.reconciliation_engine.cache import compact_identifier, normalize_text
 from app.reconciliation_engine.matching.indexed_matcher import (
+    detect_compared_field_type,
     detect_matcher_type,
     detect_primary_key_type,
     non_empty_values,
@@ -53,6 +54,20 @@ def detect_date_columns(df: pd.DataFrame) -> list[str]:
         if sample and detect_matcher_type(sample, "", "") == "date":
             dates.append(column)
     return dates
+
+
+def detect_numeric_columns(df: pd.DataFrame) -> list[str]:
+    """Columns the engine compares as numbers, so the mapping screen can show
+    their tolerance as an amount. The same test the engine runs on a mapped
+    field; a numeric column named like an ID stays an identifier."""
+    numbers = []
+    for column in df.columns:
+        if str(column).startswith("__"):
+            continue
+        sample = non_empty_values(df[column].head(500), limit=100)
+        if sample and detect_compared_field_type(sample, str(column), str(column)) == "numeric":
+            numbers.append(column)
+    return numbers
 
 
 def _identifier_values(df: pd.DataFrame) -> dict[str, set[str]]:
@@ -153,7 +168,7 @@ def _composite_partner(df1: pd.DataFrame, df2: pd.DataFrame, best: dict, candida
 
 
 def analyze_keys(df1: pd.DataFrame, df2: pd.DataFrame, mappings: Iterable[dict] = ()) -> Dict[str, Any]:
-    """Recommend source/destination key columns and report date columns.
+    """Recommend source/destination key columns and report date and number columns.
 
     Returns ``recommended_key`` (source columns) and
     ``recommended_key_destination`` (the paired destination columns, in order).
@@ -167,6 +182,8 @@ def analyze_keys(df1: pd.DataFrame, df2: pd.DataFrame, mappings: Iterable[dict] 
         "reason": "",
         "date_columns_1": date_columns_1,
         "date_columns_2": date_columns_2,
+        "numeric_columns_1": detect_numeric_columns(df1),
+        "numeric_columns_2": detect_numeric_columns(df2),
     }
     if df1.empty or df2.empty:
         return result

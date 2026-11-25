@@ -124,6 +124,8 @@ class ToleranceBand(BaseModel):
     """
 
     # A compared field (source or destination column), or "*" for every one.
+    # A field band with no limit above 0 means "exact": it keeps that field
+    # out of the "*" band, which otherwise applies to it.
     field: str = "*"
     amount: float | None = Field(default=None, ge=0)
     percent: float | None = Field(default=None, ge=0, le=100)
@@ -135,7 +137,7 @@ class ToleranceBand(BaseModel):
     def check_limits(self) -> "ToleranceBand":
         if not self.field.strip():
             raise ValueError("Choose the compared field a tolerance applies to.")
-        if not any(limit for limit in (self.amount, self.percent, self.days, self.similarity)):
+        if self.field.strip() == "*" and not any(limit for limit in (self.amount, self.percent, self.days, self.similarity)):
             raise ValueError("A tolerance needs an amount, a percentage, a number of days or a text similarity above 0.")
         return self
 
@@ -575,6 +577,9 @@ class AnalysisResponse(BaseModel):
     # Columns whose values are dates; drives the date-only key guard.
     date_columns_1: list[str] = Field(default_factory=list)
     date_columns_2: list[str] = Field(default_factory=list)
+    # Columns compared as numbers; the mapping screen shows their tolerance as an amount.
+    numeric_columns_1: list[str] = Field(default_factory=list)
+    numeric_columns_2: list[str] = Field(default_factory=list)
     recommended_mappings: list[dict]
     # Ready-made setups for this sheet pair (app.reconciliation_engine.presets):
     # each says whether to suggest it and the rule it would fill in.

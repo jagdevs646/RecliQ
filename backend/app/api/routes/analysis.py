@@ -137,6 +137,8 @@ def _analyze_pair(df1, df2) -> dict:
         "key_reason": key_analysis.get("reason", ""),
         "date_columns_1": key_analysis.get("date_columns_1", []),
         "date_columns_2": key_analysis.get("date_columns_2", []),
+        "numeric_columns_1": key_analysis.get("numeric_columns_1", []),
+        "numeric_columns_2": key_analysis.get("numeric_columns_2", []),
         "recommended_mappings": mappings,
         "presets": [gst_preset(df1, df2)],
     }

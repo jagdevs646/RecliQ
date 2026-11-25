@@ -645,7 +645,17 @@ body.is-resizing-column { cursor: col-resize; user-select: none; }
 .rule-tolerance select { flex: none; width: 92px; }
 .rule-tolerance input { flex: 1 1 0; min-width: 0; }
 .rule-tolerance input::placeholder { color: var(--color-text-faint); font-weight: 500; }
-.tolerance-general { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px 6px 13px; border: 1px solid var(--color-border-subtle); border-radius: 7px; background: var(--color-surface); color: var(--color-text-secondary); font-size: var(--font-small); }
+.general-tolerance { display: grid; gap: 10px; padding: 12px 14px; border: 1px solid var(--color-border-subtle); border-radius: 8px; background: var(--color-surface); }
+.general-tolerance-heading strong { color: var(--color-text); font-size: var(--font-small); font-weight: 700; }
+.general-tolerance-heading p { margin: 2px 0 0; color: var(--color-text-muted); font-size: var(--font-small); }
+.general-tolerance-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; }
+.general-tolerance-item { display: grid; align-content: start; gap: 5px; min-width: 0; }
+.general-tolerance-label { color: var(--color-text-muted); font-size: var(--font-caption); font-weight: 700; }
+.general-tolerance-item select, .general-tolerance-item input { min-height: 34px; padding: 0 8px; border: 1px solid var(--color-border-strong); border-radius: 7px; background: var(--color-surface); color: var(--color-text); font-size: var(--font-small); font-weight: 600; }
+.general-tolerance-item input::placeholder { color: var(--color-text-faint); font-weight: 500; }
+.general-tolerance-note { color: var(--color-text-faint); font-size: var(--font-caption); }
+.general-tolerance > .field-hint { margin: 0; }
+@media (max-width: 800px) { .general-tolerance-grid { grid-template-columns: minmax(0, 1fr); } }
 .info-tip { position: relative; display: inline-flex; }
 .info-tip-trigger { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--color-text-muted); cursor: help; }
 .info-tip-trigger:hover, .info-tip-trigger:focus-visible { color: var(--color-primary); }
